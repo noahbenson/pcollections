@@ -67,16 +67,16 @@ class plist(PersistentSequence):
             return self
         new_phamt = phamt.assoc(index, obj)
         return self._new(new_phamt, start)
-    def del(self, index=-1):
+    def delete(self, index=-1):
         """"Returns a copy of the plist with the item at index removed (default
         index: last)."""
         phamt = self._phamt
         n = len(phamt)
         st = self._start
         if n == 0:
-            raise IndexError("del from empty plist")
+            raise IndexError("delete from empty plist")
         if index >= n or index < -n:
-            raise IndexError("plist.del index out of range")
+            raise IndexError("plist.delete index out of range")
         elif index < 0:
             index += n
         thamt = THAMT(phamt)
@@ -129,13 +129,13 @@ class plist(PersistentSequence):
     def __iter__(self):
         st = self._start
         if st >= 0:
-            return map(last, iter(self._phamt))
+            return map(lambda u:u[1], self._phamt)
         else:
             from itertools import chain, islice
             phamt = self._phamt
             n = len(phamt)
             return chain((phamt[k] for k in range(st, 0)),
-                         islice(map(last, iter(phamt)), 0, n + st))
+                         islice(map(lambda u:u[1], phamt), 0, n + st))
     def __len__(self):
         """Returns the length of the plist."""
         return len(self._phamt)

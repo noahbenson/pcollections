@@ -26,7 +26,7 @@ class PersistentSequence(Persistent, Sequence):
     inherited from a superclass of `PersistentSequence`, that class is noted in
     parentheses.
      * `set(index, object)`
-     * `del(index=-1)`
+     * `delete(index=-1)`
      * `append(object)`
      * `prepend(object)`
      * `insert(index, object)`
@@ -39,10 +39,6 @@ class PersistentSequence(Persistent, Sequence):
     Additionally, `PersistentSequence` includes default implementations of the
     following methods, which may or may not be optimal for any particular
     base-class.
-     * `pop(index=-1)`
-     * `remove(value)`
-     * `sort()`
-     * `reverse()`
      * `__str__` (`object`)
      * `__repr__` (`object`)
      * `__eq__` (`object`)
@@ -57,6 +53,11 @@ class PersistentSequence(Persistent, Sequence):
      * `__radd__`
      * `__mul__`
      * __rmul__`
+     * `drop(index=-1)`
+     * `pop(index=-1)`
+     * `remove(value)`
+     * `sort()`
+     * `reverse()`
     """
     # Methods which must be implemented in the children.
     def set(self, index, obj):
@@ -64,7 +65,7 @@ class PersistentSequence(Persistent, Sequence):
         the given object.
         """
         raise NotImplementedError()
-    def del(self, index=-1):
+    def delete(self, index=-1):
         """"Returns a copy of the persistent sequence with the item at index
         removed (default index: last)."""
         raise NotImplementedError()
@@ -82,19 +83,31 @@ class PersistentSequence(Persistent, Sequence):
         raise NotImplementedError()
     # Methods with default implementations that may not or may not have very
     # good performance in specific instance classes.
+    def drop(self, index=-1):
+        """Returns a copy of the persistent sequence with the value at the given
+        index dropped.
+
+        If the index is too large or too small for the size of the sequence,
+        then the sequence is returned as-is. Non-integer indices will still
+        result in raised exceptions."""
+        n = len(self)
+        if index < -n or index >= n:
+            return self
+        else:
+            return self.delete(index)
     def pop(self, index=-1):
-        """"Returns tuple of the value at the given index and a copy of the
+        """Returns tuple of the value at the given index and a copy of the
         persistent sequence with the item at that index removed (default index:
         last)."""
         el = self[index]
-        return (el, self.del(index))
+        return (el, self.delete(index))
     def remove(self, value):
         """Returns a new list with the first occurence of value removed.
 
         Raises ValueError if the value is not present.
         """
         ii = self.index(value)
-        return self.del(ii)
+        return self.delete(ii)
     def sort(self, key=None, reverse=False):
         """Returns a sorted copy of the given persistent sequence."""
         t = self.clear().transient()
@@ -114,7 +127,7 @@ class PersistentSequence(Persistent, Sequence):
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, PersistentSequence)
+        elif not isinstance(other, PersistentSequence):
             return False
         elif len(self) != len(other):
             return False
@@ -317,7 +330,7 @@ class TransientSequence(Transient, MutableSequence):
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, TransientSequence)
+        elif not isinstance(other, TransientSequence):
             return False
         elif len(self) != len(other):
             return False

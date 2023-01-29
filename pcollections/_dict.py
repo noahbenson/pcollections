@@ -4,28 +4,37 @@
 # The persistent dict type for Python.
 # By Noah C. Benson
 
-from collections.abc import (Set,KeysView,ItemsView,ValuesView)
+from collections.abc import (
+    Mapping,
+    MutableMapping,
+    Set,
+    MappingView,
+    KeysView,
+    ItemsView,
+    ValuesView
+)
 
-from phamt           import (PHAMT,THAMT)
+from phamt import (
+    PHAMT,
+    THAMT
+)
 
-from .abc            import (PersistentMapping, TransientMapping)
+from .abc import (
+    PersistentMapping,
+    TransientMapping
+)
 
 
 #===============================================================================
 # pdict
 # The persistent dict type.
 
-class pdict_view(Set):
-    __slots__ = ('_pdict')
-    def __new__(cls, d):
+class PDictView(MappingView):
+    def __init__(cls, d):
         if not isinstance(d, pdict):
             raise ValueError(f"can only make {cls} object from pdict")
-        sup = super(pdict_view,cls)
-        obj = sup.__new__(cls)
-        sup.__setattr__(obj, '_pdict', d)
-        return obj
     def __iter__(self):
-        return map(lambda arg: self._from_kv(arg[1]), self._pdict._els)
+        return map(lambda arg: self._from_kv(arg[1]), self.mapping()._els)
     def __reversed__(self):
         return reversed(list(self.__iter__()))
     def __len__(self):
@@ -36,12 +45,26 @@ class pdict_view(Set):
         raise NotImplementedError()
     def __contains__(self, k):
         raise NotImplementedError()
-class pdict_keys(KeysView, pdict_view):
+class pdict_keys(PDictView):
+    __slots__ = ('_mapping')
+    def __new__(cls, d):
+        sup = super(PDictView, cls)
+        obj = sup.__new__(cls)
+        object.__setattr__(obj, '_mapping', d)
+        return obj
     def _from_kv(self, kv):
         return kv[0]
     def __contains__(self, k):
         return (k in self._pdict)
-class pdict_items(ItemsView, pdict_view):
+class pdict_items(ItemsView, PDictView):
+    __slots__ = ('_mapping')
+    def __new__(cls, d):
+        sup = super(PDictView, cls)
+        obj = sup.__new__(cls)
+        object.__setattr__(obj, '_mapping', d)
+        return obj
+    def mapping(self):
+        return self._pdict
     def _from_kv(self, kv):
         return kv
     def __contains__(self, kv):
@@ -49,7 +72,15 @@ class pdict_items(ItemsView, pdict_view):
             return False
         d = Ellipsis if kv[1] is None else None
         return self._pdict.get(kv[0], d) == kv[1]
-class pdict_values(ValuesView, pdict_view):
+class pdict_values(ValuesView, PDictView):
+    __slots__ = ('_mapping')
+    def __new__(cls, d):
+        sup = super(PDictView, cls)
+        obj = sup.__new__(cls)
+        object.__setattr__(obj, '_Mapping', d)
+        return obj
+    def mapping(self):
+        return self._pdict
     def _from_kv(self, kv):
         return kv[1]
     def __contains__(self, v):
@@ -118,6 +149,8 @@ class pdict(PersistentMapping):
             if k == kk:
                 return True
         return False
+    def __iter__(self):
+        return map(lambda arg: arg[1][0][0], self._els)
     def __getitem__(self, key):
         h = hash(key)
         ii = self._idx.get(h, None)
@@ -137,12 +170,6 @@ class pdict(PersistentMapping):
     def transient(self):
         """Returns a transient copy of the dict in constant time."""
         return tdict._new(THAMT(self._els), THAMT(self._idx), self._top)
-    def keys(self):
-        return pdict_keys(self)
-    def items(self):
-        return pdict_items(self)
-    def values(self):
-        return pdict_values(self)
     def set(self, key, val):
         """Returns a copy of the pdict that maps the given key to the given
         value."""
@@ -172,12 +199,10 @@ class pdict(PersistentMapping):
             new_els = self._els.assoc(self._top, ((key,val), None))
             new_els = new_els.assoc(ii, (kv, self._top))
         return self._new(new_els, new_idx, self._top + 1)
-    def del(self, key, error=False):
+    def delete(self, key):
         """Returns a copy of the pdict that does not include the given key.
 
-        If the key is not in the dict, `del` returns the original pdict unless
-        the optional argument `error` is set to `True`, in which case a
-        `KeyError` is raised.
+        If the key is not in the dict, `delete` raises a `KeyError`.
         """
         # Get the hash and initial index (if there is one).
         h = hash(obj)
@@ -207,11 +232,8 @@ class pdict(PersistentMapping):
             kv_prev = kv
             ii = ii_next
         # If we reach this point, then obj isn't in the set, so we just return
-        # self unchanged, depending on the error option.
-        if error:
-            raise KeyError(key)
-        else:
-            return self
+        # self unchanged.
+        return self
     def clear(self):
         """Returns the empty pdict."""
         return pdict.empty
@@ -266,7 +288,6 @@ pdict.empty = pdict._new(PHAMT.empty, PHAMT.empty, 0)
 # The transient set type.
 
 class tdict_view(Set):
-    __slots__ = ('_tdict', '_version')
     def _iter(self, arg):
         if self._tdict._version > self._version:
             raise RuntimeError(f"{type(self)} changed during iteration")
@@ -292,12 +313,13 @@ class tdict_view(Set):
     def __contains__(self, arg):
         raise NotImplementedError()
 class tdict_keys(KeysView, tdict_view):
-    __slots__ = ()
+    __slots__ = ('_tdict', '_version')
     def _from_kv(self, arg):
         return arg[0]
     def __contains__(self, k):
         return (k in self._tdict)
 class tdict_items(ItemsView, tdict_view):
+    __slots__ = ('_tdict', '_version')
     def _from_kv(self, arg):
         return arg
     def __contains__(self, kv):
@@ -306,6 +328,7 @@ class tdict_items(ItemsView, tdict_view):
         d = Ellipsis if kv[1] is None else None
         return self._tdict.get(kv[0], d) == kv[1]
 class tdict_values(ValuesView, tdict_view):
+    __slots__ = ('_tdict', '_version')
     def _from_kv(self, arg):
         return arg[1]
     def __contains__(self, v):
@@ -331,12 +354,13 @@ class tdict(TransientMapping):
     efficient by reducing the number of allocations required.
     """
     @classmethod
-    def _new(cls, els, idx, top):
+    def _new(cls, els, idx, top, orig=None):
         new_tdict = super(tdict, cls).__new__(cls)
         object.__setattr__(new_tdict, '_els', els)
         object.__setattr__(new_tdict, '_idx', idx)
         object.__setattr__(new_tdict, '_top', top)
         object.__setattr__(new_tdict, '_version', 0)
+        object.__setattr__(new_tdict, '_orig', orig)
         return new_tdict
     @classmethod
     def empty(cls):
@@ -358,12 +382,13 @@ class tdict(TransientMapping):
         # If arg is a tdict or pdict, this is a special case.
         if isinstance(arg, tdict):
             obj = cls._new(THAMT(arg._els.persistent()),
-                                 THAMT(arg._idx.persistent()),
-                                 arg._top)
+                           THAMT(arg._idx.persistent()),
+                           arg._top,
+                           arg._orig)
         elif isinstance(arg, pdict):
-            obj = cls._new(THAMT(arg._els), THAMT(arg._idx), arg._top)
+            obj = cls._new(THAMT(arg._els), THAMT(arg._idx), arg._top, arg)
         else:
-            obj = cls.empty()
+            obj = cls._new(THAMT(PHAMT.empty), THAMT(PHAMT.empty), 0)
             if isinstance(arg, Mapping):
                 arg = arg.items()
             for (k,v) in arg:
@@ -377,7 +402,7 @@ class tdict(TransientMapping):
         raise TypeError("tdict attributes are immutable")
     def __setitem__(self, k, v):
         # Get the hash and initial index (if there is one).
-        h = hash(obj)
+        h = hash(k)
         ii = self._idx.get(h, None)
         # First make sure it's not already in the dict.
         ii_prev = None
@@ -386,6 +411,9 @@ class tdict(TransientMapping):
             if kv[0] == k:
                 if kv[1] is not v:
                     self._els[ii] = ((k,v), ii_next)
+                    # The object has changed, so make sure we aren't tracking
+                    # the original object still.
+                    object.__setattr__(self, '_orig', None)
                 # Note that this does not mandate a version update because it is
                 # not changing the keys.
                 return None
@@ -404,6 +432,7 @@ class tdict(TransientMapping):
             self._els[ii_prev] = (kv_prev, self._top)
         object.__setattr__(self, '_top', self._top + 1)
         object.__setattr__(self, '_version', self._version + 1)
+        object.__setattr__(self, '_orig', None)
     def __str__(self):
         return f"<*{str(dict(self))}*>"
     def __repr__(self):
@@ -435,10 +464,16 @@ class tdict(TransientMapping):
                 return kv[1]
         raise default
     def __iter__(self):
-        return iter(tdict_keys(self))
+        v0 = self._version
+        def _iter_key(arg):
+            if v0 < self._version:
+                raise RuntimeError(f"{type(self)} changed during iteration")
+            else:
+                return arg[1][0][0]
+        return map(_iter_key, self._els)
     def __delitem__(self, key):
         # Get the hash and initial index (if there is one).
-        h = hash(obj)
+        h = hash(key)
         ii = self._idx.get(h, None)
         # First make sure it's not already in the set.
         ii_prev = None
@@ -456,9 +491,10 @@ class tdict(TransientMapping):
                         self._idx[h] = ii_next
                 else:
                     # We're removing from the end or the middle.
-                    self._els.[ii_prev] = (kv_prev, ii_next)
+                    self._els[ii_prev] = (kv_prev, ii_next)
                 del self._els[ii]
                 object.__setattr__(self, '_version', self._version + 1)
+                object.__setattr__(self, '_orig', None)
                 return None
             ii_prev = ii
             kv_prev = kv
@@ -503,6 +539,7 @@ class tdict(TransientMapping):
                     self._els[ii_prev] = (kv_prev, ii_next)
                 del self._els[ii]
                 object.__setattr__(self, '_version', self._version + 1)
+                object.__setattr__(self, '_orig', None)
                 return v
             ii_prev = ii
             kv_prev = kv
@@ -516,10 +553,12 @@ class tdict(TransientMapping):
         """Efficiently returns a persistent (pdict) copy of the tdict."""
         if len(self) == 0:
             return pdict.empty
+        elif self._orig is not None:
+            return self._orig
         else:
             return pdict._new(self._els.persistent(),
-                                    self._idx.persistent(),
-                                    self._top)
+                              self._idx.persistent(),
+                              self._top)
     def keys(self):
         return tdict_keys(self)
     def items(self):

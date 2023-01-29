@@ -24,13 +24,11 @@ class PersistentMapping(Mapping, Persistent):
     inherited from a superclass of `PersistentMapping`, that class is noted in
     parentheses.
      * `__len__` (`Sized`)
+     * `__iter__` (`Iterable`)
      * `__getitem__` (`Mapping`)
-     * `keys()` (`Mapping`)
-     * `items()` (`Mapping`)
-     * `values()` (`Mapping`)
      * `transient()` (`Persistent`)
      * `set(key, value)`
-     * `del(key, error=False)`
+     * `drop(key)`
      * `clear()`
 
     Additionally, `PersistentMapping` includes default implementations of the
@@ -43,15 +41,20 @@ class PersistentMapping(Mapping, Persistent):
      * `__eq__` (`object`)
      * `__ne__` (`object`)
      * `__hash__` (`Hashable`)
-     * `__iter__` (`Iterable`)
      * `__contains__` (`Container`)
      * `get(key, default=None)` (`Mapping`)
+     * `keys()` (`Mapping`)
+     * `items()` (`Mapping`)
+     * `values()` (`Mapping`)
      * `setdefault(key, default=None)` (`MutableMapping`)
      * `popitem()` (`MutableMapping`)
      * `pop(key)` (`MutableMapping`)
      * `copy()` (`Persistent`)
+     * `delete(key)`
      * `remove(value)`
-     * `addall(values)`
+     * `setall(values)`
+     * `dropall(key)`
+     * `deleteall(key)`
      * `discardall(values)`
      * `removeall(values)`
      * `update(map, **kw)`
@@ -61,13 +64,12 @@ class PersistentMapping(Mapping, Persistent):
         """Returns a copy of the pdict that maps the given key to the given
         value."""
         raise NotImplementedError()
-    def del(self, key, error=False):
+    def drop(self, key, error=False):
         """Returns a copy of the persistent mapping that does not include the
         given key.
 
-        If the key is not in the dict, `del` returns the original pdict unless
-        the optional argument `error` is set to `True`, in which case a
-        `KeyError` is raised.
+        If the key is not in the dict, `drop` returns the original persistent
+        mapping.
         """
         raise NotImplementedError()
     def clear(self):
@@ -80,8 +82,6 @@ class PersistentMapping(Mapping, Persistent):
         return f"<{repr(dict(self))}>"
     def __hash__(self):
         return hash(frozenset(map(lambda u: u[1][0], self._els))) + 2
-    def __iter__(self):
-        return iter(self.keys())
     def __contains__(self, k):
         try:
             self[k]
@@ -101,21 +101,26 @@ class PersistentMapping(Mapping, Persistent):
         for (k,v) in zip(keys, vals):
             t[k] = v
         return t.persistent()
-    def delall(self, keys, error=False):
-        """Returns a copy of the pdict that excludes all the keys in the given
-        iterable."""
+    def dropall(self, keys):
+        """Returns a copy of the persistent mapping that excludes all the keys
+        in the given iterable.
+
+        Keys that are not found in the mapping are ignored.
+        """
         t = self.transient()
-        if error:
-            for k in keys:
-                del t[k]
-        else:
-            for k in keys:
-                if k in t:
-                    del t[k]
-        if len(t) == len(self):
-            return self
-        else:
-            return t.persistent()
+        for k in keys:
+            t.drop(k)
+        return t.persistent()
+    def deleteall(self, keys):
+        """Returns a copy of the persistent mapping that excludes all the keys
+        in the given iterable.
+
+        If any key is not found in the mapping, then a KeyError error is raised.
+        """
+        t = self.transient()
+        for k in keys:
+            del t[k]
+        return t.persistent()
     def setdefault(self, key, default=None, /):
         """Returns a copy of the persistent mapping with the key inserted with a
         value of default, if key is not already in the mapping.
@@ -131,7 +136,7 @@ class PersistentMapping(Mapping, Persistent):
         if len(self) == 0:
             raise KeyError("popitem(): persistent mapping is empty")
         kv = next(iter(self.items()))
-        return (kv, self.del(kv[0]))
+        return (kv, self.drop(kv[0]))
     def pop(self, key, *args):
         """Returns a tuple of the value mapped to the given key and a copy of
         the persistent mapping with that key removed. 
@@ -144,20 +149,24 @@ class PersistentMapping(Mapping, Persistent):
             raise TypeError(f"pop expected at most 2 arguments, got {nargs}")
         try:
             val = self[key]
-            return (val, self.discard(val))
+            return (val, self.drop(key))
         except KeyError:
             # It's not here!
             if nargs == 0:
                 raise
             else:
                 return (args[0], self)
-    def update(self, arg, **kw):
+    def update(self, *args, **kw):
         """Returns a copy of the persistent mapping with the key-value pairs in
         the iterable/mapping `arg` and the keyword arguments included.
+
+        Multiple arguments may be provided, but they must each be a mapping or
+        an iterable of items.
         """
         t = self.transient()
-        for (k,v) in (arg.items() if isinstance(arg, Mapping) else arg):
-            t[k] = v
+        for arg in args:
+            for (k,v) in (arg.items() if isinstance(arg, Mapping) else arg):
+                t[k] = v
         for (k,v) in kw.items():
             t[k] = v
         return t.persistent()
@@ -178,10 +187,8 @@ class TransientMapping(MutableMapping, Transient):
     inherited from a superclass of `TransientMapping`, that class is noted in
     parentheses.
      * `__len__` (`Sized`)
+     * `__iter__` (`Iterable`)
      * `__getitem__` (`Mapping`)
-     * `keys()` (`Mapping`)
-     * `items()` (`Mapping`)
-     * `values()` (`Mapping`)
      * `__setitem__` (`MutableMapping`)
      * `__delitem__` (`MutableMapping`)
      * `transient()` (`Persistent`)
@@ -195,14 +202,16 @@ class TransientMapping(MutableMapping, Transient):
      * `__repr__` (`object`)
      * `__eq__` (`object`)
      * `__ne__` (`object`)
-     * `__iter__` (`Iterable`)
      * `__contains__` (`Container`)
      * `get(key, default=None)` (`Mapping`)
+     * `keys()` (`Mapping`)
+     * `items()` (`Mapping`)
+     * `values()` (`Mapping`)
      * `setdefault(key, default=None)` (`MutableMapping`)
      * `popitem()` (`MutableMapping`)
      * `pop()` (`MutableMapping`)
      * `update(map, **kw)` (`MutableMapping`)
-     * `copy()` (`Persistent`)
+     * `copy()` (`Transient`)
     """
     # Methods which must be implemented in the children.
     def clear(self):
@@ -213,8 +222,6 @@ class TransientMapping(MutableMapping, Transient):
         return f"<|{str(dict(self))}|>"
     def __repr__(self):
         return f"<|{repr(dict(self))}|>"
-    def __iter__(self):
-        return iter(self.keys())
     def __contains__(self, k):
         try:
             self[k]
@@ -266,12 +273,16 @@ class TransientMapping(MutableMapping, Transient):
                 raise
             else:
                 return args[0]
-    def update(self, arg, **kw):
-        """Updates the transient mapping with items from the argument and
+    def update(self, *args, **kw):
+        """Updates the transient mapping with items from the arguments and
         options.
+
+        Multiple arguments may be provided, but they must each be either a
+        mapping or an iterable of items.
         """
-        for (k,v) in (arg.items() if isinstance(arg, Mapping) else arg):
-            self[k] = v
+        for arg in args:
+            for (k,v) in (arg.items() if isinstance(arg, Mapping) else arg):
+                self[k] = v
         for (k,v) in kw.items():
             self[k] = v
     def copy(self):
