@@ -7,6 +7,7 @@
 from collections.abc import (Mapping, MutableMapping)
 
 from ._core import (Persistent, Transient)
+from ..util import (seqstr)
 
 
 #===============================================================================
@@ -77,9 +78,12 @@ class PersistentMapping(Mapping, Persistent):
         raise NotImplementedError()
     # Methods that are probably fine for any child-class of PersistentMapping.
     def __str__(self):
-        return f"<{str(dict(self))}>"
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"{{|{seqstr(self, maxlen=60)}|}}"
     def __repr__(self):
-        return f"<{repr(dict(self))}>"
+        #s = repr(dict(self))
+        #return f"{{|{s[1:-1]}|}}"
+        return f"{{|{seqstr(self)}|}}"
     def __hash__(self):
         return hash(frozenset(map(lambda u: u[1][0], self._els))) + 2
     def __contains__(self, k):
@@ -219,9 +223,12 @@ class TransientMapping(MutableMapping, Transient):
         raise NotImplementedError()
     # Methods that are probably fine for any child-class of PersistentMapping.
     def __str__(self):
-        return f"<|{str(dict(self))}|>"
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"{{<{seqstr(self, maxlen=60)}>}}"
     def __repr__(self):
-        return f"<|{repr(dict(self))}|>"
+        #s = repr(dict(self))
+        #return f"{{<{s[1:-1]}>}}"
+        return f"{{|{seqstr(self)}|}}"
     def __contains__(self, k):
         try:
             self[k]

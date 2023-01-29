@@ -52,3 +52,40 @@ def setcmp(set1, set2):
         return -1 # All elements of set1 are in set2, set1 < set2.
     else:
         return 1 # All elements of set2 are in set1, set1 > set2.
+
+def seqstr(seq, maxlen=None, sep=", ", tostr=repr):
+    """Returns a string representation of the given sequence or iterable.
+
+    Mappings are converted to `"key: value"` strings.
+
+    The option `maxlen` may be set to a positive integer to fill in the string
+    with an ellipsis in the case that it goes to long; for exaple,
+    `seqstr(range(10), 12)` would return `"0, 1, 2 ..."`.
+    """
+    if isinstance(seq, Mapping):
+        orig_tostr = tostr
+        tostr = lambda kv: f"{orig_tostr(kv[0])}: {orig_tostr(kv[1])}"
+        seq = seq.items()
+    if maxlen is None:
+        return sep.join(map(tostr, seq))
+    elif not isinstance(maxlen, int) or maxlen < 3:
+        raise TypeError(f"maxlen must be an integer >= 3 or None, not {maxlen}")
+    seplen = len(sep)
+    elllen = 3 + seplen
+    parts = []
+    N = 0
+    for el in seq:
+        s = tostr(el)
+        parts.append(s)
+        n = len(s)
+        N = n if N == 0 else N + seplen + n
+        if N > maxlen:
+            # We've overshot; remove the final element if need-be.
+            while len(parts) > 0 and N + elllen > maxlen:
+                s = parts.pop()
+                N -= len(s) + seplen
+            parts.append("...")
+            break
+    # We successfully added all the elements; we should be able to join them
+    # at this point.
+    return sep.join(parts)

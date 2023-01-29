@@ -9,6 +9,7 @@ from numbers         import (Integral)
 from collections.abc import (Sequence, MutableSequence)
 
 from ._core import (Persistent, Transient)
+from ..util import seqstr
 
 
 #===============================================================================
@@ -121,9 +122,12 @@ class PersistentSequence(Persistent, Sequence):
             t.append(el)
         return t.persistent()
     def __str__(self):
-        return f"<{list(self).__str__()}>"
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"[|{seqstr(self, maxlen=60)}|]"
     def __repr__(self):
-        return f"<{list(self).__repr__()}>"
+        #s = repr(list(self))
+        #return f"[|{s[1:-1]}|]"
+        return f"[|{seqstr(self)}|]"
     def __eq__(self, other):
         if other is self:
             return True
@@ -324,9 +328,12 @@ class TransientSequence(Transient, MutableSequence):
             self[k] = self[kk]
             self[kk] = tmp
     def __str__(self):
-        return f"<|{list(self).__str__()}|>"
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"[<{seqstr(self, maxlen=60)}>]"
     def __repr__(self):
-        return f"<|{list(self).__repr__()}|>"
+        #s = repr(list(self))
+        #return f"[<{s[1:-1]}>]"
+        return f"[|{seqstr(self)}|]"
     def __eq__(self, other):
         if other is self:
             return True

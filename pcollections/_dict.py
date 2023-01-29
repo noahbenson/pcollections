@@ -433,10 +433,6 @@ class tdict(TransientMapping):
         object.__setattr__(self, '_top', self._top + 1)
         object.__setattr__(self, '_version', self._version + 1)
         object.__setattr__(self, '_orig', None)
-    def __str__(self):
-        return f"<*{str(dict(self))}*>"
-    def __repr__(self):
-        return f"<*{repr(dict(self))}*>"
     def __len__(self):
         return len(self._els)
     def __contains__(self, k):

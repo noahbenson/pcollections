@@ -7,7 +7,7 @@
 from collections.abc import (Set, MutableSet)
 
 from ._core import (Persistent, Transient)
-from ..util import (setcmp)
+from ..util import (setcmp, seqstr)
 
 
 #===============================================================================
@@ -79,9 +79,12 @@ class PersistentSet(Set, Persistent):
         raise NotImplementedError()
     # Methods which are probably fine for all child classes.
     def __str__(self):
-        return f"<{str(set(self))}>"
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"{{|{seqstr(self, maxlen=60)}|}}"
     def __repr__(self):
-        return f"<{repr(set(self))}>"
+        #s = repr(set(self))
+        #return f"{{|{s[1:-1]}|}}"
+        return f"{{|{seqstr(self)}|}}"
     def __eq__(self, other):
         return setcmp(self, other) == 0
     def __ne__(self, other):
@@ -285,9 +288,12 @@ class TransientSet(MutableSet, Transient):
         raise NotImplementedError()
     # Methods which are probably fine for all child classes.
     def __str__(self):
-        return f"<|{str(set(self))}|>"
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"{{<{seqstr(self, maxlen=60)}>}}"
     def __repr__(self):
-        return f"<|{repr(set(self))}|>"
+        #s = repr(dict(self))
+        #return f"{{<{s[1:-1]}>}}"
+        return f"{{|{seqstr(self)}|}}"
     def __eq__(self, other):
         return setcmp(self, other) == 0
     def __ne__(self, other):

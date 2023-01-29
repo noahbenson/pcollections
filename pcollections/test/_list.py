@@ -5,7 +5,8 @@
 # By Noah C. Benson
 
 from unittest import TestCase
-from .._list import plist
+
+from .._list import (plist, tlist)
 
 class TestPList(TestCase):
     """Tests for the `plist` class.
@@ -20,6 +21,9 @@ class TestPList(TestCase):
         # Cannot set-item.
         with self.assertRaises(TypeError):
             l[0] = 10
+        # Cannot del-item.
+        with self.assertRaises(TypeError):
+            del l[0]
         # Cannot set-attr.
         with self.assertRaises(TypeError):
             l._start = -10

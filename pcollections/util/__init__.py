@@ -7,4 +7,4 @@
 """Utility functions for persistent and transient collections.
 """
 
-from ._core import setcmp
+from ._core import (setcmp, seqstr)

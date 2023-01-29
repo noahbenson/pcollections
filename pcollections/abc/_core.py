@@ -25,6 +25,8 @@ class Transient:
     def persistent(self):
         """Efficiently returns a persistent copy of the transient object."""
         raise NotImplementedError()
+    # Implementations that are probably fine for most children.
     def copy(self):
         """Returns a copy of the transient object."""
-        raise NotImplementedError()
+        return self.persistent().transient()
+    
