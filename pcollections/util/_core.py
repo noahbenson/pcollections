@@ -4,7 +4,16 @@
 # Implementation of the core pcollections utilities.
 # By Noah C. Benson
 
-from collections.abc import Set
+from collections.abc import (
+    Sequence, MutableSequence,
+    Set, MutableSet,
+    Mapping, MutableMapping,
+    Sized, Container
+)
+
+
+#===============================================================================
+# Utility Functions
 
 def setcmp(set1, set2):
     """Compares one set to another.
@@ -20,8 +29,8 @@ def setcmp(set1, set2):
     if not isinstance(set2, Set):
         msg = f"unsupported operand type for compare: {type(set2)}"
         raise TypeError(msg)
-    n1 = len(self.els)
-    n2 = len(other)
+    n1 = len(set1)
+    n2 = len(set2)
     (a,na,b,nb) = (set1,n1, set2,n2) if n1 < n2 else (set2,n2, set1,n1)
     isects = 0
     for el in iter(a):
@@ -40,7 +49,6 @@ def setcmp(set1, set2):
     elif n1 == n2:
         return 0 # All elements of both intersect; the sets are equal.
     elif n1 < n2:
-        return -1 # All elements of self are in other, self < other.
+        return -1 # All elements of set1 are in set2, set1 < set2.
     else:
-        return 1 # All elements of other are in self, self > other.
-
+        return 1 # All elements of set2 are in set1, set1 > set2.
