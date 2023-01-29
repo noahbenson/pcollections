@@ -7,6 +7,7 @@
 from collections.abc import (Set, MutableSet)
 
 from ._core import (Persistent, Transient)
+from ..util import (setcmp)
 
 
 #===============================================================================
