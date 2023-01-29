@@ -4,15 +4,17 @@
 # The persistent list type for Python.
 # By Noah C. Benson
 
-from phamt           import (PHAMT,THAMT)
-from collections.abc import (Sequence,Collection,Reversible,Iterable,Hashable)
+from itertools import (chain, islice)
 
-def first(obj):
-    """Returns the first element of an object."""
-    try: return obj[0]
-    except TypeError: pass
-    return next(iter(obj))
-class plist(Sequence):
+from phamt import (PHAMT,THAMT)
+
+from .abc import (PersistentSequence, TransientSequence)
+
+
+#===============================================================================
+# plist
+
+class plist(PersistentSequence):
     """A persistent list type similar to `list`.
 
     `plist()` returns an empty `plist`.
@@ -20,6 +22,7 @@ class plist(Sequence):
     `plist(iterable)` returns a `plist` containing the elements in `iterable`.
     """
     empty = None
+    __slots__ = ("_phamt", "_start", "_hashcode")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("plist() takes no keyword arguments")
@@ -28,6 +31,11 @@ class plist(Sequence):
         elif n == 0: return plist.empty
         else: raise TypeError(f"plist expects at most 1 argument, got {n}")
         arg = args[0]
+        # If arg is a tlist, this is a special case.
+        if isinstance(arg, tlist):
+            return cls._new(arg._thamt.persistent(), arg._start)
+        elif isinstance(arg, plist):
+            return arg
         # We just want to build a PHAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)
         for (ii,val) in enumerate(iter(arg)):
@@ -36,20 +44,101 @@ class plist(Sequence):
         # If it's empty, we can just return the empty plist.
         if len(phamt) == 0: return plist.empty
         # Otherwise, we make a new plist and give it this phamt.
-        new_plist = Sequence.__new__(plist)
-        object.__setattr__(new_plist, '_phamt', phamt)
-        object.__setattr__(new_plist, '_start', 0)
-        return new_plist
-    def _new_plist(self, phamt, start):
-        cls = type(self)
+        return cls._new(phamt, 0)
+    @classmethod
+    def _new(cls, phamt, start):
         new_plist = super(plist, cls).__new__(cls)
         object.__setattr__(new_plist, '_phamt', phamt)
         object.__setattr__(new_plist, '_start', start)
+        object.__setattr__(new_plist, '_hashcode', None)
         return new_plist
-    def __setattr__(self, k, v):
-        raise TypeError("plist is immutable")
-    def __setitem__(self, k, v):
-        raise TypeError("plist is immutable")
+    def set(self, index, obj):
+        """Returns a copy of the list with the given index set to the given
+        object."""
+        start = self._start
+        phamt = self._phamt
+        n = len(phamt)
+        if index < -n or index >= n:
+            raise IndexError("plist index out of range")
+        if index < 0:
+            index += n
+        index += start
+        if phamt.get(index) is obj:
+            return self
+        new_phamt = phamt.assoc(index, obj)
+        return self._new(new_phamt, start)
+    def del(self, index=-1):
+        """"Returns a copy of the plist with the item at index removed (default
+        index: last)."""
+        phamt = self._phamt
+        n = len(phamt)
+        st = self._start
+        if n == 0:
+            raise IndexError("del from empty plist")
+        if index >= n or index < -n:
+            raise IndexError("plist.del index out of range")
+        elif index < 0:
+            index += n
+        thamt = THAMT(phamt)
+        if n - index < index:
+            for ii in range(index + st, n + st - 1):
+                thamt[ii] = phamt[ii + 1]
+            del thamt[n + st - 1]
+        else:
+            for ii in range(st, index + st):
+                thamt[ii + 1] = phamt[ii]
+            del thamt[st]
+            st += 1
+        return self._new(thamt.persistent(), st)
+    def append(self, obj):
+        """Returns a new list with object appended."""
+        phamt = self._phamt
+        n = len(phamt)
+        new_phamt = phamt.assoc(self.start + n, obj)
+        return self._new(new_phamt, self._start)
+    def prepend(self, obj):
+        """Returns a new list with object prepended."""
+        phamt = self._phamt
+        n = len(phamt)
+        new_start = self._start - 1
+        new_phamt = phamt.assoc(new_start, obj)
+        return self._new(new_phamt, new_start)
+    def insert(self, index, obj):
+        """Returns a new plist with object inserted before index."""
+        start = self._start
+        phamt = self._phamt
+        n = len(phamt)
+        if   index < -n: index = -n
+        elif index > n:  index = n
+        if   index < 0:  index += n
+        thamt = THAMT(phamt)
+        if n - index < index:
+            for ii in range(index + start, n + start):
+                thamt[ii + 1] = phamt[ii]
+            thamt[index + start] = obj
+        else:
+            for ii in range(start, index + start):
+                thamt[ii - 1] = phamt[ii]
+            start -= 1
+            thamt[index + start] = obj
+        phamt = thamt.persistent()
+        return self._new(phamt, start)
+    def clear(self):
+        """Returns the empty plist."""
+        return plist.empty
+    def __iter__(self):
+        st = self._start
+        if st >= 0:
+            return map(last, iter(self._phamt))
+        else:
+            from itertools import chain, islice
+            phamt = self._phamt
+            n = len(phamt)
+            return chain((phamt[k] for k in range(st, 0)),
+                         islice(map(last, iter(phamt)), 0, n + st))
+    def __len__(self):
+        """Returns the length of the plist."""
+        return len(self._phamt)
     def __getitem__(self, k):
         st = self._start
         phamt = self._phamt
@@ -68,222 +157,167 @@ class plist(Sequence):
             thamt = THAMT(PHAMT.empty)
             for (ii,jj) in enumerate(range(start, stop, step)):
                 thamt[ii] = phamt[jj]
-            return self._new_plist(thamt.persistent(), 0)
+            return self._new(thamt.persistent(), 0)
         elif k >= n or k < -n:
             raise IndexError("plist index out of range")
         elif k < 0:
             k += n
         return phamt[k + st]
-    def __len__(self):
-        """Returns the length of the plist."""
-        return len(self._phamt)
-    def append(self, obj):
-        """Returns a new list with object appended."""
-        phamt = self._phamt
-        n = len(phamt)
-        new_phamt = phamt.assoc(n, obj)
-        return self._new_plist(new_phamt, self._start)
-    def prepend(self, obj):
-        """Returns a new list with object prepended."""
-        phamt = self._phamt
-        n = len(phamt)
-        new_start = self._start - 1
-        new_phamt = phamt.assoc(new_start, obj)
-        return self._new_plist(new_phamt, new_start)
-    def clear(self):
-        """Returns the empty plist."""
-        return plist.empty
-    def copy(self):
-        """Returns the plist (persistent lists needn't be copied)."""
-        return self
-    def count(self, value):
-        """Returns the number of occurences of value."""
-        n = 0
-        for (k,obj) in self._phamt:
-            if obj == value: n += 1
-        return n
-    def extend(self, iterable):
-        """Return a new list with the iterables appended."""
-        cls = type(self)
-        phamt = self._phamt
-        thamt = THAMT(phamt)
-        n = len(phamt)
-        for (ii,val) in enumerate(iter(iterable), start=n):
-            thamt[ii] = val
-        phamt = thamt.persistent()
-        return self._new_plist(phamt, self._start)
-    def intend(self, iterable):
-        """Return a new list with the iterables prepended."""
-        cls = type(self)
-        phamt = self._phamt
-        start = self._start
-        thamt = THAMT(phamt)
-        n = len(phamt)
-        if not isinstance(iterable, (list,plist,tuple)):
-            iterable = list(iter(iterable))
-        m = len(iterale)
-        for (ii,val) in enumerate(iter(iterable), start=(start - m)):
-            thamt[ii] = val
-        phamt = thamt.persistent()
-        return self._new_plist(phamt, start - m)
-    def index(self, value, start=0, stop=None):
-        """Returns firrst index of value.
+    def transient(self):
+        """Efficiently copes the plist into a tlist and returns the tlist."""
+        return tlist._new(THAMT(self._phamt), self._start)
+    # We redefine the hash function in order to use the _hashcode member.
+    def __hash__(self):
+        if self._hashcode is None:
+            h = PersistentSequence.__hash__(self)
+            object.__setattr__(self, '_hashcode', h)
+        return self._hashcode
+# Setup the plist.empty static member.
+plist.empty = plist._new(PHAMT.empty, 0)
 
-        Raises ValueError if value is not present.
-        """
-        phamt = self._phamt
-        st = self._start
-        n = len(phamt)
-        if stop is None: stop = n+1
-        if   start <= -n: start = 0
-        elif start < 0:   start += n
-        elif start > n:   start = n
-        if   stop <= -n: stop = 0
-        elif stop < 0:   stop += n
-        elif stop > n:   stop = n
-        start += st
-        stop += st
-        for (ii,val) in phamt:
-            if   ii < start:   continue
-            elif ii >= stop:   break
-            elif val == value: return ii - st
-        raise ValueError(f'{value} is not in plist')
-    def insert(self, index, obj):
-        """Returns a new plist with object inserted before index."""
-        start = self._start
-        phamt = self._phamt
-        n = len(phamt)
-        if   index < -n: index = -n
-        elif index > n:  index = n
-        if   index < 0:  index += n
-        thamt = THAMT(phamt)
-        thamt[index + start] = obj
-        #here
-        if n - index < index:
-            print(' - ', index, start, n)
-            for ii in range(index + start, n + start):
-                thamt[ii + 1] = phamt[ii]
-        else:
-            print(' * ', index, start, n)
-            for ii in range(start, index + start + 1):
-                thamt[ii - 1] = phamt[ii]
-            start -= 1
-        phamt = thamt.persistent()
-        return self._new_plist(phamt, start)
-    def pop(self, index=-1):
-        "Returns a new plist with the item at index removed (default: last)."
-        phamt = self._phamt
-        n = len(phamt)
-        st = self._start
-        if index >= n or index < -n:
-            raise IndexError("plist.pop index out of range")
-        elif index < 0:
-            index += n
-        thamt = THAMT(phamt)
-        if n - index < index:
-            for ii in range(index + st, n + st - 1):
-                thamt[ii] = phamt[ii + 1]
-            del thamt[ii + st]
-        else:
-            for ii in range(st, index + st):
-                thamt[ii + 1] = phamt[ii]
-            del thamt[st]
-            st += 1
-        return self._new_plist(thamt.persistent(), st)
-    def remove(self, value):
-        """Returns a new list with the first occurene of value removed.
 
-        Raises ValueError if the value is not present.
-        """
-        phamt = self._phamt
-        n = len(phamt)
-        st = self._start
-        for (k,val) in phamt:
-            if val == value:
-                return self.pop(k - st)
-        raise ValueError(f"plist.remove(x): x not in plist")
-    def reverse(self):
-        """Returns a plist that is a reversed copy."""
-        phamt = self._phamt
+#===============================================================================
+# tlist
+# The transient list type.
+
+class tlist(TransientSequence):
+    """A transient list type, similar to `list`, for mutating persistent lists.
+
+    `tlist()` returns an empty `tlist`.
+
+    `tlist(iterable)` returns a `tlist` containing the elements in `iterable`.
+
+    `tlist(p)` returns `tlist` equivalent to the `plist` p in constnat time.
+    The returned `tlist` object can be efficiently mutated in-place then
+    efficiently converted into a persistent list by calling the `persistent()`
+    method.
+    """
+    @classmethod
+    def empty(cls):
+        "Returns an empty tlist."
+        return cls._new(THAMT(PHAMT.empty), 0)
+    __slots__ = ("_thamt", "_start")
+    def __new__(cls, *args, **kw):
+        if len(kw) > 0:
+            raise TypeError("tlist() takes no keyword arguments")
+        n = len(args)
+        if   n == 1: pass
+        elif n == 0: return cls.empty()
+        else: raise TypeError(f"tlist expects at most 1 argument, got {n}")
+        arg = args[0]
+        # If this is a plist, we know what to do with it.
+        if isinstance(arg, plist):
+            return cls._new(THAMT(arg._phamt), arg._start)
+        # We just want to build a THAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)
-        n = len(phamt)
-        for (k,val) in phamt:
-            thamt[n - k - 1] = val
-        return self._new_plist(thamt.persistent(), 0)
-    def sort(self, key=None, reverse=False):
-        """Returns a sorted copy of the given plist."""
-        return plist(sorted(self, key=key, reverse=reverse))
-    def __str__(self):
-        return f"<{list(self).__str__()}>"
-    def __repr__(self):
-        return f"<{list(self).__repr__()}>"
-    def __add__(self, obj):
-        if isinstance(obj, list):
-            if len(obj) == 0: return self
-            else: return self.extend(obj)
-        elif isinstance(obj, plist):
-            if   len(obj) == 0:        return self
-            elif len(self) == 0:       return obj
-            elif len(obj) > len(self): return obj.intend(self)
-            else:                      return self.extend(obj)
+        for (ii,val) in enumerate(iter(arg)):
+            thamt[ii] = val
+        # We make a new tlist and give it this phamt.
+        return cls._new(thamt, 0)
+    @classmethod
+    def _new(cls, thamt, start):
+        new_tlist = super(tlist, cls).__new__(cls)
+        object.__setattr__(new_tlist, '_thamt', thamt)
+        object.__setattr__(new_tlist, '_start', start)
+        return new_tlist
+    def clear(self):
+        """Clears all elements from the tlist."""
+        self._start = 0
+        self._thamt = THAMT(PHAMT.empty)
+    def persistent(self):
+        """Efficiently copies the tlist into a plist and returns the plist."""
+        if len(self._thamt) == 0:
+            return plist.empty
         else:
-            msg = f"unsuppoorted operand type for +: '{type(obj)}' and 'plist'"
-            raise TypeError(msg)
-    def __radd__(self, obj):
-        if isinstance(obj, list):
-            return obj + list(self)
-        elif isinstance(obj, plist):
-            if   len(obj) == 0:        return self
-            elif len(self) == 0:       return obj
-            if   len(obj) > len(self): return obj.extend(self)
-            else:                      return self.intend(obj)
-        else:
-            msg = f"unsuppoorted operand type for +: '{type(obj)}' and 'plist'"
-            raise TypeError(msg)
-    def __mul__(self, value):
-        from numbers import Integral
-        if not isinstance(value, Integral):
-            msg = f"can't multiply sequence by non-int of type '{type(value)}'"
-            raise ValueError(msg)
-        reps = int(value)
-        if reps < 0: reps = 0
-        if reps == 0: return plist.empty
-        elif reps == 1: return self
-        phamt = self._phamt
-        n = len(phamt)
-        start = self._start
-        thamt = THAMT(phamt)
-        for ii0 in range(n, n*reps, n):
-            for (ii,v) in enumerate(self.__iter__()):
-                thamt[ii + ii0] = v
-        return self._new_plist(thamt.persistent(), start)
-    def __rmul__(self, value):
-        return self.__mul__(value)
+            return plist._new(self._thamt.persistent(), self._start)
     def __iter__(self):
         st = self._start
         if st >= 0:
-            return map(first, iter(self._phamt))
+            return map(lambda u:u[1], iter(self._thamt))
         else:
-            from itertools import chain, islice
-            phamt = self._phamt
-            n = len(phamt)
-            return chain((phamt[k] for k in range(st, 0)),
-                         islice(map(first, iter(phamt)), 0, n + st))
-    def __eq__(self, other):
-        if other is self: return True
-        if len(self) != len(other): return False
-        if type(self) != type(other): return False
-        for (a,b) in zip(self.__iter__(), other.__iter__()):
-            if a != b: return False
-        return True
-    def __hash__(self):
-        return hash(tuple(self))
-# Setup the plist.empty static member.
-plist.empty = Sequence.__new__(plist)
-object.__setattr__(plist.empty, '_phamt', PHAMT.empty)
-object.__setattr__(plist.empty, '_start', 0)
-# Register the plist as members of various types.
-Collection.register(plist)
-Reversible.register(plist)
-Iterable.register(plist)
-Hashable.register(plist)
+            th = self._thamt
+            n = len(th)
+            return chain((th[k] for k in range(st, 0)),
+                         islice(map(lambda u:u[1], iter(th)), 0, n + st))
+    def __len__(self):
+        """Returns the length of the tlist."""
+        return len(self._thamt)
+    def __getitem__(self, k):
+        st = self._start
+        thamt = self._thamt
+        n = len(phamt)
+        if isinstance(k, slice):
+            (start,stop,step) = (k.start or 0, k.stop or n, k.step or 1)
+            if   start <= -n: start = 0
+            elif start < 0:   start += n
+            elif start > n:   start = n
+            if   stop <= -n: stop = 0
+            elif stop < 0:   stop += n
+            elif stop > n:   stop = n
+            if st != 0:
+                start += st
+                stop += st
+            new_thamt = THAMT(PHAMT.empty)
+            for (ii,jj) in enumerate(range(start, stop, step)):
+                new_thamt[ii] = thamt[jj]
+            return self._new(new_thamt, 0)
+        elif k >= n or k < -n:
+            raise IndexError("tlist index out of range")
+        elif k < 0:
+            k += n
+        return thamt[k + st]
+    def __setitem__(self, k, v):
+        n = len(self._thamt)
+        if k >= n or k < -n:
+            raise IndexError(k)
+        elif k < 0:
+            k += n
+        self._thamt[k + self._start] = v
+    def __delitem__(self, index=-1):
+        """Remove and return item at index (default last).
+
+        Raises IndexError if list is empty or index is out of range."""
+        st = self._start
+        th = self._thamt
+        n = len(th)
+        if index >= n or index < -n:
+            raise IndexError(f"{type(self)} assignment index out of range")
+        elif index < 0:
+            index += n
+        if n - index < index:
+            for ii in range(index + st, n + st - 1):
+                th[ii] = tt[ii + 1]
+            del th[n + st - 1]
+        else:
+            for ii in range(index + st - 1, st, -1):
+                th[ii] = th[ii - 1]
+            del th[st]
+            self._start += 1
+    def append(self, obj):
+        """Appends object to the end of the list."""
+        thamt = self._thamt
+        n = len(thamt)
+        thamt[n + self._start] = obj
+    def prepend(self, obj):
+        """Prepends object to the beginning of the tlist."""
+        thamt = self._thamt
+        n = len(phamt)
+        self._start -= 1
+        thamt[self._start] = obj
+    def insert(self, index, obj):
+        """Inserts the given object before the given index."""
+        st = self._start
+        th = self._thamt
+        n = len(th)
+        if   index < -n: index = -n
+        elif index > n:  index = n
+        if   index < 0:  index += n
+        if n - index < index:
+            for ii in range(n + st, index + st, -1):
+                th[ii] = th[ii - 1]
+            th[index + st] = obj
+        else:
+            for ii in range(st - 1, index + st - 1):
+                th[ii] = th[ii + 1]
+            self._start -= 1
+            th[index + self._start] = obj

@@ -1,0 +1,528 @@
+# -*- coding: utf-8 -*-
+################################################################################
+# pcollections/_dict.py
+# The persistent dict type for Python.
+# By Noah C. Benson
+
+from collections.abc import (Set,KeysView,ItemsView,ValuesView)
+
+from phamt           import (PHAMT,THAMT)
+
+from .abc            import (PersistentMapping, TransientMapping)
+
+
+#===============================================================================
+# pdict
+# The persistent dict type.
+
+class pdict_view(Set):
+    __slots__ = ('_pdict')
+    def __new__(cls, d):
+        if not isinstance(d, pdict):
+            raise ValueError(f"can only make {cls} object from pdict")
+        sup = super(pdict_view,cls)
+        obj = sup.__new__(cls)
+        sup.__setattr__(obj, '_pdict', d)
+        return obj
+    def __iter__(self):
+        return map(lambda arg: self._from_kv(arg[1]), self._pdict._els)
+    def __reversed__(self):
+        return reversed(list(self.__iter__()))
+    def __len__(self):
+        return len(self._pdict)
+    # Abstract methods that must be overloaded by the concrete view classes
+    # below.
+    def _from_kv(self, kv):
+        raise NotImplementedError()
+    def __contains__(self, k):
+        raise NotImplementedError()
+class pdict_keys(KeysView, pdict_view):
+    def _from_kv(self, kv):
+        return kv[0]
+    def __contains__(self, k):
+        return (k in self._pdict)
+class pdict_items(ItemsView, pdict_view):
+    def _from_kv(self, kv):
+        return kv
+    def __contains__(self, kv):
+        if not isinstance(kv, tuple) or len(kv) != 2:
+            return False
+        d = Ellipsis if kv[1] is None else None
+        return self._pdict.get(kv[0], d) == kv[1]
+class pdict_values(ValuesView, pdict_view):
+    def _from_kv(self, kv):
+        return kv[1]
+    def __contains__(self, v):
+        for (kv,_) in self._els:
+            if kv[1] == v:
+                return True
+        return False
+class pdict(PersistentMapping):
+    """A persistent dict type similar to `dict`.
+
+    `pdict()` returns the empty `pdict`.
+
+    `pdict(iterable)` returns a `pdict` containing the elements in `iterable`,
+    which must be `(key, value)` tuples.
+
+    `pdict(mapping)` returns a `pdict` containing the key-value pairs in the
+    given mapping.
+    """
+    empty = None
+    @classmethod
+    def _new(cls, els, idx, top):
+        new_pdict = super(pdict, cls).__new__(cls)
+        object.__setattr__(new_pdict, '_els', els)
+        object.__setattr__(new_pdict, '_idx', idx)
+        object.__setattr__(new_pdict, '_top', top)
+        object.__setattr__(new_pdict, '_hashcode', None)
+        return new_pdict
+    __slots__ = ("_els", "_idx", "_top", "_hashcode")
+    def __new__(cls, *args, **kw):
+        n = len(args)
+        if n == 1:
+            arg = args[0]
+        elif n == 0:
+            if len(kw) == 0:
+                return pdict.empty
+            else:
+                arg = kw
+                kw = {}
+        else:
+            raise TypeError(f"pdict expects at most 1 argument, got {n}")
+        # If any keyword options were given, we route through tdict.
+        if not kw:
+            # If arg is a tdict and no keyword arguments have been given, this
+            # is a special case.
+            if isinstance(arg, tdict):
+                return cls._new(arg._els.persistent(),
+                                      arg._idx.persistent(),
+                                      arg._top)
+            # Also, if it's a pdict, we can just return it as-is.
+            if isinstance(arg, pdict):
+                return arg
+        # For anything else, however, we just route this through tdict.
+        return tdict(arg, **kw).persistent()
+    def __hash__(self):
+        if self._hashcode is None:
+            h = PersistentMapping.__hash__(self)
+            object.__setattr__(self._hashcode, h)
+        return self._hashcode
+    def __len__(self):
+        return len(self._els)
+    def __contains__(self, k):
+        h = hash(el)
+        ii = self._idx.get(h, None)
+        while ii is not None:
+            ((kk,vv),ii) = self._els[ii]
+            if k == kk:
+                return True
+        return False
+    def __getitem__(self, key):
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        while ii is not None:
+            (kv,ii) = self._els[ii]
+            if key == kv[0]:
+                return kv[1]
+        raise KeyError(key)
+    def get(self, key, default=None, /):
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        while ii is not None:
+            (kv,ii) = self._els[ii]
+            if key == kv[0]:
+                return kv[1]
+        return default
+    def transient(self):
+        """Returns a transient copy of the dict in constant time."""
+        return tdict._new(THAMT(self._els), THAMT(self._idx), self._top)
+    def keys(self):
+        return pdict_keys(self)
+    def items(self):
+        return pdict_items(self)
+    def values(self):
+        return pdict_values(self)
+    def set(self, key, val):
+        """Returns a copy of the pdict that maps the given key to the given
+        value."""
+        # Get the hash and initial index (if there is one).
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        if ii is None:
+            # The object's hash is not here yet, so we can append to els and
+            # insert it into idx.
+            new_els = self._els.assoc(self._top, ((key, val), None))
+            new_idx = self._idx.assoc(h, self._top)
+        else:
+            # First make sure it's not already in the dict.
+            while ii is not None:
+                (kv,ii_next) = self._els[ii]
+                (k,v) = kv
+                if key == k:
+                    # It is in the dict; either it's exactly in the dict or we
+                    # replace it.
+                    if val is v:
+                        return self
+                    else:
+                        new_els = self._els.assoc(ii, ((key,val), ii_next))
+                        return self._new(new_els, self._idx, self._top)
+            # If we reach this point, we can add the object to the end of the
+            # list.
+            new_els = self._els.assoc(self._top, ((key,val), None))
+            new_els = new_els.assoc(ii, (kv, self._top))
+        return self._new(new_els, new_idx, self._top + 1)
+    def del(self, key, error=False):
+        """Returns a copy of the pdict that does not include the given key.
+
+        If the key is not in the dict, `del` returns the original pdict unless
+        the optional argument `error` is set to `True`, in which case a
+        `KeyError` is raised.
+        """
+        # Get the hash and initial index (if there is one).
+        h = hash(obj)
+        ii = self._idx.get(h, None)
+        # First make sure it's not already in the set.
+        ii_prev = None
+        kv_prev = None
+        while ii is not None:
+            (kv,ii_next) = self._els[ii]
+            (k,v) = kv
+            if key == k:
+                # We remove this entry!
+                if ii_prev is None:
+                    # We're removing from the front of the list.
+                    if ii_next is None:
+                        new_idx = self._idx.dissoc(h)
+                    else:
+                        new_idx = self._idx.assoc(h, ii_next)
+                    new_els = self._els
+                else:
+                    # We're removing from the end or the middle.
+                    new_idx = self._idx
+                    new_els = self._els.assoc(ii_prev, (kv_prev, ii_next))
+                new_els = new_els.dissoc(ii)
+                return self._new(new_els, new_idx, self._top)
+            ii_prev = ii
+            kv_prev = kv
+            ii = ii_next
+        # If we reach this point, then obj isn't in the set, so we just return
+        # self unchanged, depending on the error option.
+        if error:
+            raise KeyError(key)
+        else:
+            return self
+    def clear(self):
+        """Returns the empty pdict."""
+        return pdict.empty
+    # We include reimplements for some of these because we can improve them in
+    # some non-trivial way.
+    def pop(self, key, *args):
+        """Returns a tuple of the value mapped to the given key and a copy of
+        the pdict with that key removed. 
+
+        If the key is not found, the second argument is returned, if given,
+        otherwise, a `KeyError` is raised.
+        """
+        nargs = len(args)
+        if nargs > 1:
+            raise TypeError(f"pop expected at most 2 arguments, got {nargs}")
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        ii_prev = None
+        kv_prev = None
+        while ii is not None:
+            (kv,ii_next) = self._els[ii]
+            (k,v) = kv
+            if key == k:
+                # We remove this entry!
+                if ii_prev is None:
+                    # We're removing from the front of the list.
+                    if ii_next is None:
+                        new_idx = self._idx.dissoc(h)
+                    else:
+                        new_idx = self._idx.assoc(h, ii_next)
+                    new_els = self._els
+                else:
+                    # We're removing from the end or the middle.
+                    new_idx = self._idx
+                    new_els = self._els.assoc(ii_prev, (kv_prev, ii_next))
+                new_els = new_els.dissoc(ii)
+                return (v, self._new(new_els, new_idx, self._top))
+            ii_prev = ii
+            kv_prev = kv
+            ii = ii_next
+        # It's not here!
+        if nargs == 0:
+            raise KeyError(key)
+        else:
+            return (args[0], self)
+# Make the empty pdict.
+pdict.empty = pdict._new(PHAMT.empty, PHAMT.empty, 0)
+
+
+#===============================================================================
+# tdict
+# The transient set type.
+
+class tdict_view(Set):
+    __slots__ = ('_tdict', '_version')
+    def _iter(self, arg):
+        if self._tdict._version > self._version:
+            raise RuntimeError(f"{type(self)} changed during iteration")
+        else:
+            return self._from_kv(arg[1])
+    def __new__(cls, d):
+        if not isinstance(d, tdict):
+            raise ValueError("can only make tdict_keys object from tdict")
+        obj = super(tdict_keys,cls).__new__(cls)
+        super(tdict_keys,cls).__setattr__(obj, '_tdict', d)
+        super(tdict_keys,cls).__setattr__(obj, '_version', d._version)
+        return obj
+    def __iter__(self):
+        return map(self._iter, self._tdict._els)
+    def __reversed__(self):
+        return reversed(list(self.__iter__()))
+    def __len__(self):
+        return len(self._tdict)
+    # These are the abstract methods that need to be implemented in the actual
+    # view classes below.
+    def _from_kv(kv):
+        raise NotImplementedError()
+    def __contains__(self, arg):
+        raise NotImplementedError()
+class tdict_keys(KeysView, tdict_view):
+    __slots__ = ()
+    def _from_kv(self, arg):
+        return arg[0]
+    def __contains__(self, k):
+        return (k in self._tdict)
+class tdict_items(ItemsView, tdict_view):
+    def _from_kv(self, arg):
+        return arg
+    def __contains__(self, kv):
+        if not isinstance(kv, tuple) or len(kv) != 2:
+            return False
+        d = Ellipsis if kv[1] is None else None
+        return self._tdict.get(kv[0], d) == kv[1]
+class tdict_values(ValuesView, tdict_view):
+    def _from_kv(self, arg):
+        return arg[1]
+    def __contains__(self, v):
+        for (kv,_) in self._els:
+            if kv[1] == v:
+                return True
+        return False
+class tdict(TransientMapping):
+    """A transient dict type similar to `dict` for mutating persistent dicts.
+
+    `tdict()` returns the empty `tdict`.
+
+    `tdict(iterable)` returns a `tdict` containing the key-value pairs in
+    `iterable`.
+
+    `tdict(p)` efficiently returns a transient copy of the persistent dict `p`.
+
+    The interfaces for `dict` and `tdict` are nearly identical, but unlike
+    `dict`, a `tdict` can be created from a `pdict` in `O(1)` time, and a
+    `pdict` can be created from a `tdict` in `O(log n)` time (and note that in
+    practice this `O(log n)` has a very low constant). The `tdict` type is
+    explicitly intended to make batch mutations to `pdict` objects more
+    efficient by reducing the number of allocations required.
+    """
+    @classmethod
+    def _new(cls, els, idx, top):
+        new_tdict = super(tdict, cls).__new__(cls)
+        object.__setattr__(new_tdict, '_els', els)
+        object.__setattr__(new_tdict, '_idx', idx)
+        object.__setattr__(new_tdict, '_top', top)
+        object.__setattr__(new_tdict, '_version', 0)
+        return new_tdict
+    @classmethod
+    def empty(cls):
+        """Returns an empty tdict."""
+        return cls._new(THAMT(PHAMT.empty), THAMT(PHAMT.empty), 0)
+    __slots__ = ("_els", "_idx", "_top","_version")
+    def __new__(cls, *args, **kw):
+        n = len(args)
+        if n == 1:
+            arg = args[0]
+        elif n == 0:
+            if len(kw) == 0:
+                return cls.empty()
+            else:
+                arg = kw
+                kw = None
+        else:
+            raise TypeError(f"pdict expects at most 1 argument, got {n}")
+        # If arg is a tdict or pdict, this is a special case.
+        if isinstance(arg, tdict):
+            obj = cls._new(THAMT(arg._els.persistent()),
+                                 THAMT(arg._idx.persistent()),
+                                 arg._top)
+        elif isinstance(arg, pdict):
+            obj = cls._new(THAMT(arg._els), THAMT(arg._idx), arg._top)
+        else:
+            obj = cls.empty()
+            if isinstance(arg, Mapping):
+                arg = arg.items()
+            for (k,v) in arg:
+                obj[k] = v
+        # If keyword args were provided, merge them in.
+        if kw:
+            for (k,v) in kw.items():
+                obj[k] = v
+        return obj
+    def __setattr__(self, k, v):
+        raise TypeError("tdict attributes are immutable")
+    def __setitem__(self, k, v):
+        # Get the hash and initial index (if there is one).
+        h = hash(obj)
+        ii = self._idx.get(h, None)
+        # First make sure it's not already in the dict.
+        ii_prev = None
+        while ii is not None:
+            (kv, ii_next) = self._els[ii]
+            if kv[0] == k:
+                if kv[1] is not v:
+                    self._els[ii] = ((k,v), ii_next)
+                # Note that this does not mandate a version update because it is
+                # not changing the keys.
+                return None
+            ii_prev = ii
+            kv_prev = kv
+            ii = ii_next
+        if ii_prev is None:
+            # The object's hash is not here yet, so we can append to els and
+            # insert it into idx.
+            self._els[self._top] = ((k,v), None)
+            self._idx[h] = self._top
+        else:
+            # If we reach this point, we can add the object to the end of the
+            # list.
+            self._els[self._top] = ((k,v), None)
+            self._els[ii_prev] = (kv_prev, self._top)
+        object.__setattr__(self, '_top', self._top + 1)
+        object.__setattr__(self, '_version', self._version + 1)
+    def __str__(self):
+        return f"<*{str(dict(self))}*>"
+    def __repr__(self):
+        return f"<*{repr(dict(self))}*>"
+    def __len__(self):
+        return len(self._els)
+    def __contains__(self, k):
+        h = hash(el)
+        ii = self._idx.get(h, None)
+        while ii is not None:
+            ((kk,vv),ii) = self._els[ii]
+            if k == kk:
+                return True
+        return False
+    def __getitem__(self, key):
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        while ii is not None:
+            (kv,ii) = self._els[ii]
+            if key == kv[0]:
+                return kv[1]
+        raise KeyError(key)
+    def get(self, key, default=None, /):
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        while ii is not None:
+            (kv,ii) = self._els[ii]
+            if key == kv[0]:
+                return kv[1]
+        raise default
+    def __iter__(self):
+        return iter(tdict_keys(self))
+    def __delitem__(self, key):
+        # Get the hash and initial index (if there is one).
+        h = hash(obj)
+        ii = self._idx.get(h, None)
+        # First make sure it's not already in the set.
+        ii_prev = None
+        kv_prev = None
+        while ii is not None:
+            (kv,ii_next) = self._els[ii]
+            (k,v) = kv
+            if key == k:
+                # We remove this entry!
+                if ii_prev is None:
+                    # We're removing from the front of the list.
+                    if ii_next is None:
+                        del self._idx[h]
+                    else:
+                        self._idx[h] = ii_next
+                else:
+                    # We're removing from the end or the middle.
+                    self._els.[ii_prev] = (kv_prev, ii_next)
+                del self._els[ii]
+                object.__setattr__(self, '_version', self._version + 1)
+                return None
+            ii_prev = ii
+            kv_prev = kv
+            ii = ii_next
+        # If we reach this point, then obj isn't in the set, so we just return
+        # self unchanged.
+        raise KeyError(key)
+    def clear(self):
+        """Returns the empty pdict."""
+        object.__setattr__(self, '_els', THAMT(PHAMT.empty))
+        object.__setattr__(self, '_idx', THAMT(PHAMT.empty))
+        object.__setattr__(self, '_top', 0)
+        object.__setattr__(self, '_version', 0)
+        return None
+    def pop(self, key, *args):
+        """Removes the given key from the tdict and returns the previously
+        associated value.
+
+        If the key is not found, the second argument is returned, if given,
+        otherwise, a `KeyError` is raised.
+        """
+        nargs = len(args)
+        if nargs > 1:
+            raise TypeError(f"pop expected at most 2 arguments, got {nargs}")
+        h = hash(key)
+        ii = self._idx.get(h, None)
+        ii_prev = None
+        kv_prev = None
+        while ii is not None:
+            (kv,ii_next) = self._els[ii]
+            (k,v) = kv
+            if key == k:
+                # We remove this entry!
+                if ii_prev is None:
+                    # We're removing from the front of the list.
+                    if ii_next is None:
+                        del self._idx[h]
+                    else:
+                        self._idx[h] = ii_next
+                else:
+                    # We're removing from the end or the middle.
+                    self._els[ii_prev] = (kv_prev, ii_next)
+                del self._els[ii]
+                object.__setattr__(self, '_version', self._version + 1)
+                return v
+            ii_prev = ii
+            kv_prev = kv
+            ii = ii_next
+        # It's not here!
+        if nargs == 0:
+            raise KeyError(key)
+        else:
+            return args[0]
+    def persistent(self):
+        """Efficiently returns a persistent (pdict) copy of the tdict."""
+        if len(self) == 0:
+            return pdict.empty
+        else:
+            return pdict._new(self._els.persistent(),
+                                    self._idx.persistent(),
+                                    self._top)
+    def keys(self):
+        return tdict_keys(self)
+    def items(self):
+        return tdict_items(self)
+    def values(self):
+        return tdict_values(self)
