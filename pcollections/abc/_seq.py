@@ -133,7 +133,7 @@ class PersistentSequence(Persistent, Sequence):
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, PersistentSequence):
+        elif not isinstance(other, Sequence):
             return False
         elif len(self) != len(other):
             return False
@@ -345,13 +345,11 @@ class TransientSequence(Transient, MutableSequence):
         # We have a max length of 60 characters, not counting the delimiters.
         return f"[<{seqstr(self, maxlen=60)}>]"
     def __repr__(self):
-        #s = repr(list(self))
-        #return f"[<{s[1:-1]}>]"
         return f"[<{seqstr(self)}>]"
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, TransientSequence):
+        elif not isinstance(other, Sequence):
             return False
         elif len(self) != len(other):
             return False

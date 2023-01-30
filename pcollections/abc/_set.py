@@ -83,8 +83,6 @@ class PersistentSet(Set, Persistent):
         # We have a max length of 60 characters, not counting the delimiters.
         return f"{{|{seqstr(self, maxlen=60)}|}}"
     def __repr__(self):
-        #s = repr(set(self))
-        #return f"{{|{s[1:-1]}|}}"
         return f"{{|{seqstr(self)}|}}"
     def __eq__(self, other):
         return setcmp(self, other) == 0

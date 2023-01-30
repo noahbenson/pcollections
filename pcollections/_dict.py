@@ -296,9 +296,10 @@ class tdict_view(Set):
     def __new__(cls, d):
         if not isinstance(d, tdict):
             raise ValueError("can only make tdict_keys object from tdict")
-        obj = super(tdict_keys,cls).__new__(cls)
-        super(tdict_keys,cls).__setattr__(obj, '_tdict', d)
-        super(tdict_keys,cls).__setattr__(obj, '_version', d._version)
+        sup = super(tdict_view,cls)
+        obj = sup.__new__(cls)
+        sup.__setattr__(obj, '_tdict', d)
+        sup.__setattr__(obj, '_version', d._version)
         return obj
     def __iter__(self):
         return map(self._iter, self._tdict._els)

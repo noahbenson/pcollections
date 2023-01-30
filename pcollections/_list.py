@@ -219,7 +219,7 @@ class tlist(TransientSequence):
         new_tlist = super(tlist, cls).__new__(cls)
         object.__setattr__(new_tlist, '_thamt', thamt)
         object.__setattr__(new_tlist, '_start', start)
-        object.__setattr__(new_tset, '_orig', orig)
+        object.__setattr__(new_tlist, '_orig', orig)
         return new_tlist
     def clear(self):
         """Clears all elements from the tlist."""
