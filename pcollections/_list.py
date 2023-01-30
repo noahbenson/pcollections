@@ -63,7 +63,7 @@ class plist(PersistentSequence):
         if index < 0:
             index += n
         index += start
-        if phamt.get(index) is obj:
+        if phamt[index] is obj:
             return self
         new_phamt = phamt.assoc(index, obj)
         return self._new(new_phamt, start)
