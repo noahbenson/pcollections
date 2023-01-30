@@ -74,7 +74,7 @@ class pset(PersistentSet):
         return self._hashcode
     def transient(self):
         """Returns a transient copy of the set in constant time."""
-        return tset._new(THAMT(self._els), THAMT(self._idx), self._top)
+        return tset._new(THAMT(self._els), THAMT(self._idx), self._top, self)
     def add(self, obj):
         """Returns a copy of the pset that includes the given object."""
         # Get the hash and initial index (if there is one).
@@ -159,17 +159,18 @@ class tset(TransientSet):
     changes such as the inclusion of an additional element.
     """
     @classmethod
-    def _new(cls, els, idx, top):
+    def _new(cls, els, idx, top, orig=None):
         new_tset = super(tset, cls).__new__(cls)
         object.__setattr__(new_tset, '_els', els)
         object.__setattr__(new_tset, '_idx', idx)
         object.__setattr__(new_tset, '_top', top)
+        object.__setattr__(new_tset, '_orig', orig)
         return new_tset
     @classmethod
     def empty(cls):
         """Returns an empty tset."""
         return cls._new(THAMT(PHAMT.empty), THAMT(PHAMT.empty), 0)
-    __slots__ = ("_els", "_idx", "_top")
+    __slots__ = ("_els", "_idx", "_top", "_orig")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("tset() takes no keyword arguments")
@@ -226,6 +227,7 @@ class tset(TransientSet):
             self._els[self._top] = (obj, None)
             self._els[ii_prev] = (x_prev, self._top)
         object.__setattr__(self, '_top', self._top + 1)
+        object.__setattr__(self, '_orig', None)
     def discard(self, obj):
         """Discards the given object from the set.
 
@@ -252,6 +254,7 @@ class tset(TransientSet):
                     # We're removing from the end or the middle.
                     del self._els[ii]
                     self._els[ii_prev] = (x_prev, ii_next)
+                object.__setattr__(self, '_orig', None)
                 return None
             ii_prev = ii
             x_prev = x
@@ -263,13 +266,16 @@ class tset(TransientSet):
         object.__setattr__(self, '_els', THAMT(PHAMT.empty))
         object.__setattr__(self, '_idx', THAMT(PHAMT.empty))
         object.__setattr__(self, '_top', 0)
+        object.__setattr__(self, '_orig', None)
     def persistent(self):
         """Efficiently returns a persistent set that is a copy of the tset."""
         if len(self) == 0:
             return pset.empty
-        else:
+        elif self._orig is None:
             return pset._new(self._els.persistent(),
                              self._idx.persistent(),
                              self._top)
+        else:
+            return self._orig
 
 

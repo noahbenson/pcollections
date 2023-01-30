@@ -193,6 +193,8 @@ class PersistentSequence(Persistent, Sequence):
             raise TypeError(msg)
         elif len(obj) == 0:
             return self
+        elif len(self) == 0 and isinstance(obj, PersistentSequence):
+            return obj
         else:
             return self.extend(obj)
     def __radd__(self, obj):
@@ -202,6 +204,8 @@ class PersistentSequence(Persistent, Sequence):
             raise TypeError(msg)
         elif len(obj) == 0:
             return self
+        elif len(self) == 0 and isinstance(obj, PersistentSequence):
+            return obj
         else:
             t = self.transient()
             for el in reversed(obj):

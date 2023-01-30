@@ -169,7 +169,7 @@ class pdict(PersistentMapping):
         return default
     def transient(self):
         """Returns a transient copy of the dict in constant time."""
-        return tdict._new(THAMT(self._els), THAMT(self._idx), self._top)
+        return tdict._new(THAMT(self._els), THAMT(self._idx), self._top, self)
     def set(self, key, val):
         """Returns a copy of the pdict that maps the given key to the given
         value."""

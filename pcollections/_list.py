@@ -165,7 +165,7 @@ class plist(PersistentSequence):
         return phamt[k + st]
     def transient(self):
         """Efficiently copes the plist into a tlist and returns the tlist."""
-        return tlist._new(THAMT(self._phamt), self._start)
+        return tlist._new(THAMT(self._phamt), self._start, self)
     # We redefine the hash function in order to use the _hashcode member.
     def __hash__(self):
         if self._hashcode is None:
@@ -196,7 +196,7 @@ class tlist(TransientSequence):
     def empty(cls):
         "Returns an empty tlist."
         return cls._new(THAMT(PHAMT.empty), 0)
-    __slots__ = ("_thamt", "_start")
+    __slots__ = ("_thamt", "_start", "_orig")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("tlist() takes no keyword arguments")
@@ -215,21 +215,25 @@ class tlist(TransientSequence):
         # We make a new tlist and give it this phamt.
         return cls._new(thamt, 0)
     @classmethod
-    def _new(cls, thamt, start):
+    def _new(cls, thamt, start, orig=None):
         new_tlist = super(tlist, cls).__new__(cls)
         object.__setattr__(new_tlist, '_thamt', thamt)
         object.__setattr__(new_tlist, '_start', start)
+        object.__setattr__(new_tset, '_orig', orig)
         return new_tlist
     def clear(self):
         """Clears all elements from the tlist."""
-        self._start = 0
-        self._thamt = THAMT(PHAMT.empty)
+        object.__setattr__(self, '_thamt', THAMT(PHAMT.empty))
+        object.__setattr__(self, '_start', 0)
+        object.__setattr__(self, '_orig', None)
     def persistent(self):
         """Efficiently copies the tlist into a plist and returns the plist."""
         if len(self._thamt) == 0:
             return plist.empty
-        else:
+        elif self._orig is None:
             return plist._new(self._thamt.persistent(), self._start)
+        else:
+            return self._orig
     def __iter__(self):
         st = self._start
         if st >= 0:
@@ -273,6 +277,7 @@ class tlist(TransientSequence):
         elif k < 0:
             k += n
         self._thamt[k + self._start] = v
+        object.__setattr__(self, '_orig', None)
     def __delitem__(self, index=-1):
         """Remove and return item at index (default last).
 
@@ -293,17 +298,20 @@ class tlist(TransientSequence):
                 th[ii] = th[ii - 1]
             del th[st]
             self._start += 1
+        object.__setattr__(self, '_orig', None)
     def append(self, obj):
         """Appends object to the end of the list."""
         thamt = self._thamt
         n = len(thamt)
         thamt[n + self._start] = obj
+        object.__setattr__(self, '_orig', None)
     def prepend(self, obj):
         """Prepends object to the beginning of the tlist."""
         thamt = self._thamt
         n = len(phamt)
         self._start -= 1
         thamt[self._start] = obj
+        object.__setattr__(self, '_orig', None)
     def insert(self, index, obj):
         """Inserts the given object before the given index."""
         st = self._start
@@ -321,3 +329,4 @@ class tlist(TransientSequence):
                 th[ii] = th[ii + 1]
             self._start -= 1
             th[index + self._start] = obj
+        object.__setattr__(self, '_orig', None)
