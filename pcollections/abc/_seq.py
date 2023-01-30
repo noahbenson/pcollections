@@ -187,7 +187,7 @@ class PersistentSequence(Persistent, Sequence):
     # We include a hash function; though this should be overwritten to cache the
     # hash-code due to it's slowness.
     def __add__(self, obj):
-        if not isinstance(obj, Sequence):
+        if not isinstance(obj, (list, PersistentSequence)):
             msg = (f"unsuppoorted operand type for +:"
                    f" '{type(obj)}' and '{type(self)}'")
             raise TypeError(msg)
@@ -198,7 +198,9 @@ class PersistentSequence(Persistent, Sequence):
         else:
             return self.extend(obj)
     def __radd__(self, obj):
-        if not isinstance(obj, Sequence):
+        if isinstance(obj, PersistentSequence):
+            return NotImplemented
+        elif not isinstance(obj, list):
             msg = (f"unsuppoorted operand type for +:"
                    f" '{type(self)}' and '{type(obj)}'")
             raise TypeError(msg)
@@ -397,18 +399,25 @@ class TransientSequence(Transient, MutableSequence):
                     return ii
         raise ValueError(f"{value} is not in {type(self)}")
     def __iadd__(self, obj):
-        if not isinstance(obj, Sequence):
-            msg = (f"unsuppoorted operand type for +:"
+        if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
+            msg = (f"unsuppoorted operand type for +=:"
                    f" '{type(obj)}' and '{type(self)}'")
             raise TypeError(msg)
-        elif len(obj) > 0:
+        elif len(obj) == 0:
+            pass
+        elif obj is self:
+            self.extend(self.persistent())
+        else:
             self.extend(obj)
+        return self
     def __add__(self, obj):
+        if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
+            return NotImplemented
         t = self.copy()
         t += obj
         return t
     def __radd__(self, obj):
-        if not isinstance(obj, Sequence):
+        if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
             msg = (f"unsuppoorted operand type for +:"
                    f" '{type(self)}' and '{type(obj)}'")
             raise TypeError(msg)
@@ -436,6 +445,7 @@ class TransientSequence(Transient, MutableSequence):
                         break
                     else:
                         self.append(el)
+        return self
     def __mul__(self, value):
         t = self.copy()
         t *= value

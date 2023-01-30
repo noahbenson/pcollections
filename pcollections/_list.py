@@ -308,7 +308,7 @@ class tlist(TransientSequence):
     def prepend(self, obj):
         """Prepends object to the beginning of the tlist."""
         thamt = self._thamt
-        n = len(phamt)
+        n = len(thamt)
         self._start -= 1
         thamt[self._start] = obj
         object.__setattr__(self, '_orig', None)
