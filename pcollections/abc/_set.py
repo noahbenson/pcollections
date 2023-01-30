@@ -60,6 +60,7 @@ class PersistentSet(Set, Persistent):
      * `addall(values)`
      * `discardall(values)`
      * `removeall(values)`
+     * `__reduce__` (for pickling)
     """
     # Methods which must be implemented in the children.
     def add(self, obj):
@@ -215,6 +216,8 @@ class PersistentSet(Set, Persistent):
             return self
         else:
             return t.persistent()
+    def __reduce__(self):
+        return (self.__new__, (type(self), list(self),))
 
 
 #===============================================================================
@@ -238,6 +241,8 @@ class TransientSet(MutableSet, Transient):
      * `discard()`  (`MutableSet`)
      * `persistent()` (`Transient`)
      * `clear()`
+     * `__getstate__` (for pickling)
+     * `__setstate__` (for pickling)
 
     Additionally, `PersistentSequence` includes default implementations of the
     following methods, which may or may not be optimal for any particular
@@ -293,7 +298,7 @@ class TransientSet(MutableSet, Transient):
     def __repr__(self):
         #s = repr(dict(self))
         #return f"{{<{s[1:-1]}>}}"
-        return f"{{|{seqstr(self)}|}}"
+        return f"{{<{seqstr(self)}>}}"
     def __eq__(self, other):
         return setcmp(self, other) == 0
     def __ne__(self, other):
@@ -436,3 +441,5 @@ class TransientSet(MutableSet, Transient):
     def copy(self):
         """Returns a copy of the transient set."""
         return self.persistent().transient()
+    def __reduce__(self):
+        return (self.__new__, (type(self), list(self),))

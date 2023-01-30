@@ -36,6 +36,7 @@ class PersistentSequence(Persistent, Sequence):
      * `__iter__` (`Iterable`)
      * `__len__` (`Sized`)
      * `__getitem__` (`Sequence`)
+     * `__reduce__` (for pickling)
 
     Additionally, `PersistentSequence` includes default implementations of the
     following methods, which may or may not be optimal for any particular
@@ -59,6 +60,7 @@ class PersistentSequence(Persistent, Sequence):
      * `remove(value)`
      * `sort()`
      * `reverse()`
+     * `__json__` (for `json_fix` module)
     """
     # Methods which must be implemented in the children.
     def set(self, index, obj):
@@ -223,6 +225,12 @@ class PersistentSequence(Persistent, Sequence):
         return t.persistent()
     def __rmul__(self, value):
         return self.__mul__(value)
+    # For pickling:
+    def __reduce__(self):
+        return (self.__new__, (type(self), list(self),))
+    def __json__(self):
+        from json import dumps
+        return dumps(list(self))    
 
 
 #===============================================================================
@@ -272,6 +280,8 @@ class TransientSequence(Transient, MutableSequence):
      * `__mul__`
      * `__rmul__`
      * `__imul__`
+     * `__reduce__` (for pickling)
+     * `__json__` (for `json_fix` module)
     """
     def pop(self, index=-1):
         """Remove and return item at index (default last).
@@ -333,7 +343,7 @@ class TransientSequence(Transient, MutableSequence):
     def __repr__(self):
         #s = repr(list(self))
         #return f"[<{s[1:-1]}>]"
-        return f"[|{seqstr(self)}|]"
+        return f"[<{seqstr(self)}>]"
     def __eq__(self, other):
         if other is self:
             return True
@@ -433,4 +443,9 @@ class TransientSequence(Transient, MutableSequence):
     def copy(self):
         """Returns a copy of the given transient sequence."""
         return self.persistent().transient()
-    
+    # For pickling.
+    def __reduce__(self):
+        return (self.__new__, (type(self), list(self),))
+    def __json__(self):
+        from json import dumps
+        return dumps(list(self))    

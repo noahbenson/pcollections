@@ -59,6 +59,8 @@ class PersistentMapping(Mapping, Persistent):
      * `discardall(values)`
      * `removeall(values)`
      * `update(map, **kw)`
+     * `__reduce__` (for pickling)
+     * `__json__` (for `json_fix` module)
     """
     # Methods which must be implemented in the children.
     def set(self, key, val):
@@ -174,6 +176,11 @@ class PersistentMapping(Mapping, Persistent):
         for (k,v) in kw.items():
             t[k] = v
         return t.persistent()
+    def __reduce__(self):
+        return (self.__new__, (type(self), list(self.items()),))
+    def __json__(self):
+        from json import dumps
+        return dumps(dict(self))
 
 
 #===============================================================================
@@ -216,6 +223,8 @@ class TransientMapping(MutableMapping, Transient):
      * `pop()` (`MutableMapping`)
      * `update(map, **kw)` (`MutableMapping`)
      * `copy()` (`Transient`)
+     * `__reduce__` (for pickling)
+     * `__json__` (for the `json_fix` module)
     """
     # Methods which must be implemented in the children.
     def clear(self):
@@ -295,3 +304,10 @@ class TransientMapping(MutableMapping, Transient):
     def copy(self):
         """Returns a copy of the transient mapping."""
         return self.persistent().transient()
+    # The below handle pickling cases.
+    def __reduce__(self):
+        return (self.__new__, (type(self), list(self.items()),))
+    def __json__(self):
+        from json import dumps
+        return dumps(dict(self))
+        
