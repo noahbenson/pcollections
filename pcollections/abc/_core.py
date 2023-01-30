@@ -11,11 +11,14 @@ class Persistent(Hashable):
     def transient(self):
         """Efficiently returns a transient copy of the persistent object."""
         raise NotImplementedError()
-    # Implementation methods that are probably fine in all children.
+    # Methods that should throw errors in children.
     def __setattr__(self, k, v):
         raise TypeError(f"{type(self)} is immutable")
     def __setitem__(self, k, v):
         raise TypeError(f"{type(self)} is immutable")
+    def __delitem__(self, k, v):
+        raise TypeError(f"{type(self)} is immutable")
+    # Implementation methods that are probably fine in all children.
     def copy(self):
         """Returns the persistent object (persistent objects needn't be
         copied)."""
