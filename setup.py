@@ -36,7 +36,8 @@ setup(
         'Topic :: Software Development',
         'Topic :: Software Development :: Libraries',
         'Topic :: Software Development :: Libraries :: Python Modules'],
-    packages=['pcollections', 'pcollections.test'],
+    packages=['pcollections', 'pcollections.abc', 'pcollections.util',
+              'pcollections.test'],
     package_data={'': ['LICENSE.txt']},
     include_package_data=True,
     install_requires=['phamt >= 0.1.0'])
