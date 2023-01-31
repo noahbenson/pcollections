@@ -159,7 +159,7 @@ class pdict(PersistentMapping):
             if key == kv[0]:
                 return kv[1]
         raise KeyError(key)
-    def get(self, key, default=None, /):
+    def get(self, key, default=None):
         h = hash(key)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -452,7 +452,7 @@ class tdict(TransientMapping):
             if key == kv[0]:
                 return kv[1]
         raise KeyError(key)
-    def get(self, key, default=None, /):
+    def get(self, key, default=None):
         h = hash(key)
         ii = self._idx.get(h, None)
         while ii is not None:
