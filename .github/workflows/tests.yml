@@ -1,0 +1,85 @@
+################################################################################
+# tests.yml
+# GitHub Actions Workflow for running the tests for the pcollections library.
+# by Noah C. Benson
+
+name: CI
+
+# We run on either pushes or pulls into main or dev branches
+on:
+  push:
+    branches: [ main, dev ]
+    paths-ignore:
+      - '**/README.md'
+      - '**/.gitignore'
+      - '/.github/workflows/deploy.yml'
+  pull_request:
+    branches: [ main, dev ]
+    paths-ignore:
+      - '**/README.md'
+      - '**/.gitignore'
+      - '/.github/workflows/deploy.yml'
+  # We sometimes want to run this manually.
+  workflow_dispatch:
+  # We also sometimes want to run this from another workflow.
+  workflow_call:
+
+# Our only job in this case is to test the code.
+jobs:
+  test:
+    name: ${{matrix.version}}/${{matrix.os}}/${{matrix.arch}} - ${{github.event_name}}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          # - '3.6' # apparently no longer supported by the windows and ubuntu gha modules
+          - '3.7'
+          - '3.8'
+          - '3.9'
+          - '3.10'
+          - '3.11'
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+        arch:
+          - 'x64'
+        include:
+          - {"os": "windows-latest", "arch": "x86", "version": "3.7"}
+          - {"os": "windows-latest", "arch": "x86", "version": "3.8"}
+          - {"os": "windows-latest", "arch": "x86", "version": "3.9"}
+          - {"os": "windows-latest", "arch": "x86", "version": "3.10"}
+          - {"os": "windows-latest", "arch": "x86", "version": "3.11"}
+    # The job environment.
+    env:
+      OS: ${{ matrix.os }}
+      ARCH: ${{ matrix.arch }}
+      PYTHON: ${{ matrix.version }}
+    # The steps in the job.
+    steps:
+      # Check out the repository (goes to $GITHUB_WORKSPACE)
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: '2'
+      # Setup the Python Environment.
+      - name: Setup Python Environment
+        uses: actions/setup-python@v3
+        with:
+          python-version: ${{ matrix.version }}
+          architecture: ${{ matrix.arch }}
+      # Log the Python Version
+      - name: Display Python version
+        run: python --version
+      # Run the actual tests.
+      - name: Run Tests
+        run: |
+          python setup.py build
+          python setup.py install
+          #pip install coverage
+          cd ~
+          #coverage run -m pcollections.test
+          python -m pcollections.test
+#      - name: Process Code Coverage
+#        uses: codecov/codecov-action@v1

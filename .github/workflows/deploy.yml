@@ -1,0 +1,183 @@
+################################################################################
+# deploy.yml
+# GitHub Actions Workflow for deploying pcollections to PyPI.
+# by Noah C. Benson
+
+name: Deploy to PyPI
+
+# We only run this manually.
+on:
+  workflow_dispatch:
+
+# Four job categores:
+# (1) deploy-source
+#     Just deploys the source distribution after running tests on ubuntu.
+# (2) deploy-nonlinux
+#     This is a matrix job that deploys for Python 3.7-3.11 on windows and mac
+#     for x64 architecture (and x86 also for Windows).
+# (3) deploy-linux-x86_64
+#     This is a non-matrix job that uses the manylinux docker images to generate
+#     binary distributions for x86_64 Linux distributions. This uses the script
+#     build-wheels.sh, which gets run inside the manylinux docker, to build and
+#     repair the binary wheels for CPython 3.7-3.11 as well as some PyPy builds
+#     as well.
+# (4) deploy-linux-i686
+#     Like deploy-linux-x86_64, except for i686 architectures.
+jobs:
+  #-----------------------------------------------------------------------------
+  deploy-source:
+    name: Source
+    runs-on: ubuntu-latest
+    env:
+      TWINE_USERNAME: __token__
+      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      TWINE_DEST: pypi
+    steps:
+      # Check out the repository (goes to $GITHUB_WORKSPACE)
+      - name: Checkout
+        uses: actions/checkout@v2
+      # Setup the Python Environment.
+      - name: Setup Python Environment
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3
+          architecture: x64
+      # We need to install twine also for uploading to PyPI.
+      - name: Install Twine
+        run: |
+          pip install twine
+      # Make sure the tests pass before we upload anything.
+      - name: Run Tests
+        run: |
+          python setup.py build
+          python setup.py install
+          cd ~
+          python -m unittest pcollections.test
+      # Go ahead and build and deploy.
+      - name: Build and Upload Source Distribution
+        run: |
+          rm dist/*
+          python setup.py sdist
+          twine upload -r $TWINE_DEST dist/pcollections-*.tar.gz
+  #-----------------------------------------------------------------------------
+  deploy-nonlinux:
+    if: ${{ false }} # For now, binary dists are not required.
+    name: ${{matrix.os}} [${{matrix.arch}}] - py${{matrix.version}}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        version:
+          - '3.7'
+          - '3.8'
+          - '3.9'
+          - '3.10'
+          - '3.11'
+        os:
+          - windows-latest
+          - macos-latest
+        arch:
+          - 'x64'
+        include:
+          - {"os":"windows-latest", "arch":"x86", "version":"3.7"}
+          - {"os":"windows-latest", "arch":"x86", "version":"3.8"}
+          - {"os":"windows-latest", "arch":"x86", "version":"3.9"}
+          - {"os":"windows-latest", "arch":"x86", "version":"3.10"}
+          - {"os":"windows-latest", "arch":"x86", "version":"3.11"}
+    env:
+      TWINE_USERNAME: __token__
+      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      TWINE_DEST: pypi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Python Environment
+        uses: actions/setup-python@v3
+        with:
+          python-version: ${{ matrix.version }}
+          architecture: ${{ matrix.arch }}
+      - name: Install Twine
+        run: |
+          pip install twine
+      - name: Install Wheel
+        run: |
+          pip install wheel
+      - name: Install delocate
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          pip install delocate
+      - name: Run Tests
+        run: |
+          python setup.py build
+          python setup.py install
+          cd ~
+          python -m unittest phamt.test
+      - name: Build Binary Distribution
+        run: |
+          rm dist/*
+          python setup.py bdist_wheel
+      - name: Delocate Wheels
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          delocate-wheel -v dist/*.whl
+      - name: Upload Binary Distribution
+        # It would be nice to use $TWINE_DEST here, but this fails in windows.
+        # Also, FWIW, this code is fine, but `twine upload -r pypi dist/*.whl`
+        # fails on Windows.
+        run: |
+          cd dist
+          twine upload -r pypi *.whl
+  #-----------------------------------------------------------------------------
+  deploy-linux-x86_64:
+    if: ${{ false }} # For now, binary dists are not required.
+    name: ubuntu-latest [x86_64] - all
+    runs-on: ubuntu-latest
+    env:
+      TWINE_USERNAME: __token__
+      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      TWINE_DEST: pypi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Python Environment
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3
+          architecture: x64
+      - name: Install Twine
+        run: |
+          pip install twine
+      - name: Build Wheels
+        uses: docker://quay.io/pypa/manylinux_2_24_x86_64
+        with:
+          args: bash /github/workspace/build-wheels.sh manylinux_2_24_x86_64
+      - name: Upload Binary Distribution
+        run: |
+          twine upload -r $TWINE_DEST wheels/*.whl
+  #-----------------------------------------------------------------------------
+  deploy-linux-i686:
+    if: ${{ false }} # For now, binary dists are not required.
+    name: ubuntu-latest [i686] - all
+    runs-on: ubuntu-latest
+    env:
+      TWINE_USERNAME: __token__
+      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      TWINE_DEST: pypi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Python Environment
+        uses: actions/setup-python@v3
+        with:
+          python-version: 3
+          architecture: x64
+      - name: Install Twine
+        run: |
+          pip install twine
+      - name: Build Wheels
+        uses: docker://quay.io/pypa/manylinux_2_24_i686
+        with:
+          args: bash /github/workspace/build-wheels.sh manylinux_2_24_i686
+      - name: Upload Binary Distribution
+        run: |
+          twine upload -r $TWINE_DEST wheels/*.whl
