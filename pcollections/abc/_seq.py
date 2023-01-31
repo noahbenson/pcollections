@@ -9,7 +9,7 @@ from numbers         import (Integral)
 from collections.abc import (Sequence, MutableSequence)
 
 from ._core import (Persistent, Transient)
-from ..util import seqstr
+from ..util import (seqstr, seqcmp)
 
 
 #===============================================================================
@@ -133,15 +133,30 @@ class PersistentSequence(Persistent, Sequence):
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, Sequence):
-            return False
-        elif len(self) != len(other):
+        elif not isinstance(other, (list, PersistentSequence)):
             return False
         else:
-            for (a,b) in zip(self, other):
-                if a != b:
-                    return False
-            return True
+            return seqcmp(self, other) == 0
+    def __lt__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'<' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) < 0
+    def __le__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'<=' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) <= 0
+    def __gt__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'>' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) > 0
+    def __ge__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'>=' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) >= 0
     def __hash__(self):
         return hash(tuple(self)) + 1
     def __contains__(self, value):
@@ -169,6 +184,8 @@ class PersistentSequence(Persistent, Sequence):
 
         Raises ValueError if value is not present.
         """
+        if stop is None:
+            stop = len(self)
         if start == 0:
             for (ii,val) in enumerate(self):
                 if ii >= stop:
@@ -356,10 +373,27 @@ class TransientSequence(Transient, MutableSequence):
         elif len(self) != len(other):
             return False
         else:
-            for (a,b) in zip(self, other):
-                if a != b:
-                    return False
-            return True
+            return seqcmp(self, other) == 0
+    def __lt__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'<' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) < 0
+    def __le__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'<=' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) <= 0
+    def __gt__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'>' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) > 0
+    def __ge__(self, other):
+        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
+            raise TypeError(f"'>=' not supported between instances of"
+                            f" '{type(self)}' and '{type(other)}'")
+        return seqcmp(self, other) >= 0
     def __contains__(self, value):
         for el in self:
             if el == value:

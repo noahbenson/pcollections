@@ -53,6 +53,32 @@ def setcmp(set1, set2):
     else:
         return 1 # All elements of set2 are in set1, set1 > set2.
 
+def seqcmp(seq1, seq2):
+    """Compares one sequence to another.
+
+    `seqcmp(a, b)` returns -1 if `a` sorts before `b`, 0 if `a` is equal to
+    `b`, and 1 if `a` sorts after `b`.
+    """
+    if not isinstance(seq1, Sequence):
+        msg = f"unsupported operand type for compare: {type(setq)}"
+        raise TypeError(msg)
+    if not isinstance(seq2, Sequence):
+        msg = f"unsupported operand type for compare: {type(seq2)}"
+        raise TypeError(msg)
+    for (a,b) in zip(seq1, seq2):
+        if a < b:
+            return -1
+        elif b < a:
+            return 1
+    n1 = len(seq1)
+    n2 = len(seq2)
+    if n1 < n2:
+        return -1
+    elif n1 > n2:
+        return 1
+    else:
+        return 0
+    
 def seqstr(seq, maxlen=None, sep=", ", tostr=repr):
     """Returns a string representation of the given sequence or iterable.
 

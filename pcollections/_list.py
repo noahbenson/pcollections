@@ -94,7 +94,7 @@ class plist(PersistentSequence):
         """Returns a new list with object appended."""
         phamt = self._phamt
         n = len(phamt)
-        new_phamt = phamt.assoc(self.start + n, obj)
+        new_phamt = phamt.assoc(self._start + n, obj)
         return self._new(new_phamt, self._start)
     def prepend(self, obj):
         """Returns a new list with object prepended."""
