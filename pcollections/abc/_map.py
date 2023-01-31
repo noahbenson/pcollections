@@ -92,7 +92,7 @@ class PersistentMapping(Mapping, Persistent):
             return True
         except KeyError:
             return False
-    def get(self, key, default=None, /):
+    def get(self, key, default=None):
         try:
             return self[key]
         except KeyError:
@@ -242,12 +242,12 @@ class TransientMapping(MutableMapping, Transient):
             return True
         except KeyError:
             return False
-    def get(self, key, default=None, /):
+    def get(self, key, default=None):
         try:
             return self[key]
         except KeyError:
             return default
-    def setdefault(self, key, default=None, /):
+    def setdefault(self, key, default=None):
         """Insert key with a value of default if key is not in the dictionary.
 
         Return the value for the key if key is in the dictionary, else default.
