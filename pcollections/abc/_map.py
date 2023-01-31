@@ -125,7 +125,7 @@ class PersistentMapping(Mapping, Persistent):
         for k in keys:
             del t[k]
         return t.persistent()
-    def setdefault(self, key, default=None, /):
+    def setdefault(self, key, default=None):
         """Returns a copy of the persistent mapping with the key inserted with a
         value of default, if key is not already in the mapping.
         """
