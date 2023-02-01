@@ -69,6 +69,7 @@ jobs:
         with:
           python-version: ${{ matrix.version }}
           architecture: ${{ matrix.arch }}
+      - name: Upgrade Setuptools
         run: |
           pythin -m pip install --upgrade setuptools
       # Log the Python Version
