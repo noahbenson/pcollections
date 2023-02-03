@@ -79,8 +79,18 @@ class plist(PersistentSequence):
             raise IndexError("plist.delete index out of range")
         elif index < 0:
             index += n
+        # Some cases don't require a THAMT:
+        if index == 0:
+            if n == 1:
+                return plist.empty
+            else:
+                return plist._new(phamt.dissoc(st), st + 1)
+        elif index == n - 1:
+            return plist._new(phamt.dissoc(st + index), st)
+        # Other cases require moving elements around a fair bit, so we use a
+        # THAMT object.
         thamt = THAMT(phamt)
-        if n - index < index:
+        if n - index <= index:
             for ii in range(index + st, n + st - 1):
                 thamt[ii] = phamt[ii + 1]
             del thamt[n + st - 1]
@@ -108,11 +118,13 @@ class plist(PersistentSequence):
         start = self._start
         phamt = self._phamt
         n = len(phamt)
-        if   index < -n: index = -n
+        if   index == 0: return self.prepend(obj)
+        elif index == n: return self.append(obj)
+        elif index < -n: index = -n
         elif index > n:  index = n
         if   index < 0:  index += n
         thamt = THAMT(phamt)
-        if n - index < index:
+        if n - index <= index:
             for ii in range(index + start, n + start):
                 thamt[ii + 1] = phamt[ii]
             thamt[index + start] = obj
@@ -127,13 +139,13 @@ class plist(PersistentSequence):
         """Returns the empty plist."""
         return plist.empty
     def __iter__(self):
+        phamt = self._phamt
+        n = len(phamt)
         st = self._start
-        if st >= 0:
+        if st >= 0 or n + st < 0:
             return map(lambda u:u[1], self._phamt)
         else:
             from itertools import chain, islice
-            phamt = self._phamt
-            n = len(phamt)
             return chain((phamt[k] for k in range(st, 0)),
                          islice(map(lambda u:u[1], phamt), 0, n + st))
     def __len__(self):
@@ -236,11 +248,11 @@ class tlist(TransientSequence):
             return self._orig
     def __iter__(self):
         st = self._start
-        if st >= 0:
-            return map(lambda u:u[1], iter(self._thamt))
+        th = self._thamt
+        n = len(th)
+        if st >= 0 or n + st < 0:
+            return map(lambda u:u[1], iter(th))
         else:
-            th = self._thamt
-            n = len(th)
             return chain((th[k] for k in range(st, 0)),
                          islice(map(lambda u:u[1], iter(th)), 0, n + st))
     def __len__(self):
@@ -249,7 +261,7 @@ class tlist(TransientSequence):
     def __getitem__(self, k):
         st = self._start
         thamt = self._thamt
-        n = len(phamt)
+        n = len(thamt)
         if isinstance(k, slice):
             (start,stop,step) = (k.start or 0, k.stop or n, k.step or 1)
             if   start <= -n: start = 0
@@ -289,12 +301,12 @@ class tlist(TransientSequence):
             raise IndexError(f"{type(self)} assignment index out of range")
         elif index < 0:
             index += n
-        if n - index < index:
+        if n - index <= index:
             for ii in range(index + st, n + st - 1):
-                th[ii] = tt[ii + 1]
+                th[ii] = th[ii + 1]
             del th[n + st - 1]
         else:
-            for ii in range(index + st - 1, st, -1):
+            for ii in range(index + st, st, -1):
                 th[ii] = th[ii - 1]
             del th[st]
             self._start += 1
@@ -320,7 +332,7 @@ class tlist(TransientSequence):
         if   index < -n: index = -n
         elif index > n:  index = n
         if   index < 0:  index += n
-        if n - index < index:
+        if n - index <= index:
             for ii in range(n + st, index + st, -1):
                 th[ii] = th[ii - 1]
             th[index + st] = obj
