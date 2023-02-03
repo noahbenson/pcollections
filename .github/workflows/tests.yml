@@ -65,7 +65,7 @@ jobs:
           fetch-depth: '2'
       # Setup the Python Environment.
       - name: Setup Python Environment
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.version }}
           architecture: ${{ matrix.arch }}
