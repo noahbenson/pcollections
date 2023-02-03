@@ -130,10 +130,11 @@ class PersistentSequence(Persistent, Sequence):
         #s = repr(list(self))
         #return f"[|{s[1:-1]}|]"
         return f"[|{seqstr(self)}|]"
+    _eq_types = ()
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, (list, PersistentSequence)):
+        elif not isinstance(other, PersistentSequence._eq_types):
             return False
         else:
             return seqcmp(self, other) == 0
@@ -253,7 +254,7 @@ class PersistentSequence(Persistent, Sequence):
         return (self.__new__, (type(self), list(self),))
     def __json__(self):
         from json import dumps
-        return dumps(list(self))    
+        return dumps(list(self))
 
 
 #===============================================================================
@@ -365,10 +366,11 @@ class TransientSequence(Transient, MutableSequence):
         return f"[<{seqstr(self, maxlen=60)}>]"
     def __repr__(self):
         return f"[<{seqstr(self)}>]"
+    _eq_types = ()
     def __eq__(self, other):
         if other is self:
             return True
-        elif not isinstance(other, Sequence):
+        elif not isinstance(other, TransientSequence._eq_types):
             return False
         elif len(self) != len(other):
             return False
@@ -495,3 +497,7 @@ class TransientSequence(Transient, MutableSequence):
     def __json__(self):
         from json import dumps
         return dumps(list(self))    
+
+# Setup the _eq_types, which decides what types can be considered equal.
+PersistentSequence._eq_types = (list, PersistentSequence, TransientSequence)
+TransientSequence._eq_types = (list, PersistentSequence, TransientSequence)
