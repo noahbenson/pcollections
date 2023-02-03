@@ -4,6 +4,7 @@
 # Declaration of tests for the plist type.
 # By Noah C. Benson
 
+from random import randint
 from unittest import TestCase
 
 from .._list import (plist, tlist)
@@ -115,6 +116,7 @@ class TestPList(TestCase):
         with self.assertRaises(TypeError):
             l._start = -10
     def test_mul(self):
+        "Tests the plist multiplication operator."
         l = plist(range(10))
         # Zero * plist is an empty plist.
         self.assertIs(l * 0, plist.empty)
@@ -132,6 +134,7 @@ class TestPList(TestCase):
             with self.assertRaises(ValueError):
                 u = notint * l
     def test_add(self):
+        "Tests the plist addition operator."
         l = plist(range(10))
         # A plist plus an empty list is the same plist.
         self.assertIs(l, l + [])
@@ -149,3 +152,71 @@ class TestPList(TestCase):
                 u = notlist + l
             with self.assertRaises(TypeError):
                 u = l + notlist
+    def test_random(self):
+        "Performs a randomized test on the plist type."
+        nops = 100
+        valmax = 1000
+        p = plist()
+        t = tlist()
+        l = list()
+        for opnum in range(nops):
+            op = randint(0, 9)
+            el = randint(0, valmax)
+            if op < 2:
+                #print(f"append {el} at {len(l)}")
+                p = p.append(el)
+                t.append(el)
+                l.append(el)
+            elif op < 4:
+                #print(f"prepend {el} at {len(l)}")
+                p = p.prepend(el)
+                t.prepend(el)
+                l = [el] + l
+            elif op < 6:
+                ii = randint(0, len(l))
+                #print(f"insert ({ii}, {el}) at {len(l)}")
+                p = p.insert(ii, el)
+                t.insert(ii, el)
+                l.insert(ii, el)
+            elif op == 6:
+                if len(p) > 0:
+                    lel = l.pop()
+                    #print(f"pop -1 {lel} at {len(l)}")
+                    (pel, p) = p.pop()
+                    tel = t.pop()
+                    self.assertEqual(pel, tel)
+                    self.assertEqual(pel, lel)
+            elif op == 7:
+                if len(p) > 0:
+                    lel = l.pop(0)
+                    #print(f"pop 0 {lel} at {len(l)}")
+                    (pel, p) = p.pop(0)
+                    tel = t.pop(0)
+                    self.assertEqual(pel, tel)
+                    self.assertEqual(pel, lel)
+            elif op == 8:
+                if len(p) > 0:
+                    ii = randint(0, len(p) - 1)
+                    lel = l.pop(ii)
+                    #print(f"pop {ii} {lel} at {len(l) + 1}")
+                    (pel, p) = p.pop(ii)
+                    tel = t.pop(ii)
+                    self.assertEqual(pel, tel)
+                    self.assertEqual(pel, lel)
+            elif op == 9:
+                if len(p) > 0:
+                    ii = randint(0, len(p) - 1)
+                    #print(f"set {ii} to {el} at {len(l)}")
+                    p = p.set(ii, el)
+                    t[ii] = el
+                    l[ii] = el
+            #print('   -', repr(p), ' [', p._start, ']')
+            #print('   -', repr(t), ' [', t._start, ']')
+            #print('   -', repr(l))
+            self.assertEqual(p, t)
+            self.assertEqual(p, l)
+            self.assertEqual(l, t)
+            if randint(0, 20) == 0:
+                tmp = t.persistent()
+                self.assertEqual(tmp, p)
+                self.assertEqual(tmp, t)
