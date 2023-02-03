@@ -60,7 +60,7 @@ jobs:
     steps:
       # Check out the repository (goes to $GITHUB_WORKSPACE)
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           fetch-depth: '2'
       # Setup the Python Environment.
