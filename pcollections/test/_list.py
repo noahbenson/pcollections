@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 ################################################################################
 # pcollections/test/_list.py
-# Declaration of tests for the plist type.
+# Declaration of tests for the plist and tlist types.
 # By Noah C. Benson
 
 from random import randint
@@ -10,7 +10,7 @@ from unittest import TestCase
 from .._list import (plist, tlist)
 
 class TestPList(TestCase):
-    """Tests for the `plist` class.
+    """Tests for the `plist` and `tlist` classes.
 
     This both runs a number of simple tests of the `plist` API and a series of
     randomized tests in which `plist` must match the behavior of Python's
