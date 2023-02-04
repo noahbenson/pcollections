@@ -97,6 +97,15 @@ class PersistentMapping(Mapping, Persistent):
             return self[key]
         except KeyError:
             return default
+    def delete(self, key):
+        """Returns a copy of the mersistent mapping the excludes the given key.
+
+        If the key is not found in the mapping, a `KeyError` is raised.
+        """
+        if key in self:
+            return self.drop(key)
+        else:
+            raise KeyError(key)
     def setall(self, keys, vals):
         """Returns a copy of the persistent mapping that includes all the object
         in the given iterables of keys and values.

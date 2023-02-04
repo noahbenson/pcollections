@@ -6,3 +6,4 @@
 
 from ._list import TestPList
 from ._set import TestPSet
+from ._dict import TestPDict

@@ -137,12 +137,12 @@ class pdict(PersistentMapping):
     def __hash__(self):
         if self._hashcode is None:
             h = PersistentMapping.__hash__(self)
-            object.__setattr__(self._hashcode, h)
+            object.__setattr__(self, '_hashcode', h)
         return self._hashcode
     def __len__(self):
         return len(self._els)
     def __contains__(self, k):
-        h = hash(el)
+        h = hash(k)
         ii = self._idx.get(h, None)
         while ii is not None:
             ((kk,vv),ii) = self._els[ii]
@@ -199,13 +199,13 @@ class pdict(PersistentMapping):
             new_els = self._els.assoc(self._top, ((key,val), None))
             new_els = new_els.assoc(ii, (kv, self._top))
         return self._new(new_els, new_idx, self._top + 1)
-    def delete(self, key):
+    def drop(self, key):
         """Returns a copy of the pdict that does not include the given key.
 
-        If the key is not in the dict, `delete` raises a `KeyError`.
+        If the key is not in the dict, returns the dict unchanged.
         """
         # Get the hash and initial index (if there is one).
-        h = hash(obj)
+        h = hash(key)
         ii = self._idx.get(h, None)
         # First make sure it's not already in the set.
         ii_prev = None
