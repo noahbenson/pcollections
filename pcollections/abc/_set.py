@@ -85,9 +85,15 @@ class PersistentSet(Set, Persistent):
     def __repr__(self):
         return f"{{|{seqstr(self)}|}}"
     def __eq__(self, other):
-        return setcmp(self, other) == 0
+        if isinstance(other, Set):
+            return setcmp(self, other) == 0
+        else:
+            return False
     def __ne__(self, other):
-        return setcmp(self, other) != 0
+        if isinstance(other, Set):
+            return setcmp(self, other) != 0
+        else:
+            return True
     def __hash__(self):
         return hash(frozenset(self)) + 1
     def __lt__(self, other):
@@ -202,7 +208,7 @@ class PersistentSet(Set, Persistent):
             return self
         else:
             return t.persistent()
-    def discardall(self, iterable):
+    def removeall(self, iterable):
         """Returns a copy of the persistent set with the given elements
         discarded.
 
@@ -235,7 +241,7 @@ class TransientSet(MutableSet, Transient):
      * `__len__` (`Sized`)
      * `__contains__` (`Container`)
      * `__iter__` (`Iterable`)
-     * `add(index, object)` (`MutableSet`)
+     * `add(object)` (`MutableSet`)
      * `discard()`  (`MutableSet`)
      * `persistent()` (`Transient`)
      * `clear()`

@@ -70,7 +70,7 @@ class pset(PersistentSet):
     def __hash__(self):
         if self._hashcode is None:
             h = PersistentSet.__hash__(self)
-            object.__setattr__(self._hashcode, h)
+            object.__setattr__(self, '_hashcode', h)
         return self._hashcode
     def transient(self):
         """Returns a transient copy of the set in constant time."""
