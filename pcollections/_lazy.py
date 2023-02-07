@@ -4,32 +4,11 @@
 # The lazy dictionary and list implementations.
 # By Noah C. Benson
 
-from functools import (
-    partial
-)
-from threading import (
-    RLock
-)
+from functools import partial
+from threading import RLock
 
-from collections.abc import (
-    Mapping,
-    MappingView,
-    KeysView,
-    ItemsView,
-    ValuesView,
-    Sequence
-)
-from phamt import (
-    PHAMT,
-    THAMT
-)
+from phamt import PHAMT
 
-from .abc import (
-    PersistentMapping,
-    TransientMapping,
-    PersistentSequence,
-    TransientSequence
-)
 from ._list import (
     plist,
     tlist
@@ -169,6 +148,13 @@ class llist(plist):
     def __getitem__(self, k):
         el = plist.__getitem__(self, k)
         return el() if isinstance(el, lazy) else el
+    def is_lazy(self, index):
+        """Determines if the given index is an uncached lazy value."""
+        v = self[index]
+        if isinstance(v, lazy):
+            return not v.is_cached()
+        else:
+            return False
 # Setup the llist.empty static member.
 llist.empty = llist._new(PHAMT.empty, 0)
 
@@ -225,5 +211,12 @@ class ldict(pdict):
         return ldict_items(self)
     def values(self):
         return ldict_values(self)
+    def is_lazy(self, index):
+        """Determines if the given index is an uncached lazy value."""
+        v = self[index]
+        if isinstance(v, lazy):
+            return not v.is_cached()
+        else:
+            return False
 # Make the empty pdict.
 ldict.empty = ldict._new(PHAMT.empty, PHAMT.empty, 0)
