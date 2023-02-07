@@ -30,15 +30,19 @@ from .abc import (
 # The persistent dict type.
 
 class PDictView(MappingView):
-    def __init__(cls, d):
+    __slots__ = ('_mapping')
+    def __new__(cls, d):
         if not isinstance(d, pdict):
             raise ValueError(f"can only make {cls} object from pdict")
+        obj = super(PDictView, cls).__new__(cls)
+        object.__setattr__(obj, '_mapping', d)
+        return obj
     def __iter__(self):
-        return map(lambda arg: self._from_kv(arg[1]), self.mapping()._els)
+        return map(lambda arg: self._from_kv(arg[1]), self._mapping._els)
     def __reversed__(self):
         return reversed(list(self.__iter__()))
     def __len__(self):
-        return len(self._pdict)
+        return len(self._mapping)
     # Abstract methods that must be overloaded by the concrete view classes
     # below.
     def _from_kv(self, kv):
@@ -46,46 +50,31 @@ class PDictView(MappingView):
     def __contains__(self, k):
         raise NotImplementedError()
 class pdict_keys(PDictView):
-    __slots__ = ('_mapping')
-    def __new__(cls, d):
-        sup = super(PDictView, cls)
-        obj = sup.__new__(cls)
-        object.__setattr__(obj, '_mapping', d)
-        return obj
+    __slots__ = ()
     def _from_kv(self, kv):
         return kv[0]
     def __contains__(self, k):
-        return (k in self._pdict)
+        return (k in self._mapping)
 class pdict_items(ItemsView, PDictView):
-    __slots__ = ('_mapping')
-    def __new__(cls, d):
-        sup = super(PDictView, cls)
-        obj = sup.__new__(cls)
-        object.__setattr__(obj, '_mapping', d)
-        return obj
-    def mapping(self):
-        return self._pdict
+    __slots__ = ()
     def _from_kv(self, kv):
         return kv
     def __contains__(self, kv):
         if not isinstance(kv, tuple) or len(kv) != 2:
             return False
-        d = Ellipsis if kv[1] is None else None
-        return self._pdict.get(kv[0], d) == kv[1]
+        (k0,v0) = self._from_kv(kv)
+        d = Ellipsis if v0 is None else None
+        v = self._mapping.get(k0, d)
+        (k,v) = self._from_kv((k0,v))
+        return v0 == v
 class pdict_values(ValuesView, PDictView):
-    __slots__ = ('_mapping')
-    def __new__(cls, d):
-        sup = super(PDictView, cls)
-        obj = sup.__new__(cls)
-        object.__setattr__(obj, '_Mapping', d)
-        return obj
-    def mapping(self):
-        return self._pdict
+    __slots__ = ()
     def _from_kv(self, kv):
         return kv[1]
     def __contains__(self, v):
-        for (kv,_) in self._els:
-            if kv[1] == v:
+        for ent in self._mapping._els:
+            v0 = self._from_kv(ent[1][0])
+            if v0 == v:
                 return True
         return False
 class pdict(PersistentMapping):
@@ -115,25 +104,32 @@ class pdict(PersistentMapping):
             arg = args[0]
         elif n == 0:
             if len(kw) == 0:
-                return pdict.empty
+                return cls.empty
             else:
                 arg = kw
                 kw = {}
         else:
-            raise TypeError(f"pdict expects at most 1 argument, got {n}")
+            msg = f"{cls.__name__} expects at most 1 argument, got {n}"
+            raise TypeError(msg)
         # If any keyword options were given, we route through tdict.
         if not kw:
             # If arg is a tdict and no keyword arguments have been given, this
             # is a special case.
             if isinstance(arg, tdict):
                 return cls._new(arg._els.persistent(),
-                                      arg._idx.persistent(),
-                                      arg._top)
-            # Also, if it's a pdict, we can just return it as-is.
-            if isinstance(arg, pdict):
+                                arg._idx.persistent(),
+                                arg._top)
+            elif isinstance(arg, cls):
+                # Also, if it's already the right type, we can just return it
+                # as-is.
                 return arg
+            elif isinstance(arg, pdict):
+                return cls._new(arg._els, arg._idx, arg._top)
         # For anything else, however, we just route this through tdict.
-        return tdict(arg, **kw).persistent()
+        t = tdict(arg, **kw)
+        return cls._new(t._els.persistent(),
+                        t._idx.persistent(),
+                        t._top)
     def __hash__(self):
         if self._hashcode is None:
             h = PersistentMapping.__hash__(self)
@@ -236,7 +232,7 @@ class pdict(PersistentMapping):
         return self
     def clear(self):
         """Returns the empty pdict."""
-        return pdict.empty
+        return type(self).empty
     # We include reimplements for some of these because we can improve them in
     # some non-trivial way.
     def pop(self, key, *args):
@@ -437,7 +433,7 @@ class tdict(TransientMapping):
     def __len__(self):
         return len(self._els)
     def __contains__(self, k):
-        h = hash(el)
+        h = hash(k)
         ii = self._idx.get(h, None)
         while ii is not None:
             ((kk,vv),ii) = self._els[ii]

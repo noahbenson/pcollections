@@ -25,24 +25,28 @@ class plist(PersistentSequence):
     __slots__ = ("_phamt", "_start", "_hashcode")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
-            raise TypeError("plist() takes no keyword arguments")
+            raise TypeError(f"{cls.__name__}() takes no keyword arguments")
         n = len(args)
-        if   n == 1: pass
-        elif n == 0: return plist.empty
-        else: raise TypeError(f"plist expects at most 1 argument, got {n}")
+        if n == 0:
+            return cls.empty
+        elif n != 1:
+            msg = f"{cls.__name__} expects at most 1 argument, got {n}"
+            raise TypeError(msg)
         arg = args[0]
         # If arg is a tlist, this is a special case.
         if isinstance(arg, tlist):
             return cls._new(arg._thamt.persistent(), arg._start)
-        elif isinstance(arg, plist):
+        elif isinstance(arg, cls):
             return arg
+        elif isinstance(arg, plist):
+            return cls._new(arg._phamt, arg._start)        
         # We just want to build a PHAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)
         for (ii,val) in enumerate(iter(arg)):
             thamt[ii] = val
         phamt = thamt.persistent()
         # If it's empty, we can just return the empty plist.
-        if len(phamt) == 0: return plist.empty
+        if len(phamt) == 0: return cls.empty
         # Otherwise, we make a new plist and give it this phamt.
         return cls._new(phamt, 0)
     @classmethod
