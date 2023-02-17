@@ -44,4 +44,4 @@ setup(
     package_data={'': ['LICENSE.txt']},
     zip_safe=False,
     include_package_data=True,
-    install_requires=['phamt >= 0.1.4'])
+    install_requires=['phamt >= 0.1.6'])
