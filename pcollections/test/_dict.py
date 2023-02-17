@@ -150,7 +150,7 @@ class TestLDict(TestCase):
     tests (and not randomized tests) are run for the lazy dictionary type.
     """
     def test_api(self):
-        """Tests/demonstrates the basic pdict API."""
+        """Tests/demonstrates the basic ldict API."""
         # An empty ldict can be created with `ldict()`.
         e = ldict()
         self.assertEqual(len(e), 0)
@@ -168,7 +168,7 @@ class TestLDict(TestCase):
         self.assertEqual(p1[0], 10)
         self.assertEqual(p1[5], 15)
         self.assertEqual(p1[9], 19)
-        # pdicts can be equal to each other and to other Mappings like dicts.
+        # ldicts can be equal to each other and to other Mappings like dicts.
         l1 = dict(zip(range(0,10), range(10,20)))
         self.assertEqual(l1, p1)
         self.assertEqual(p1, l1)
@@ -179,11 +179,11 @@ class TestLDict(TestCase):
         self.assertNotEqual(ldict.empty, '')
         # Clearing an ldict always yields the empty ldict.
         self.assertIs(p1.clear(), ldict.empty)
-        # Copying a pdict always just returns the pdict (it is immutable).
+        # Copying an ldict always just returns the ldict (it is immutable).
         self.assertIs(p1.copy(), p1)
-        # pdicts are hashable (assuming all values are hashable).
+        # ldicts are hashable (assuming all values are hashable).
         self.assertIsInstance(hash(p1), int)
-        # pdicts contain their keyss.
+        # ldicts contain their keyss.
         for k in range(0,10):
             self.assertIn(k, p1)
         self.assertNotIn(-1, p1)
@@ -223,6 +223,8 @@ class TestLDict(TestCase):
         # There are also batch methods for most of the operations.
         self.assertEqual(ldict.empty.setall(range(3), range(0,30,10)),
                          {0:0, 1:10, 2:20})
+    def test_lazy(self):
+        "Tests the lazy aspects of the ldict class."
         # Lazy dictionaries don't evaluate lazy arguments until they are
         # requested, and they only evaluate them once.
         def counter(n):
@@ -249,6 +251,24 @@ class TestLDict(TestCase):
         self.assertEqual(p1['a'], 1)
         self.assertEqual(p1['b'], 11)
         self.assertEqual(counter.count, 11)
+        # Converstion into a tdict preserves the lazy items.
+        counter.count = 0
+        p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
+        t1 = p1.transient()
+        self.assertIsInstance(t1['a'], lazy)
+        self.assertIsInstance(t1['b'], lazy)
+        # Conversion back into a lazy dict will hide these.
+        p2 = ldict(t1)
+        self.assertEqual(p2['a'], 1)
+        self.assertEqual(p2['b'], 11)
+        # Note that the new dictionary in this case shares the lazy values with
+        # the old dictionary.
+        self.assertEqual(p1['a'], 1)
+        self.assertEqual(p1['b'], 11)
+        # Equality comparisons depend on the reified, not lazy, values.
+        counter.count = 0
+        p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
+        self.assertEqual(p1, {'a': 1, 'b': 11})
     def test_immutable(self):
         """Ensures that `pdict` throws the right errors when one mutates it."""
         l = ldict(zip(range(10), range(0,100,10)))
