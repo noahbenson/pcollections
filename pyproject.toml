@@ -1,0 +1,39 @@
+[project]
+name = "pcollections"
+version = "0.2.0"
+description = "A persistent collections library for Python"
+authors = [
+    {name="Noah C. Benson", email="nben@uw.edu"}
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.7"
+
+keywords = ["persistent", "immutable", "functional", "lazy"]
+
+classifiers = [
+    'Intended Audience :: Developers',
+    'License :: OSI Approved :: MIT',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.7',
+    'Programming Language :: Python :: 3.8',
+    'Programming Language :: Python :: 3.9',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Topic :: Software Development',
+    'Topic :: Software Development :: Libraries',
+    'Topic :: Software Development :: Libraries :: Python Modules',
+    'Operating System :: Microsoft :: Windows',
+    'Operating System :: POSIX',
+    'Operating System :: Unix',
+    'Operating System :: MacOS'
+]
+
+dependencies = [
+    "phamt >= 0.1.6"
+]
+
+[project.urls]
+homepage = "https://github.com/noahbenson/pcollections"
+documentation = "https://github.com/noahbenson/pcollections"
+repository = "https://github.com/noahbenson/pcollections"
