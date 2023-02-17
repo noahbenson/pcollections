@@ -47,9 +47,12 @@ class pset(PersistentSet):
             raise TypeError(f"pset expects at most 1 argument, got {n}")
         # If arg is a tset, this is a special case.
         if isinstance(arg, tset):
-            return cls._new(arg._els.persistent(),
-                            arg._idx.persistent(),
-                            arg._top)
+            if len(arg) == 0:
+                return cls.empty
+            else:
+                return cls._new(arg._els.persistent(),
+                                arg._idx.persistent(),
+                                arg._top)
         # If it's a pset, we can just return it as-is.
         if isinstance(arg, pset):
             return arg

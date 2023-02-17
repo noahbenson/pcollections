@@ -113,7 +113,7 @@ class PersistentMapping(Mapping, Persistent):
         t = self.transient()
         for (k,v) in zip(keys, vals):
             t[k] = v
-        return t.persistent()
+        return type(self)(t)
     def dropall(self, keys):
         """Returns a copy of the persistent mapping that excludes all the keys
         in the given iterable.
@@ -123,7 +123,7 @@ class PersistentMapping(Mapping, Persistent):
         t = self.transient()
         for k in keys:
             t.drop(k)
-        return t.persistent()
+        return type(self)(t)
     def deleteall(self, keys):
         """Returns a copy of the persistent mapping that excludes all the keys
         in the given iterable.
@@ -133,7 +133,7 @@ class PersistentMapping(Mapping, Persistent):
         t = self.transient()
         for k in keys:
             del t[k]
-        return t.persistent()
+        return type(self)(t)
     def setdefault(self, key, default=None):
         """Returns a copy of the persistent mapping with the key inserted with a
         value of default, if key is not already in the mapping.
@@ -182,7 +182,7 @@ class PersistentMapping(Mapping, Persistent):
                 t[k] = v
         for (k,v) in kw.items():
             t[k] = v
-        return t.persistent()
+        return type(self)(t)
     def __reduce__(self):
         return (self.__new__, (type(self), list(self.items()),))
     def __json__(self):

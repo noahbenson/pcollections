@@ -35,11 +35,17 @@ class plist(PersistentSequence):
         arg = args[0]
         # If arg is a tlist, this is a special case.
         if isinstance(arg, tlist):
-            return cls._new(arg._thamt.persistent(), arg._start)
+            if len(arg) == 0:
+                return cls.empty
+            else:
+                return cls._new(arg._thamt.persistent(), arg._start)
         elif isinstance(arg, cls):
             return arg
         elif isinstance(arg, plist):
-            return cls._new(arg._phamt, arg._start)        
+            if len(arg) == 0:
+                return cls.empty
+            else:
+                return cls._new(arg._phamt, arg._start)        
         # We just want to build a PHAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)
         for (ii,val) in enumerate(iter(arg)):

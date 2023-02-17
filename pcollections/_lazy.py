@@ -155,6 +155,8 @@ class llist(plist):
             return not v.is_cached()
         else:
             return False
+    def clear(self):
+        return llist.empty
 # Setup the llist.empty static member.
 llist.empty = llist._new(PHAMT.empty, 0)
 
@@ -218,5 +220,7 @@ class ldict(pdict):
             return not v.is_cached()
         else:
             return False
+    def clear(self):
+        return ldict.empty
 # Make the empty pdict.
 ldict.empty = ldict._new(PHAMT.empty, PHAMT.empty, 0)

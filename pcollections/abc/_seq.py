@@ -116,13 +116,13 @@ class PersistentSequence(Persistent, Sequence):
         t = self.clear().transient()
         for k in sorted(self, key=key, reverse=reverse):
             t.append(k)
-        return t.persistent()
+        return type(self)(t)
     def reverse(self):
         """Returns a plist that is a reversed copy."""
         t = self.clear().transient()
         for el in self.__reversed__():
             t.append(el)
-        return t.persistent()
+        return type(self)(t)
     def __str__(self):
         # We have a max length of 60 characters, not counting the delimiters.
         return f"[|{seqstr(self, maxlen=60)}|]"
@@ -179,7 +179,7 @@ class PersistentSequence(Persistent, Sequence):
         t = self.transient()
         for el in iterable:
             t.append(el)
-        return t.persistent()
+        return type(self)(t)
     def index(self, value, start=0, stop=None):
         """Returns first index of value.
 
@@ -230,7 +230,7 @@ class PersistentSequence(Persistent, Sequence):
             t = self.transient()
             for el in reversed(obj):
                 t.prepend(el)
-            return t.persistent()
+            return type(self)(t)
     def __mul__(self, value):
         if not isinstance(value, Integral):
             msg = f"can't multiply sequence by non-int of type '{type(value)}'"
@@ -246,7 +246,7 @@ class PersistentSequence(Persistent, Sequence):
         for r in range(reps - 1):
             for el in self:
                 t.append(el)
-        return t.persistent()
+        return type(self)(t)
     def __rmul__(self, value):
         return self.__mul__(value)
     # For pickling:

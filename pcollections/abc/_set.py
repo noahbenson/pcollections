@@ -112,42 +112,42 @@ class PersistentSet(Set, Persistent):
                             f" '{type(self)}' and '{type(other)}'")
         t = self.transient()
         t &= other
-        return t.persistent()
+        return type(self)(t)
     def __or__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for |:"
                             f" '{type(self)}' and '{type(other)}'")
         t = self.transient()
         t |= other
-        return t.persistent()
+        return type(self)(t)
     def __sub__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for -:"
                             f" '{type(self)}' and '{type(other)}'")
         t = self.transient()
         t -= other
-        return t.persistent()
+        return type(self)(t)
     def __xor__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for ^:"
                             f" '{type(self)}' and '{type(other)}'")
         t = self.transient()
         t ^= other
-        return t.persistent()
+        return type(self)(t)
     def __rand__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for &:"
                             f" '{type(other)}' and '{type(set)}'")
         t = self.transient()
         t &= other
-        return t.persistent()
+        return type(self)(t)
     def __ror__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for |:"
                             f" '{type(other)}' and '{type(set)}'")
         t = self.transient()
         t |= other
-        return t.persistent()
+        return type(self)(t)
     def __rsub__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for -:"
@@ -155,14 +155,14 @@ class PersistentSet(Set, Persistent):
         t = self.clear().transient()
         t.adall(other)
         t -= self
-        return t.persistent()
+        return type(self)(t)
     def __rxor__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for ^:"
                             f" '{type(other)}' and '{type(set)}'")
         t = self.transient()
         t ^= other
-        return t.persistent()
+        return type(self)(t)
     def isdisjoint(self, other):
         """Returns `True` if two sets have a null intersection."""
         return setcmp(self, other) is None
@@ -195,7 +195,7 @@ class PersistentSet(Set, Persistent):
         if len(t) == len(self):
             return self
         else:
-            return t.persistent()
+            return type(self)(t)
     def discardall(self, iterable):
         """Returns a copy of the persistent set with the given elements
         discarded.
@@ -207,7 +207,7 @@ class PersistentSet(Set, Persistent):
         if len(t) == len(self):
             return self
         else:
-            return t.persistent()
+            return type(self)(t)
     def removeall(self, iterable):
         """Returns a copy of the persistent set with the given elements
         discarded.
@@ -219,7 +219,7 @@ class PersistentSet(Set, Persistent):
         if len(t) == len(self):
             return self
         else:
-            return t.persistent()
+            return type(self)(t)
     def __reduce__(self):
         return (self.__new__, (type(self), list(self),))
 
