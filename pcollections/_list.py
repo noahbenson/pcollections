@@ -5,6 +5,7 @@
 # By Noah C. Benson
 
 from itertools import (chain, islice)
+from typing import TypeVar, Generic
 
 from phamt import (PHAMT,THAMT)
 
@@ -14,7 +15,10 @@ from .abc import (PersistentSequence, TransientSequence)
 #===============================================================================
 # plist
 
-class plist(PersistentSequence):
+_T = TypeVar('_T')
+
+
+class plist(PersistentSequence, Generic[_T]):
     """A persistent list type similar to `list`.
 
     `plist()` returns an empty `plist`.
@@ -110,7 +114,7 @@ class plist(PersistentSequence):
             del thamt[st]
             st += 1
         return self._new(thamt.persistent(), st)
-    def append(self, obj):
+    def append(self, obj: _T) -> 'plist[_T]':
         """Returns a new list with object appended."""
         phamt = self._phamt
         n = len(phamt)
