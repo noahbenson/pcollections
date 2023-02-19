@@ -13,6 +13,7 @@ from collections.abc import (
     ItemsView,
     ValuesView
 )
+from typing import TypeVar, Generic, Optional, Tuple, Iterable, Dict
 
 from phamt import (
     PHAMT,
@@ -23,6 +24,9 @@ from .abc import (
     PersistentMapping,
     TransientMapping
 )
+
+K = TypeVar('K')
+V = TypeVar('V')
 
 
 #===============================================================================
@@ -77,7 +81,7 @@ class pdict_values(ValuesView, PDictView):
             if v0 == v:
                 return True
         return False
-class pdict(PersistentMapping):
+class pdict(PersistentMapping, Generic[K, V]):
     """A persistent dict type similar to `dict`.
 
     `pdict()` returns the empty `pdict`.
@@ -90,7 +94,7 @@ class pdict(PersistentMapping):
     """
     empty = None
     @classmethod
-    def _new(cls, els, idx, top):
+    def _new(cls, els, idx, top) -> 'pdict[K, V]':
         new_pdict = super(pdict, cls).__new__(cls)
         object.__setattr__(new_pdict, '_els', els)
         object.__setattr__(new_pdict, '_idx', idx)
@@ -98,7 +102,7 @@ class pdict(PersistentMapping):
         object.__setattr__(new_pdict, '_hashcode', None)
         return new_pdict
     __slots__ = ("_els", "_idx", "_top", "_hashcode")
-    def __new__(cls, *args, **kw):
+    def __new__(cls, *args: Dict[K, V] | 'tdict[K, V]' | 'pdict[K, V]', **kw: V) -> 'pdict[K, V]':
         n = len(args)
         if n == 1:
             arg = args[0]
@@ -141,9 +145,9 @@ class pdict(PersistentMapping):
             h = PersistentMapping.__hash__(self)
             object.__setattr__(self, '_hashcode', h)
         return self._hashcode
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._els)
-    def __contains__(self, k):
+    def __contains__(self, k: K) -> bool:
         h = hash(k)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -151,9 +155,9 @@ class pdict(PersistentMapping):
             if k == kk:
                 return True
         return False
-    def __iter__(self):
+    def __iter__(self) -> Iterable[K]:
         return map(lambda arg: arg[1][0][0], self._els)
-    def __getitem__(self, key):
+    def __getitem__(self, key: K) -> V:
         h = hash(key)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -161,7 +165,7 @@ class pdict(PersistentMapping):
             if key == kv[0]:
                 return kv[1]
         raise KeyError(key)
-    def get(self, key, default=None):
+    def get(self, key: K, default: Optional[V] = None) -> V:
         h = hash(key)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -169,10 +173,10 @@ class pdict(PersistentMapping):
             if key == kv[0]:
                 return kv[1]
         return default
-    def transient(self):
+    def transient(self) -> 'tdict[K, V]':
         """Returns a transient copy of the dict in constant time."""
         return tdict._new(THAMT(self._els), THAMT(self._idx), self._top, self)
-    def set(self, key, val):
+    def set(self, key: K, val: V) -> 'pdict[K, V]':
         """Returns a copy of the pdict that maps the given key to the given
         value."""
         # Get the hash and initial index (if there is one).
@@ -201,7 +205,7 @@ class pdict(PersistentMapping):
             new_els = self._els.assoc(self._top, ((key,val), None))
             new_els = new_els.assoc(ii, (kv, self._top))
         return self._new(new_els, new_idx, self._top + 1)
-    def drop(self, key):
+    def drop(self, key: K)  -> 'pdict[K, V]':
         """Returns a copy of the pdict that does not include the given key.
 
         If the key is not in the dict, returns the dict unchanged.
@@ -236,12 +240,12 @@ class pdict(PersistentMapping):
         # If we reach this point, then obj isn't in the set, so we just return
         # self unchanged.
         return self
-    def clear(self):
+    def clear(self) -> 'pdict[K, V]':
         """Returns the empty pdict."""
         return type(self).empty
     # We include reimplements for some of these because we can improve them in
     # some non-trivial way.
-    def pop(self, key, *args):
+    def pop(self, key: K, *args) -> Tuple[V, 'pdict[K, V]']:
         """Returns a tuple of the value mapped to the given key and a copy of
         the pdict with that key removed. 
 
@@ -339,7 +343,7 @@ class tdict_values(ValuesView, tdict_view):
             if kv[1] == v:
                 return True
         return False
-class tdict(TransientMapping):
+class tdict(TransientMapping, Generic[K, V]):
     """A transient dict type similar to `dict` for mutating persistent dicts.
 
     `tdict()` returns the empty `tdict`.
@@ -357,7 +361,7 @@ class tdict(TransientMapping):
     efficient by reducing the number of allocations required.
     """
     @classmethod
-    def _new(cls, els, idx, top, orig=None):
+    def _new(cls, els, idx, top, orig=None) -> 'tdict[K, V]':
         new_tdict = super(tdict, cls).__new__(cls)
         object.__setattr__(new_tdict, '_els', els)
         object.__setattr__(new_tdict, '_idx', idx)
@@ -366,11 +370,11 @@ class tdict(TransientMapping):
         object.__setattr__(new_tdict, '_orig', orig)
         return new_tdict
     @classmethod
-    def empty(cls):
+    def empty(cls) -> 'tdict[K, V]':
         """Returns an empty tdict."""
         return cls._new(THAMT(PHAMT.empty), THAMT(PHAMT.empty), 0)
     __slots__ = ("_els", "_idx", "_top","_version")
-    def __new__(cls, *args, **kw):
+    def __new__(cls, *args: Dict[K, V] | 'tdict[K, V]' | 'pdict[K, V]' , **kw) -> 'tdict[K, V]':
         n = len(args)
         if n == 1:
             arg = args[0]
@@ -401,9 +405,9 @@ class tdict(TransientMapping):
             for (k,v) in kw.items():
                 obj[k] = v
         return obj
-    def __setattr__(self, k, v):
+    def __setattr__(self, k: K, v: V):
         raise TypeError("tdict attributes are immutable")
-    def __setitem__(self, k, v):
+    def __setitem__(self, k: K, v: V):
         # Get the hash and initial index (if there is one).
         h = hash(k)
         ii = self._idx.get(h, None)
@@ -436,9 +440,9 @@ class tdict(TransientMapping):
         object.__setattr__(self, '_top', self._top + 1)
         object.__setattr__(self, '_version', self._version + 1)
         object.__setattr__(self, '_orig', None)
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._els)
-    def __contains__(self, k):
+    def __contains__(self, k: K) -> bool:
         h = hash(k)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -446,7 +450,7 @@ class tdict(TransientMapping):
             if k == kk:
                 return True
         return False
-    def __getitem__(self, key):
+    def __getitem__(self, key: K) -> V:
         h = hash(key)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -454,7 +458,7 @@ class tdict(TransientMapping):
             if key == kv[0]:
                 return kv[1]
         raise KeyError(key)
-    def get(self, key, default=None):
+    def get(self, key: K, default: Optional[V]=None) -> Optional[V]:
         h = hash(key)
         ii = self._idx.get(h, None)
         while ii is not None:
@@ -462,7 +466,7 @@ class tdict(TransientMapping):
             if key == kv[0]:
                 return kv[1]
         raise default
-    def __iter__(self):
+    def __iter__(self) -> Iterable[K]:
         v0 = self._version
         def _iter_key(arg):
             if v0 < self._version:
@@ -470,7 +474,7 @@ class tdict(TransientMapping):
             else:
                 return arg[1][0][0]
         return map(_iter_key, self._els)
-    def __delitem__(self, key):
+    def __delitem__(self, key: K):
         # Get the hash and initial index (if there is one).
         h = hash(key)
         ii = self._idx.get(h, None)
@@ -508,7 +512,7 @@ class tdict(TransientMapping):
         object.__setattr__(self, '_top', 0)
         object.__setattr__(self, '_version', 0)
         return None
-    def pop(self, key, *args):
+    def pop(self, key: K, *args) -> V:
         """Removes the given key from the tdict and returns the previously
         associated value.
 
@@ -548,7 +552,7 @@ class tdict(TransientMapping):
             raise KeyError(key)
         else:
             return args[0]
-    def persistent(self):
+    def persistent(self) -> pdict[K, V]:
         """Efficiently returns a persistent (pdict) copy of the tdict."""
         if len(self) == 0:
             return pdict.empty

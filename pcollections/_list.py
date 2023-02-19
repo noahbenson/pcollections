@@ -5,7 +5,7 @@
 # By Noah C. Benson
 
 from itertools import (chain, islice)
-from typing import TypeVar, Generic
+from typing import TypeVar, Generic, Iterable
 
 from phamt import (PHAMT, THAMT)
 
@@ -27,7 +27,7 @@ class plist(PersistentSequence, Generic[T]):
     """
     empty = None
     __slots__ = ("_phamt", "_start", "_hashcode")
-    def __new__(cls, *args, **kw) -> 'plist[T]':
+    def __new__(cls, *args: Iterable[T], **kw) -> 'plist[T]':
         if len(kw) > 0:
             raise TypeError(f"{cls.__name__}() takes no keyword arguments")
         n = len(args)
@@ -49,7 +49,7 @@ class plist(PersistentSequence, Generic[T]):
             if len(arg) == 0:
                 return cls.empty
             else:
-                return cls._new(arg._phamt, arg._start)        
+                return cls._new(arg._phamt, arg._start)
         # We just want to build a PHAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)
         for (ii,val) in enumerate(iter(arg)):
