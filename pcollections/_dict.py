@@ -461,7 +461,7 @@ class tdict(TransientMapping):
             (kv,ii) = self._els[ii]
             if key == kv[0]:
                 return kv[1]
-        raise default
+        return default
     def __iter__(self):
         v0 = self._version
         def _iter_key(arg):
