@@ -7,18 +7,18 @@
 from itertools import (chain, islice)
 from typing import TypeVar, Generic
 
-from phamt import (PHAMT,THAMT)
+from phamt import (PHAMT, THAMT)
 
 from .abc import (PersistentSequence, TransientSequence)
 
+T = TypeVar('T')
 
-#===============================================================================
+
+# ===============================================================================
 # plist
 
-_T = TypeVar('_T')
 
-
-class plist(PersistentSequence, Generic[_T]):
+class plist(PersistentSequence, Generic[T]):
     """A persistent list type similar to `list`.
 
     `plist()` returns an empty `plist`.
@@ -27,7 +27,7 @@ class plist(PersistentSequence, Generic[_T]):
     """
     empty = None
     __slots__ = ("_phamt", "_start", "_hashcode")
-    def __new__(cls, *args, **kw):
+    def __new__(cls, *args, **kw) -> 'plist[T]':
         if len(kw) > 0:
             raise TypeError(f"{cls.__name__}() takes no keyword arguments")
         n = len(args)
@@ -60,13 +60,13 @@ class plist(PersistentSequence, Generic[_T]):
         # Otherwise, we make a new plist and give it this phamt.
         return cls._new(phamt, 0)
     @classmethod
-    def _new(cls, phamt, start):
+    def _new(cls, phamt, start) -> 'plist[T]':
         new_plist = super(plist, cls).__new__(cls)
         object.__setattr__(new_plist, '_phamt', phamt)
         object.__setattr__(new_plist, '_start', start)
         object.__setattr__(new_plist, '_hashcode', None)
         return new_plist
-    def set(self, index, obj):
+    def set(self, index: int, obj: 'plist[T]') -> 'plist[T]':
         """Returns a copy of the list with the given index set to the given
         object."""
         start = self._start
@@ -81,7 +81,7 @@ class plist(PersistentSequence, Generic[_T]):
             return self
         new_phamt = phamt.assoc(index, obj)
         return self._new(new_phamt, start)
-    def delete(self, index=-1):
+    def delete(self, index: int = -1) -> 'plist[T]':
         """"Returns a copy of the plist with the item at index removed (default
         index: last)."""
         phamt = self._phamt
@@ -114,20 +114,20 @@ class plist(PersistentSequence, Generic[_T]):
             del thamt[st]
             st += 1
         return self._new(thamt.persistent(), st)
-    def append(self, obj: _T) -> 'plist[_T]':
+    def append(self, obj: T) -> 'plist[T]':
         """Returns a new list with object appended."""
         phamt = self._phamt
         n = len(phamt)
         new_phamt = phamt.assoc(self._start + n, obj)
         return self._new(new_phamt, self._start)
-    def prepend(self, obj):
+    def prepend(self, obj: T) -> 'plist[T]':
         """Returns a new list with object prepended."""
         phamt = self._phamt
         n = len(phamt)
         new_start = self._start - 1
         new_phamt = phamt.assoc(new_start, obj)
         return self._new(new_phamt, new_start)
-    def insert(self, index, obj):
+    def insert(self, index: int, obj: T) -> 'plist[T]':
         """Returns a new plist with object inserted before index."""
         start = self._start
         phamt = self._phamt
@@ -149,10 +149,10 @@ class plist(PersistentSequence, Generic[_T]):
             thamt[index + start] = obj
         phamt = thamt.persistent()
         return self._new(phamt, start)
-    def clear(self):
+    def clear(self) -> 'plist[T]':
         """Returns the empty plist."""
         return plist.empty
-    def __iter__(self):
+    def __iter__(self) -> T:
         phamt = self._phamt
         n = len(phamt)
         st = self._start
@@ -162,10 +162,10 @@ class plist(PersistentSequence, Generic[_T]):
             from itertools import chain, islice
             return chain((phamt[k] for k in range(st, 0)),
                          islice(map(lambda u:u[1], phamt), 0, n + st))
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the length of the plist."""
         return len(self._phamt)
-    def __getitem__(self, k):
+    def __getitem__(self, k) -> T:
         st = self._start
         phamt = self._phamt
         n = len(phamt)
@@ -189,7 +189,7 @@ class plist(PersistentSequence, Generic[_T]):
         elif k < 0:
             k += n
         return phamt[k + st]
-    def transient(self):
+    def transient(self) -> 'tlist[T]':
         """Efficiently copes the plist into a tlist and returns the tlist."""
         return tlist._new(THAMT(self._phamt), self._start, self)
     # We redefine the hash function in order to use the _hashcode member.
@@ -206,7 +206,7 @@ plist.empty = plist._new(PHAMT.empty, 0)
 # tlist
 # The transient list type.
 
-class tlist(TransientSequence):
+class tlist(TransientSequence, Generic[T]):
     """A transient list type, similar to `list`, for mutating persistent lists.
 
     `tlist()` returns an empty `tlist`.
@@ -219,11 +219,11 @@ class tlist(TransientSequence):
     method.
     """
     @classmethod
-    def empty(cls):
+    def empty(cls) -> 'tlist[T]':
         "Returns an empty tlist."
         return cls._new(THAMT(PHAMT.empty), 0)
     __slots__ = ("_thamt", "_start", "_orig")
-    def __new__(cls, *args, **kw):
+    def __new__(cls, *args, **kw) -> 'tlist[T]':
         if len(kw) > 0:
             raise TypeError("tlist() takes no keyword arguments")
         n = len(args)
@@ -241,7 +241,7 @@ class tlist(TransientSequence):
         # We make a new tlist and give it this phamt.
         return cls._new(thamt, 0)
     @classmethod
-    def _new(cls, thamt, start, orig=None):
+    def _new(cls, thamt, start, orig=None) -> 'tlist[T]':
         new_tlist = super(tlist, cls).__new__(cls)
         object.__setattr__(new_tlist, '_thamt', thamt)
         object.__setattr__(new_tlist, '_start', start)
@@ -252,7 +252,7 @@ class tlist(TransientSequence):
         object.__setattr__(self, '_thamt', THAMT(PHAMT.empty))
         object.__setattr__(self, '_start', 0)
         object.__setattr__(self, '_orig', None)
-    def persistent(self):
+    def persistent(self) -> 'plist[T]':
         """Efficiently copies the tlist into a plist and returns the plist."""
         if len(self._thamt) == 0:
             return plist.empty
@@ -260,7 +260,7 @@ class tlist(TransientSequence):
             return plist._new(self._thamt.persistent(), self._start)
         else:
             return self._orig
-    def __iter__(self):
+    def __iter__(self) -> T:
         st = self._start
         th = self._thamt
         n = len(th)
@@ -269,10 +269,10 @@ class tlist(TransientSequence):
         else:
             return chain((th[k] for k in range(st, 0)),
                          islice(map(lambda u:u[1], iter(th)), 0, n + st))
-    def __len__(self):
+    def __len__(self) -> int:
         """Returns the length of the tlist."""
         return len(self._thamt)
-    def __getitem__(self, k):
+    def __getitem__(self, k: int) -> T:
         st = self._start
         thamt = self._thamt
         n = len(thamt)
@@ -296,7 +296,7 @@ class tlist(TransientSequence):
         elif k < 0:
             k += n
         return thamt[k + st]
-    def __setitem__(self, k, v):
+    def __setitem__(self, k: int, v: int):
         n = len(self._thamt)
         if k >= n or k < -n:
             raise IndexError(k)
@@ -304,7 +304,7 @@ class tlist(TransientSequence):
             k += n
         self._thamt[k + self._start] = v
         object.__setattr__(self, '_orig', None)
-    def __delitem__(self, index=-1):
+    def __delitem__(self, index: int = -1):
         """Remove and return item at index (default last).
 
         Raises IndexError if list is empty or index is out of range."""
@@ -325,20 +325,20 @@ class tlist(TransientSequence):
             del th[st]
             self._start += 1
         object.__setattr__(self, '_orig', None)
-    def append(self, obj):
+    def append(self, obj: T):
         """Appends object to the end of the list."""
         thamt = self._thamt
         n = len(thamt)
         thamt[n + self._start] = obj
         object.__setattr__(self, '_orig', None)
-    def prepend(self, obj):
+    def prepend(self, obj: T):
         """Prepends object to the beginning of the tlist."""
         thamt = self._thamt
         n = len(thamt)
         self._start -= 1
         thamt[self._start] = obj
         object.__setattr__(self, '_orig', None)
-    def insert(self, index, obj):
+    def insert(self, index: int, obj: T):
         """Inserts the given object before the given index."""
         st = self._start
         th = self._thamt
