@@ -13,7 +13,7 @@ from collections.abc import (
     ItemsView,
     ValuesView
 )
-from typing import TypeVar, Generic, Optional, Tuple, Iterable, Dict
+from typing import TypeVar, Generic, Optional, Tuple, Iterable, Dict, Union
 
 from phamt import (
     PHAMT,
@@ -102,7 +102,7 @@ class pdict(PersistentMapping, Generic[K, V]):
         object.__setattr__(new_pdict, '_hashcode', None)
         return new_pdict
     __slots__ = ("_els", "_idx", "_top", "_hashcode")
-    def __new__(cls, *args: Dict[K, V] | 'tdict[K, V]' | 'pdict[K, V]', **kw: V) -> 'pdict[K, V]':
+    def __new__(cls, *args: Union[Dict[K, V], Union['tdict[K, V]', Union['pdict[K, V]']]], **kw: V) -> 'pdict[K, V]':
         n = len(args)
         if n == 1:
             arg = args[0]
@@ -374,7 +374,7 @@ class tdict(TransientMapping, Generic[K, V]):
         """Returns an empty tdict."""
         return cls._new(THAMT(PHAMT.empty), THAMT(PHAMT.empty), 0)
     __slots__ = ("_els", "_idx", "_top","_version")
-    def __new__(cls, *args: Dict[K, V] | 'tdict[K, V]' | 'pdict[K, V]' , **kw) -> 'tdict[K, V]':
+    def __new__(cls, *args: Union[Dict[K, V], Union['tdict[K, V]', Union['pdict[K, V]']]], **kw) -> 'tdict[K, V]':
         n = len(args)
         if n == 1:
             arg = args[0]
