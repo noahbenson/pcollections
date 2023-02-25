@@ -137,7 +137,11 @@ class TestPSet(TestCase):
             self.assertEqual(p, t)
             self.assertEqual(p, l)
             self.assertEqual(l, t)
-            if randint(0, 20) == 0:
+            if randint(0, 10) == 0:
                 tmp = t.persistent()
                 self.assertEqual(tmp, p)
                 self.assertEqual(tmp, t)
+                for k in l:
+                    self.assertIn(k, p)
+                    self.assertIn(k, t)
+                    self.assertIn(k, tmp)
