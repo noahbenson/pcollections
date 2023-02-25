@@ -215,11 +215,26 @@ class ldict(pdict):
         return ldict_values(self)
     def is_lazy(self, index):
         """Determines if the given index is an uncached lazy value."""
-        v = self[index]
+        v = pdict.__getitem__(self, index)
         if isinstance(v, lazy):
             return not v.is_cached()
         else:
             return False
+    def cacheall(self):
+        "Caches all lazy items then returns the dictionary."
+        for arg in self._els:
+            (k,v) = arg[1][0]
+            if isinstance(v, lazy):
+                v()
+        return self
+    def to_pdict(self):
+        "Returns a `pdict` copy of the lazy dict with all items cached."
+        t = self.transient()
+        changes = [(h, ((k,v()),ii)) for (h,((k,v),ii)) in t._els
+                   if isinstance(v, lazy)]
+        for (h, item) in changes:
+            t._els[h] = item
+        return pdict(t)
     def clear(self):
         return ldict.empty
 # Make the empty pdict.
