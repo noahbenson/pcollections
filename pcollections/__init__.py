@@ -16,7 +16,7 @@ from ._lazy import (lazy, llist, ldict)
 # frequently used and don't really need to be here. One can always `import
 # pcollections.abc` if they are needed.
 # 
-# from .abc   import (
+# from .abc import (
 #     Persistent,         Transient,
 #     PersistentSequence, TransientSequence,
 #     PersistentSet,      TransientSet,
@@ -30,5 +30,5 @@ __all__ = [
     "lazy", "llist", "ldict"
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 

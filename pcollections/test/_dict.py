@@ -168,6 +168,10 @@ class TestLDict(TestCase):
         self.assertEqual(p1[0], 10)
         self.assertEqual(p1[5], 15)
         self.assertEqual(p1[9], 19)
+        self.assertEqual(p1.get(0), 10)
+        self.assertEqual(p1.get(5), 15)
+        self.assertEqual(p1.get(100), None)
+        self.assertEqual(p1.get(100, -1), -1)
         # ldicts can be equal to each other and to other Mappings like dicts.
         l1 = dict(zip(range(0,10), range(10,20)))
         self.assertEqual(l1, p1)
