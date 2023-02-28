@@ -8,7 +8,7 @@ from random import randint
 from unittest import TestCase
 
 from .._list import (plist, tlist)
-from .._lazy import (lazy, llist)
+from .._lazy import (lazy, llist, tllist)
 
 class TestPList(TestCase):
     """Tests for the `plist` and `tlist` classes.
@@ -348,20 +348,24 @@ class TestLList(TestCase):
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
         self.assertEqual(counter.count, 11)
-        # Converstion into a tdict preserves the lazy items.
+        # Converstion via to_pdict preserves the lazy items.
         counter.count = 0
         p1 = llist([lazy(counter, 1), lazy(counter, 10)])
-        t1 = p1.transient()
+        t1 = p1.to_plist()
+        self.assertIsInstance(t1, plist)
         self.assertIsInstance(t1[0], lazy)
         self.assertIsInstance(t1[1], lazy)
-        # Conversion back into a lazy dict will hide these.
-        p2 = llist(t1)
-        self.assertEqual(p2[0], 1)
-        self.assertEqual(p2[1], 11)
+        # Conversion to a transient creates a lazy transient.
+        t1 = p1.transient()
+        self.assertIsInstance(t1, tllist)
+        self.assertEqual(t1[0], 1)
+        self.assertEqual(t1[1], 11)
         # Note that the new dictionary in this case shares the lazy values with
         # the old dictionary.
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
+        # To extract the lazy object itself, one can use getlazy:
+        self.assertIs(p1.getlazy(0), t1.getlazy(0))
         # Equality comparisons depend on the reified, not lazy, values.
         counter.count = 0
         p1 = llist([lazy(counter, 1), lazy(counter, 10)])

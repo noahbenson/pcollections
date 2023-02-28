@@ -10,7 +10,7 @@
 from ._list import (plist, tlist)
 from ._set  import (pset,  tset)
 from ._dict import (pdict, tdict)
-from ._lazy import (lazy, llist, ldict)
+from ._lazy import (lazy, unlazy, llist, ldict)
 
 # We don't include the abc types in the __all__; they are probably not as
 # frequently used and don't really need to be here. One can always `import
@@ -27,7 +27,8 @@ __all__ = [
     "plist", "tlist",
     "pset",  "tset",
     "pdict", "tdict",
-    "lazy", "llist", "ldict"
+    "lazy", "unlazy",
+    "llist", "ldict"
 ]
 
 __version__ = "0.2.2"

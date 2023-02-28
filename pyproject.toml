@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "phamt >= 0.1.6"
+    "phamt >= 0.1.7"
 ]
 
 [project.urls]
