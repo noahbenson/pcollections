@@ -9,7 +9,7 @@ A persistent collections library for Python.
 the immutable data structures of [Clojure](clojure.org) but built to resemble
 the native Python collections as closely as possible. The library is implemented
 in Python but employs the [`phamt`](https://github.com/noahbenson/phamt)
-(Persistent Hash Array Mapped Tries) library, which is implemented in C,to
+(Persistent Hash Array Mapped Tries) library, which is implemented in C, to
 perform efficient low-level operations.
 
 The library implements three persistent types: `plist`, `pset`, and
@@ -31,10 +31,10 @@ types with one exception. Elements of an `llist` and values of an `ldict` that
 are of the `lazy` type are dereferenced when requested. This allows a programmer
 to easily create data structures (potentially nested data structures) whose
 items are the results of complex or long-running computations that only get
-requested as necessary. The persistent data structures allow the arguments to
+computed once requested. The persistent data structures allow the arguments to
 these lazy functions to be safe from mutation.
 
-Finally, the persistent and lazy types have transient correlaries. which enable
+Finally, the persistent and lazy types have transient correlaries that enable
 more efficient batch-mutation of the persistent types. The transient types
 `tlist`, `tset`, `tdict`, `tllist`, and `tldict` all have interfaces equivalent
 to their standard mutable correlaries (transient types are mutable).
