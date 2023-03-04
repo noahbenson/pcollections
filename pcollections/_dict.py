@@ -49,12 +49,14 @@ class PDictView(MappingView):
         raise NotImplementedError()
     def __contains__(self, k):
         raise NotImplementedError()
-class pdict_keys(PDictView):
+class pdict_keys(KeysView, PDictView):
     __slots__ = ()
     def _from_kv(self, kv):
         return kv[0]
     def __contains__(self, k):
         return (k in self._mapping)
+    def __reversed__(self):
+        return reversed(list(self.__iter__()))
 class pdict_items(ItemsView, PDictView):
     __slots__ = ()
     def _from_kv(self, kv):
@@ -153,6 +155,8 @@ class pdict(PersistentMapping):
         return False
     def __iter__(self):
         return map(lambda arg: arg[1][0][0], self._els)
+    def __reversed__(self):
+        return reversed(self.keys())
     def __getitem__(self, key):
         h = hash(key)
         ii = self._idx.get(h, None)
@@ -281,6 +285,12 @@ class pdict(PersistentMapping):
             raise KeyError(key)
         else:
             return (args[0], self)
+    def keys(self):
+        return pdict_keys(self)
+    def items(self):
+        return pdict_items(self)
+    def values(self):
+        return pdict_values(self)
 # Make the empty pdict.
 pdict.empty = pdict._new(PHAMT.empty, PHAMT.empty, 0)
 
@@ -446,6 +456,8 @@ class tdict(TransientMapping):
             if k == kk:
                 return True
         return False
+    def __reversed__(self):
+        return reversed(self.keys())
     def __getitem__(self, key):
         h = hash(key)
         ii = self._idx.get(h, None)
