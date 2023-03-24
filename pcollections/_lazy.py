@@ -9,6 +9,7 @@ from threading import RLock
 
 from phamt import (PHAMT, THAMT)
 
+from .util import seqstr
 from ._list import (
     plist,
     tlist
@@ -105,7 +106,7 @@ class lazy:
             finally:
                 rlock.release()
     def __repr__(self):
-        s = 'ready' if self.is_cached() else 'waiting'
+        s = 'ready' if self.is_ready() else 'waiting'
         return f"lazy(<{id(self)}>: {s})"
     def __str__(self):
         return f"lazy(<{id(self)}>)"
@@ -125,6 +126,18 @@ def unlazy(obj):
        return obj()
     else:
        return obj
+def reprlazy(obj):
+    """Returns `'<lazy>'` if `obj` is a `lazy` object, otherwise `repr(obj)`."""
+    if isinstance(obj, lazy):
+        return "<lazy>"
+    else:
+        return repr(obj)
+def strlazy(obj):
+    """Returns `'<lazy>'` if `obj` is a `lazy` object, otherwise `str(obj)`."""
+    if isinstance(obj, lazy):
+        return "<lazy>"
+    else:
+        return str(obj)
 
 
 #===============================================================================
@@ -156,6 +169,11 @@ class llist(plist):
     def __getitem__(self, k):
         el = plist.__getitem__(self, k)
         return el() if isinstance(el, lazy) else el
+    def __str__(self):
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"[|{seqstr(self.to_plist(), maxlen=60, tostr=reprlazy)}|]"
+    def __repr__(self):
+        return f"[|{seqstr(self.to_plist())}|]"
     def is_lazy(self, index):
         """Determines if the given key is mapped to a `lazy` value.
 
@@ -279,6 +297,11 @@ class ldict(pdict):
         if isinstance(v, lazy):
             v = v()
         return v
+    def __str__(self):
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"{{|{seqstr(self.to_pdict(), maxlen=60, tostr=reprlazy)}|}}"
+    def __repr__(self):
+        return f"{{|{seqstr(self.to_pdict())}|}}"
     def get(self, key, default=None):
         v = pdict.get(self, key, default)
         if isinstance(v, lazy):

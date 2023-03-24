@@ -57,6 +57,12 @@ class pdict_keys(KeysView, PDictView):
         return (k in self._mapping)
     def __reversed__(self):
         return reversed(list(self.__iter__()))
+    def __repr__(self):
+        s = ", ".join(map(repr, iter(self)))
+        return f"pdict_keys({{{s}}})"
+    def __str__(self):
+        s = ", ".join(map(repr, iter(self)))
+        return f"pdict_keys({{{s}}})"
 class pdict_items(ItemsView, PDictView):
     __slots__ = ()
     def _from_kv(self, kv):
