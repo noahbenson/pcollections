@@ -23,6 +23,8 @@ class TestPDict(TestCase):
         e = pdict()
         self.assertEqual(len(e), 0)
         self.assertIsInstance(e, pdict)
+        # Or with pdict({}) (and all empty pdicts are pdict.empty).
+        self.assertIs(pdict({}), pdict.empty)
         # This is identical to the pdict.empty object.
         self.assertIs(e, pdict.empty)
         # A pdict can also be created by passing an iterable to the type.
@@ -155,6 +157,8 @@ class TestLDict(TestCase):
         e = ldict()
         self.assertEqual(len(e), 0)
         self.assertIsInstance(e, ldict)
+        # Also with ldict({}) or similar.
+        self.assertIs(ldict({}), ldict.empty)
         # An ldict is also a pdict.
         self.assertIsInstance(e, pdict)
         # This is identical to the ldict.empty object.

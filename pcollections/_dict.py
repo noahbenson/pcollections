@@ -11,7 +11,8 @@ from collections.abc import (
     MappingView,
     KeysView,
     ItemsView,
-    ValuesView
+    ValuesView,
+    Sized
 )
 
 from phamt import (
@@ -123,27 +124,25 @@ class pdict(PersistentMapping):
         if not kw:
             # If arg is a tdict and no keyword arguments have been given, this
             # is a special case.
-            if isinstance(arg, tdict):
-                if len(arg) == 0:
-                    return cls.empty
-                else:
-                    return cls._new(arg._els.persistent(),
-                                    arg._idx.persistent(),
-                                    arg._top)
+            if isinstance(arg, Sized) and len(arg) == 0:
+                return cls.empty
+            elif isinstance(arg, tdict):
+                return cls._new(
+                    arg._els.persistent(),
+                    arg._idx.persistent(),
+                    arg._top)
             elif isinstance(arg, cls):
                 # Also, if it's already the right type, we can just return it
                 # as-is.
                 return arg
             elif isinstance(arg, pdict):
-                if len(arg) == 0:
-                    return cls.empty
-                else:
-                    return cls._new(arg._els, arg._idx, arg._top)
+                return cls._new(arg._els, arg._idx, arg._top)
         # For anything else, however, we just route this through tdict.
         t = tdict(arg, **kw)
-        return cls._new(t._els.persistent(),
-                        t._idx.persistent(),
-                        t._top)
+        return cls._new(
+            t._els.persistent(),
+            t._idx.persistent(),
+            t._top)
     def __hash__(self):
         if self._hashcode is None:
             h = PersistentMapping.__hash__(self)
