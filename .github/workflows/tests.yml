@@ -63,12 +63,12 @@ jobs:
     steps:
       # Check out the repository (goes to $GITHUB_WORKSPACE)
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: '2'
       # Setup the Python Environment.
       - name: Setup Python Environment
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.version }}
           architecture: ${{ matrix.arch }}
