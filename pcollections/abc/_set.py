@@ -153,7 +153,7 @@ class PersistentSet(Set, Persistent):
             raise TypeError(f"unsupported operand type for -:"
                             f" '{type(other)}' and '{type(set)}'")
         t = self.clear().transient()
-        t.adall(other)
+        t.addall(other)
         t -= self
         return type(self)(t)
     def __rxor__(self, other):
@@ -360,7 +360,7 @@ class TransientSet(MutableSet, Transient):
                             f" '{type(other)}' and '{type(set)}'")
         t = self.copy()
         t.clear()
-        t.adall(other)
+        t.addall(other)
         t -= self
         return t
     def __rxor__(self, other):
