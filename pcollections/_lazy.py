@@ -36,7 +36,10 @@ class LazyError(RuntimeError):
     def __init__(self, partial):
         self.partial = partial
     def __str__(self):
-        (fn, args, kwargs) = self.partial
+        if isinstance(self.partial, partial):
+            (fn, args, kwargs) = (p.func, p.args, p.keywords)
+        else:
+            (fn, args, kwargs) = self.partial
         fnname = getattr(fn, '__name__', '<anonymous>')
         errmsg = ('lazy raised error during call to '
                   f'{fnname}{tuple(args)}')
@@ -71,7 +74,7 @@ class lazy:
         # We want to prepare an error to raise if something happens during the
         # calculation of the lazy value in the __call__ method.
         try:
-            raise LazyError(part)
+            raise LazyError((fn, args, kw))
         except LazyError as e:
             error = e
         # Set the appropriate members.
