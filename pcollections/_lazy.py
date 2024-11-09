@@ -399,13 +399,15 @@ class tldict(tdict):
     """
     __slots__ = ()
     def persistent(self):
-        """Efficiently copies the tllist into an llist and returns the llist."""
-        if len(self._thamt) == 0:
+        """Efficiently copies the tldict into an ldict and returns the ldict."""
+        if len(self) == 0:
             return ldict.empty
-        elif self._orig is None:
-            return ldict._new(self._thamt.persistent(), self._start)
-        else:
+        elif self._orig is not None:
             return self._orig
+        else:
+            return ldict._new(self._els.persistent(),
+                              self._idx.persistent(),
+                              self._top)
     def __getitem__(self, k):
         return unlazy(tdict.__getitem__(self, k))
     def get(self, k, default=None):

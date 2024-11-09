@@ -8,7 +8,7 @@ from random import randint
 from unittest import TestCase
 
 from .._dict import (pdict, tdict)
-from .._lazy import (lazy, ldict)
+from .._lazy import (lazy, ldict, tldict)
 
 class TestPDict(TestCase):
     """Tests for the `pdict` and `tdict` classes.
@@ -283,6 +283,32 @@ class TestLDict(TestCase):
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
         self.assertEqual(p1, {'a': 1, 'b': 11})
+    def test_tdict(self):
+        """Ensures that tdict objects can be used with pdicts."""
+        p = pdict(a=1, b=2, c=3)
+        t = p.transient()
+        self.assertEqual(p, t)
+        self.assertIs(type(t), tdict)
+        self.assertIs(p, t.persistent())
+        self.assertIs(type(t), tdict)
+        t['d'] = 10
+        self.assertNotEqual(p, t)
+        self.assertIs(type(t.persistent()), pdict)
+        self.assertEqual(t['d'], 10)
+        self.assertEqual(t.persistent(), t)
+    def test_tldict(self):
+        """Ensures that tldict objects can be used with ldicts."""
+        p = ldict(a=1, b=2, c=3)
+        t = p.transient()
+        self.assertEqual(p, t)
+        self.assertIs(type(t), tldict)
+        self.assertIs(p, t.persistent())
+        self.assertIs(type(t), tldict)
+        t['d'] = 10
+        self.assertNotEqual(p, t)
+        self.assertIs(type(t.persistent()), ldict)
+        self.assertEqual(t['d'], 10)
+        self.assertEqual(t.persistent(), t)
     def test_immutable(self):
         """Ensures that `pdict` throws the right errors when one mutates it."""
         l = ldict(zip(range(10), range(0,100,10)))
