@@ -74,6 +74,7 @@ jobs:
           architecture: ${{ matrix.arch }}
       - name: Upgrade Setuptools
         run: |
+          python -m pip config set global.trusted-host "pypi.org files.pythonhosted.org pypi.python.org"
           python -m pip install --upgrade setuptools
       # Log the Python Version
       - name: Display Python version
