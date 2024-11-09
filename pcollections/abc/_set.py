@@ -165,7 +165,62 @@ class PersistentSet(Set, Persistent):
         return type(self)(t)
     def isdisjoint(self, other):
         """Returns `True` if two sets have a null intersection."""
+        if not isinstance(other, Set):
+            other = set(other)
         return setcmp(self, other) is None
+    def issubset(self, other):
+        """Report whether another set contains this set."""
+        if not isinstance(other, (set, frozenset)):
+            other = set(other)
+        return other.issuperset(self)
+    def issuperset(self, other):
+        """Report whether this set contains another set."""
+        if isinstance(other, (set, frozenset)):
+            return other.issubset(self)
+        else:
+            return all(map(self.__contains__, iter(other)))
+    def difference(self, *args):
+        """Returns the difference of two or more sets as a new persistent set.
+
+        (I.e., all elements that are in this set but not the others.)
+        """
+        t = self.transient()
+        for arg in args:
+            t.discardall(arg)
+        if len(self) == len(t):
+            return self
+        return type(self)(t)
+    def intersection(self, *args):
+        """Return the intersection of two sets as a new persistent set.
+
+        (I.e., all elements that are in both sets.)
+        """
+        t = self.transient()
+        for arg in args:
+            t &= arg
+        if len(t) == len(self):
+            return self
+        return type(self)(t)
+    def symmetric_difference(self, *args):
+        """Return the symmetric difference of two sets as a new set.
+
+        (I.e., all elements that are in exactly one of the sets.)
+        """
+        t = self.transient()
+        for arg in args:
+            t ^= arg
+        if len(t) == len(self):
+            return self
+        return type(self)(t)
+    def union(self, *args):
+        """Returns the union of the persistent set and all arguments."""
+        t = self.transient()
+        for arg in args:
+            t.addall(arg)
+        if len(t) == len(self):
+            return self
+        else:
+            return type(self)(t)
     def pop(self):
         """Returns a tuple of an arbitrary element from the persistent set and a
         copy of the set with that element removed.
@@ -322,6 +377,60 @@ class TransientSet(MutableSet, Transient):
     def isdisjoint(self, other):
         """Returns `True` if two sets have a null intersection."""
         return setcmp(self, other) is None
+    def issubset(self, other):
+        """Report whether another set contains this set."""
+        if not isinstance(other, (set, frozenset)):
+            other = set(other)
+        return other.issuperset(self)
+    def issuperset(self, other):
+        """Report whether this set contains another set."""
+        if isinstance(other, (set, frozenset)):
+            return other.issubset(self)
+        else:
+            return all(map(self.__contains__, iter(other)))
+    def difference_update(self, *args):
+        """Remove all elements of another set from this set."""
+        for arg in args:
+            self.discardall(arg)
+    def difference(self, *args):
+        """Returns the difference of two or more sets as a new transient set.
+
+        (I.e., all elements that are in this set but not the others.)
+        """
+        t = self.copy()
+        t.difference_update(*args)
+        return t
+    def intersection_update(self, *args):
+        """Update a set with the intersection of itself and another."""
+        for arg in args:
+            self &= arg
+    def intersection(self, *args):
+        """Return the intersection of two sets as a new transient set.
+
+        (I.e., all elements that are in both sets.)
+        """
+        t = self.copy()
+        t.intersection_update(*args)
+        return t
+    def symmetric_difference_update(self, other):
+        """Update a set with the symmetric difference of itself and another."""
+        self ^= arg
+    def symmetric_difference(self, other):
+        """Return the symmetric difference of two sets as a new set.
+
+        (I.e., all elements that are in exactly one of the sets.)
+        """
+        t = self.copy()
+        t.symmetric_difference_update(other)
+        return t
+    def update(self, *args):
+        for arg in args:
+            self.addall(arg)
+    def union(self, *args):
+        """Returns the union of the transient set and all arguments."""
+        t = self.copy()
+        t.update(*args)
+        return t
     def __and__(self, other):
         if not isinstance(other, Set):
             raise TypeError(f"unsupported operand type for &:"
