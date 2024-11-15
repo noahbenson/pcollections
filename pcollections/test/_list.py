@@ -348,10 +348,10 @@ class TestLList(TestCase):
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
         self.assertEqual(counter.count, 11)
-        # Converstion via to_pdict preserves the lazy items.
+        # Converstion via as_plist preserves the lazy items.
         counter.count = 0
         p1 = llist([lazy(counter, 1), lazy(counter, 10)])
-        t1 = p1.to_plist()
+        t1 = p1.as_plist()
         self.assertIsInstance(t1, plist)
         self.assertIsInstance(t1[0], lazy)
         self.assertIsInstance(t1[1], lazy)

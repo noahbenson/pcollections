@@ -174,9 +174,9 @@ class llist(plist):
         return el() if isinstance(el, lazy) else el
     def __str__(self):
         # We have a max length of 60 characters, not counting the delimiters.
-        return f"[|{seqstr(self.to_plist(), maxlen=60, tostr=reprlazy)}|]"
+        return f"[|{seqstr(self.as_plist(), maxlen=60, tostr=reprlazy)}|]"
     def __repr__(self):
-        return f"[|{seqstr(self.to_plist())}|]"
+        return f"[|{seqstr(self.as_plist())}|]"
     def is_lazy(self, index):
         """Determines if the given key is mapped to a `lazy` value.
 
@@ -204,11 +204,11 @@ class llist(plist):
             if isinstance(el, lazy):
                 el()
         return self
-    def to_plist(self):
+    def as_plist(self):
         """Returns a `plist`  of the lazy list with `lazy` values uncached.
 
         Whereas `plist(l)` will return a `plist` whose values are all the cached
-        values of the `llist` `l`, the method `l.to_plist()` returns a copy of
+        values of the `llist` `l`, the method `l.as_plist()` returns a copy of
         `l` where indices of `l` that lazily compute their values are mapped to
         their associated `lazy` objects. This is essentially a way to expose the
         raw values of a lazy list.
@@ -302,9 +302,9 @@ class ldict(pdict):
         return v
     def __str__(self):
         # We have a max length of 60 characters, not counting the delimiters.
-        return f"{{|{seqstr(self.to_pdict(), maxlen=60, tostr=reprlazy)}|}}"
+        return f"{{|{seqstr(self.as_pdict(), maxlen=60, tostr=reprlazy)}|}}"
     def __repr__(self):
-        return f"{{|{seqstr(self.to_pdict())}|}}"
+        return f"{{|{seqstr(self.as_pdict())}|}}"
     def get(self, key, default=None):
         v = pdict.get(self, key, default)
         if isinstance(v, lazy):
@@ -342,11 +342,11 @@ class ldict(pdict):
             if isinstance(v, lazy):
                 v()
         return self
-    def to_pdict(self):
+    def as_pdict(self):
         """Returns a `pdict`  of the lazy dict with `lazy` values uncached.
 
         Whereas `pdict(ld)` will return a `pdict` whose values are all the
-        cached values of the `ldict` `ld`, the method `ld.to_pdict()` returns a
+        cached values of the `ldict` `ld`, the method `ld.as_pdict()` returns a
         copy of `ld` where keys of `ld` that lazily compute their values are
         mapped to their associated `lazy` objects. This is essentially a way to
         expose the raw values of a lazy dictionary.

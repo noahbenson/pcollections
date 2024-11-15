@@ -265,10 +265,10 @@ class TestLDict(TestCase):
         t1 = p1.transient()
         self.assertEqual(t1['a'], 1)
         self.assertEqual(t1['b'], 11)
-        # The to_pdict method can be used to reveeal lazy elements.
+        # The as_pdict method can be used to reveeal lazy elements.
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
-        t1 = p1.to_pdict()
+        t1 = p1.as_pdict()
         self.assertIsInstance(t1['a'], lazy)
         self.assertIsInstance(t1['b'], lazy)
         # Conversion back into a lazy dict will hide these.
