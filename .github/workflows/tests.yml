@@ -47,7 +47,6 @@ jobs:
         arch:
           - 'x64'
         include:
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.7"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.8"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.9"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.10"}
