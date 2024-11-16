@@ -141,7 +141,37 @@ def strlazy(obj):
         return "<lazy>"
     else:
         return str(obj)
+def holdlazy(obj, require_lazy=False):
+    """Returns a persistent version of a lazy collection whose lazy values
+    remain unevaluated `lazy` objects.
 
+    When one typically converts a lazy collection (either an `ldict` or `llist`
+    object), into a persistent collection (`pdict(ld)` or `ldict(ll)` for lazy
+    dict `ld` and lazy list `ll`), the lazy values in the collection are
+    evaluated, forcing their computation. It is sometimes desirable to obtain an
+    equivalent persistent collection that does not evaluate the `lazy` values,
+    however, and the `holdlazy` function allows this by converting `ldict` and
+    `llist` objects into their equivalent `pdict` and `plist` types without
+    dereferencing the `lazy` values.
+
+    In truth, `holdlazy(obj)` looks for an attribute `__holdlazy__` and, if it
+    finds that attribute, runs it as a method and returns the result. If the
+    attribute is not found either the object is returned as-is or an error is
+    raised, depending on the `require_lazy` parameter. By default,
+    `require_lazy` is `False`, meaning that an object that is does not define
+    `__holdlazy__` is considered to be already held and thus is returned
+    as-is. If `require_lazy` is set to `True`, then a `TypeError` is raised if
+    `__holdlazy__` is not defined.
+    """
+    try:
+        return obj.__holdlazy__()
+    except AttributeError:
+        if require_lazy:
+            raise TypeError(
+                f"__holdlazy__ method not found for type {type(obj)}")
+        else:
+            return obj
+    
 
 #===============================================================================
 # The Lazy List Type
@@ -214,6 +244,8 @@ class llist(plist):
         raw values of a lazy list.
         """
         return plist._new(self._phamt, self._start)
+    def __holdlazy__(self):
+        return self.as_plist()
     def getlazy(self, index):
         """Like getitem, but returns lazy objects instead of their results.
 
@@ -352,6 +384,8 @@ class ldict(pdict):
         expose the raw values of a lazy dictionary.
         """
         return pdict._new(self._els, self._idx, self._top)
+    def __holdlazy__(self):
+        return self.as_pdict()
     def getlazy(self, key, default=None):
         """Like get, but returns lazy objects instead of their results.
 

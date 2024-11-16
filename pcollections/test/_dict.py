@@ -8,7 +8,7 @@ from random import randint
 from unittest import TestCase
 
 from .._dict import (pdict, tdict)
-from .._lazy import (lazy, ldict, tldict)
+from .._lazy import (lazy, ldict, tldict, holdlazy)
 
 class TestPDict(TestCase):
     """Tests for the `pdict` and `tdict` classes.
@@ -269,8 +269,15 @@ class TestLDict(TestCase):
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
         t1 = p1.as_pdict()
+        self.assertIsInstance(t1, pdict)
+        self.assertEqual(set(t1.keys()), set(p1.keys()))
         self.assertIsInstance(t1['a'], lazy)
         self.assertIsInstance(t1['b'], lazy)
+        # The holdlazy function serves the same purpose as the as_pdict method.
+        h1 = holdlazy(p1)
+        self.assertIsInstance(h1, pdict)
+        self.assertTrue(all(h1[k] is t1[k] for k in h1.keys()))
+        self.assertEqual(set(h1.keys()), set(t1.keys()))
         # Conversion back into a lazy dict will hide these.
         p2 = ldict(t1)
         self.assertEqual(p2['a'], 1)

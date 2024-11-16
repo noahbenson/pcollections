@@ -10,7 +10,7 @@
 from ._list import (plist, tlist)
 from ._set  import (pset,  tset)
 from ._dict import (pdict, tdict)
-from ._lazy import (lazy, unlazy, llist, ldict)
+from ._lazy import (lazy, unlazy, holdlazy, llist, ldict)
 
 # We don't include the abc types in the __all__; they are probably not as
 # frequently used and don't really need to be here. One can always `import
@@ -20,16 +20,14 @@ from ._lazy import (lazy, unlazy, llist, ldict)
 #     Persistent,         Transient,
 #     PersistentSequence, TransientSequence,
 #     PersistentSet,      TransientSet,
-#     PersistentMapping,  TransientMapping
-# )
+#     PersistentMapping,  TransientMapping)
 
-__all__ = [
+__all__ = (
     "plist", "tlist",
     "pset",  "tset",
     "pdict", "tdict",
-    "lazy", "unlazy",
-    "llist", "ldict"
-]
+    "llist", "ldict",
+    "lazy", "unlazy", "holdlazy")
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
