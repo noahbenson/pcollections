@@ -1,6 +1,6 @@
 [project]
 name = "pcollections"
-version = "0.3.1"
+version = "0.3.2"
 description = "A persistent collections library for Python"
 authors = [
     {name="Noah C. Benson", email="nben@uw.edu"}

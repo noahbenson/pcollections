@@ -4,12 +4,7 @@
 # Implementation of the core pcollections utilities.
 # By Noah C. Benson
 
-from collections.abc import (
-    Sequence, MutableSequence,
-    Set, MutableSet,
-    Mapping, MutableMapping,
-    Sized, Container
-)
+from collections.abc import (Sequence, Set, Mapping)
 
 
 #===============================================================================
