@@ -432,6 +432,11 @@ class tldict(tdict):
     keys instead of the `lazy` objects themselves.
     """
     __slots__ = ()
+    def __str__(self):
+        # We have a max length of 60 characters, not counting the delimiters.
+        return f"{{|{seqstr(self.as_tdict(), maxlen=60, tostr=reprlazy)}|}}"
+    def __repr__(self):
+        return f"{{|{seqstr(self.as_tdict())}|}}"
     def persistent(self):
         """Efficiently copies the tldict into an ldict and returns the ldict."""
         if len(self) == 0:
@@ -442,6 +447,55 @@ class tldict(tdict):
             return ldict._new(self._els.persistent(),
                               self._idx.persistent(),
                               self._top)
+    def is_lazy(self, key):
+        """Determines if the given key is mapped to a `lazy` value.
+
+        `is_lazy` determines whether the associated key is mapped to a `lazy`
+        object, but it does not determine if the lazy value is cached. To query
+        whether a key is mapped to a value that is uncached, see the `is_ready`
+        method.
+        """
+        v = tdict.__getitem__(self, key)
+        return isinstance(v, lazy)
+    def is_ready(self, key):
+        """Determines if the given key's value can be immediately returned.
+
+        `is_ready` determines whether the associated key is either mapped to a
+        non-`lazy` value or is mapped to a `lazy` value that is cached.
+        """
+        v = tdict.__getitem__(self, key)
+        if isinstance(v, lazy):
+            return v.is_ready()
+        else:
+            return True
+    def ready_all(self):
+        "Caches all lazy items then returns the dictionary."
+        for arg in self._els:
+            (k,v) = arg[1][0]
+            if isinstance(v, lazy):
+                v()
+        return self
+    def as_tdict(self):
+        """Returns a `tdict` of the lazy dict with `lazy` values uncached.
+
+        Whereas `tdict(tld)` will return a `tdict` whose values are all the
+        cached values of the `tldict` `tld`, the method `tld.as_tdict()` returns
+        a copy of `td` where keys of `tld` that lazily compute their values are
+        mapped to their associated `lazy` objects. This is essentially a way to
+        expose the raw values of a lazy dictionary.
+        """
+        return tdict._new(self._els, self._idx, self._top)
+    def __holdlazy__(self):
+        return self.as_tdict()
+    def getlazy(self, k, default=None):
+        """Like get, but returns lazy objects instead of their results.
+
+        For a `tldict` variable `d`, `d.getlazy(k, default)` is equivalent to
+        `d.get(k, default)` except that if the key `k` maps to a lazy value,
+        then `d.getlazy` will return the lazy object rather than evaluating it
+        and returning the reified value.
+        """
+        return tdict.get(self, k, default)
     def __getitem__(self, k):
         return unlazy(tdict.__getitem__(self, k))
     def get(self, k, default=None):
