@@ -196,6 +196,8 @@ class llist(plist):
     """
     empty = None
     __slots__ = ()
+    def __new__(cls, *args, **kw):
+        return plist.__new__(cls, *map(holdlazy, args), **kw)
     def __iter__(self):
         it = plist.__iter__(self)
         return map(lambda u: u() if isinstance(u, lazy) else u, it)
@@ -327,6 +329,8 @@ class ldict(pdict):
     """
     empty = None
     __slots__ = ()
+    def __new__(cls, *args, **kw):
+        return pdict.__new__(cls, *map(holdlazy, args), **kw)
     def __getitem__(self, key):
         v = pdict.__getitem__(self, key)
         if isinstance(v, lazy):
@@ -432,6 +436,8 @@ class tldict(tdict):
     keys instead of the `lazy` objects themselves.
     """
     __slots__ = ()
+    def __new__(cls, *args, **kw):
+        return tdict.__new__(cls, *map(holdlazy, args), **kw)
     def __str__(self):
         # We have a max length of 60 characters, not counting the delimiters.
         return f"{{|{seqstr(self.as_tdict(), maxlen=60, tostr=reprlazy)}|}}"
