@@ -286,6 +286,14 @@ class TestLDict(TestCase):
         # the old dictionary.
         self.assertEqual(p1['a'], 1)
         self.assertEqual(p1['b'], 11)
+        # Conversion to a pdict via the pdict constructor does not respect
+        # laziness.
+        counter.count = 0
+        l1 = ldict(a=lazy(counter, 2), b=lazy(counter, 10))
+        p1 = pdict(l1)
+        self.assertEqual(counter.count, 12)
+        self.assertIsInstance(p1, pdict)
+        self.assertEqual(l1, p1)
         # Equality comparisons depend on the reified, not lazy, values.
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))

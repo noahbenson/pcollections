@@ -131,11 +131,11 @@ class pdict(PersistentMapping):
                     arg._els.persistent(),
                     arg._idx.persistent(),
                     arg._top)
-            elif isinstance(arg, cls):
+            elif type(arg) is cls:
                 # Also, if it's already the right type, we can just return it
                 # as-is.
                 return arg
-            elif isinstance(arg, pdict):
+            elif type(arg) is pdict:
                 return cls._new(arg._els, arg._idx, arg._top)
         # For anything else, however, we just route this through tdict.
         t = tdict(arg, **kw)
@@ -398,12 +398,12 @@ class tdict(TransientMapping):
         else:
             raise TypeError(f"pdict expects at most 1 argument, got {n}")
         # If arg is a tdict or pdict, this is a special case.
-        if isinstance(arg, tdict):
+        if type(arg) is tdict:
             obj = cls._new(THAMT(arg._els.persistent()),
                            THAMT(arg._idx.persistent()),
                            arg._top,
                            arg._orig)
-        elif isinstance(arg, pdict):
+        elif type(arg) is pdict:
             obj = cls._new(THAMT(arg._els), THAMT(arg._idx), arg._top, arg)
         else:
             obj = cls._new(THAMT(PHAMT.empty), THAMT(PHAMT.empty), 0)
