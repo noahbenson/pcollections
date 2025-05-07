@@ -12,6 +12,8 @@ in Python but employs the [`phamt`](https://github.com/noahbenson/phamt)
 (Persistent Hash Array Mapped Tries) library, which is implemented in C, to
 perform efficient low-level operations.
 
+This enables structural sharing, which avoids unnecessary copying of data, and by that, reduces memory consumption.
+
 The library implements three persistent types: `plist`, `pset`, and
 `pdict`. These are immutable versions of the builtin `list`, `set`, and `dict`
 types. The persistent object interfaces are as similar as possible to the native
