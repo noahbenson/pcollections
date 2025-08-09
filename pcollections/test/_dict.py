@@ -336,3 +336,19 @@ class TestLDict(TestCase):
         # Cannot set-attr.
         with self.assertRaises(TypeError):
             l._top = -10
+    def test_lazy_error_unwrap(self):
+        """Ensures that `lazy_error_unwrap` works correctly."""
+        from pcollections import LazyError, lazy_error_unwrap, lazy
+        x = 0
+        d = lazy(lambda:x[0])  # x[0] raises a TypeError.
+        with self.assertRaises(LazyError):
+            d()
+        with self.assertRaises(TypeError):
+            with lazy_error_unwrap:
+                d()
+        try:
+            d()
+        except Exception as exc:
+            e = exc
+        self.assertIsInstance(e, LazyError)
+        self.assertIsInstance(lazy_error_unwrap(e), TypeError)

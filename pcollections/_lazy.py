@@ -49,6 +49,50 @@ class LazyError(RuntimeError):
         return errmsg
     def __repr__(self):
         return str(self)
+class LazyErrorUnwrapper:
+    """A function or context manager for unwrapping ``LazyError`` exceptions.
+
+    ``lazy_error_unwrap(error)`` returns the cause of the given ``error`` if
+    ``error`` is a ``LazyError`` object; otherwise, ``error`` is returned
+    as-is.
+
+    ``lazy_error_unwrap`` is a context manager that unwraps any ``LazyError``
+    that is raised during its execution and ensures that the cause of the
+    lazy error is raised instead.
+
+    Examples
+    --------
+    >>> from pcollections import lazy_error_unwrap, ldict, lazy
+    >>> d = ldict(x=lazy(lambda:0[0]))
+
+    After the above line of code, ``d['x']`` will trigger a ``LazyError``
+    caused by a ``TypeError`` because ``0[0]`` raises a ``TypeError``.
+    
+    >>> try:
+    ...     with lazy_error_unwrap:
+    ...         d['x']
+    ... except TypeError:
+    ...     print("TypeError raised.")
+    TypeError raised.
+
+    Usually ``d['x']`` would raise a ``LazyError``, not a ``TypeError``, but
+    because ``d['x']`` was evaluated in the ``lazy_error_unwrap`` context, the
+    ``LazyError`` was unwrapped and the ``TypeError`` was raised instead.
+    """
+    __slots__ = ()
+    def __call__(self, err):
+        if type(err) is LazyError:
+            return err.__context__
+        else:
+            return err
+    def __enter__(self):
+        return
+    def __exit__(self, ex_type, ex_val, tb):
+        if ex_type is LazyError:
+            raise ex_val.__context__
+        else:
+            return False
+lazy_error_unwrap = LazyErrorUnwrapper()
 class lazy:
     """A callable like `partial` for lazily-computed values.
 
