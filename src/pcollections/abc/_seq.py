@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-################################################################################
+###############################################################################
 # pcollections/abc/_seq.py
 # The definitions of the abstract base classes for the pcollections sequence
 # types.
@@ -12,55 +12,56 @@ from ._core import (Persistent, Transient)
 from ..util import (seqstr, seqcmp)
 
 
-#===============================================================================
+#==============================================================================
 # PersistentSequence
 
 class PersistentSequence(Persistent, Sequence):
     """All the operations on a persistent sequence.
 
-    Persistent sequences are sequences (i.e., objects that inherit from
-    `collections.abc.Sequence`), but they differ from other sequences in that
-    they support efficient updating by means of efficiently producing copies of
-    themselves that incorporate requested changes.
+    ``PersistentSequence`` objects are sequences (i.e., objects that inherit
+    from ``collections.abc.Sequence``), but they differ from other sequences in
+    that they support efficient updating by means of efficiently producing
+    copies of themselves that incorporate requested changes.
 
     The following abstract methods must be implemented; if these methods are
     inherited from a superclass of `PersistentSequence`, that class is noted in
     parentheses.
-     * `set(index, object)`
-     * `delete(index=-1)`
-     * `append(object)`
-     * `prepend(object)`
-     * `insert(index, object)`
-     * `clear()`
-     * `transient()` (`Persistent`)
-     * `__iter__` (`Iterable`)
-     * `__len__` (`Sized`)
-     * `__getitem__` (`Sequence`)
-     * `__reduce__` (for pickling)
+     * ``set(index, object)``
+     * ``delete(index=-1)``
+     * ``append(object)``
+     * ``prepend(object)``
+     * ``insert(index, object)``
+     * ``clear()``
+     * ``transient()`` (``Persistent``)
+     * ``__iter__`` (``Iterable``)
+     * ``__len__`` (``Sized``)
+     * ``__getitem__`` (``Sequence``)
+     * ``__reduce__`` (for pickling)
 
-    Additionally, `PersistentSequence` includes default implementations of the
-    following methods, which may or may not be optimal for any particular
+    Additionally, ``PersistentSequence`` includes default implementations of
+    the following methods, which may or may not be optimal for any particular
     base-class.
-     * `__str__` (`object`)
-     * `__repr__` (`object`)
-     * `__eq__` (`object`)
-     * `__hash__` (`Hashable`)
-     * `__contains__` (`Container`)
-     * `__reversed__` (`Reversible`)
-     * `count` (`Sequence`)
-     * `extend(iterable)` (`Sequence`)
-     * `index(value)` (`Sequence`)
-     * `copy()` (`Persistent`)
-     * `__add__`
-     * `__radd__`
-     * `__mul__`
-     * __rmul__`
-     * `drop(index=-1)`
-     * `pop(index=-1)`
-     * `remove(value)`
-     * `sort()`
-     * `reverse()`
-     * `__json__` (for `json_fix` module)
+     * ``__str__`` (``object`)
+     * ``__repr__`` (``object`)
+     * ``__eq__`` (``object`)
+     * ``__hash__`` (``Hashable`)
+     * ``__contains__`` (``Container`)
+     * ``__reversed__`` (``Reversible`)
+     * ``count`` (``Sequence`)
+     * ``extend(iterable)`` (``Sequence`)
+     * ``index(value)`` (``Sequence`)
+     * ``copy()`` (``Persistent`)
+     * ``__add__``
+     * ``__radd__``
+     * ``__mul__``
+     * ___rmul__``
+     * ``drop(index=-1)``
+     * ``pop(index=-1)``
+     * ``remove(value)``
+     * ``sort()``
+     * ``reverse()``
+     * ``__json__`` (for the ``json_fix`` module)
+
     """
     # Methods which must be implemented in the children.
     def set(self, index, obj):
@@ -263,49 +264,49 @@ class PersistentSequence(Persistent, Sequence):
 class TransientSequence(Transient, MutableSequence):
     """All the operations on a transient sequence.
 
-    Transient sequences are mutable sequences (i.e., objects that inherit from
-    `collections.abc.MutableSequence`), but they differ from other sequences in
-    that they support efficient conversion to and from a paired persistent
-    datatype.
+    `TransientSequence` objects are mutable sequences (i.e., objects that
+    inherit from ``collections.abc.MutableSequence``), but they differ from
+    other sequences in that they support efficient conversion to and from a
+    paired persistent datatype.
 
     The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of `TransientSequence`, that class is noted in
+    inherited from a superclass of ``TransientSequence`, that class is noted in
     parentheses.
-     * `clear()`
-     * `persistent()` (`Transient`)
-     * `__iter__` (`Iterable`)
-     * `__len__` (`Sized`)
-     * `__getitem__` (`Sequence`)
-     * `__setitem__(index, object)` (`MutableSequence`)
-     * `__delitem__(index)` (`MutableSequence`)
-     * `append(object)` (`MutableSequence`)
-     * `prepend(object)` (`MutableSequence`)
-     * `insert(index, object)` (`MutableSequence`)
+     * ``clear()`
+     * ``persistent()`` (``Transient``)
+     * ``__iter__`` (``Iterable``)
+     * ``__len__`` (``Sized``)
+     * ``__getitem__`` (``Sequence``)
+     * ``__setitem__(index, object)`` (``MutableSequence``)
+     * ``__delitem__(index)`` (``MutableSequence``)
+     * ``append(object)`` (``MutableSequence``)
+     * ``prepend(object)`` (``MutableSequence``)
+     * ``insert(index, object)`` (``MutableSequence``)
 
-    Additionally, `TransientSequence` includes default implementations of the
+    Additionally, ``TransientSequence`` includes default implementations of the
     following methods, which may or may not be optimal for any particular
     base-class.
-     * `pop(index=-1)`
-     * `remove(value)`
-     * `sort()`
-     * `reverse()`
-     * `__str__` (`object`)
-     * `__repr__` (`object`)
-     * `__eq__` (`object`)
-     * `__contains__` (`Container`)
-     * `__reversed__` (`Reversible`)
-     * `count` (`Sequence`)
-     * `extend(iterable)` (`Sequence`)
-     * `index(value)` (`Sequence`)
-     * `copy()` (`Transient`)
-     * `__add__`
-     * `__radd__`
-     * `__iadd__`
-     * `__mul__`
-     * `__rmul__`
-     * `__imul__`
-     * `__reduce__` (for pickling)
-     * `__json__` (for `json_fix` module)
+     * ``pop(index=-1)``
+     * ``remove(value)``
+     * ``sort()``
+     * ``reverse()``
+     * ``__str__`` (``object``)
+     * ``__repr__`` (``object``)
+     * ``__eq__`` (``object``)
+     * ``__contains__`` (``Container``)
+     * ``__reversed__`` (``Reversible``)
+     * ``count`` (``Sequence``)
+     * ``extend(iterable)`` (``Sequence``)
+     * ``index(value)`` (``Sequence``)
+     * ``copy()`` (``Transient```)
+     * ``__add__``
+     * ``__radd__``
+     * ``__iadd__``
+     * ``__mul__``
+     * ``__rmul__``
+     * ``__imul__``
+     * ``__reduce__`` (for pickling)
+     * ``__json__`` (for the ``json_fix`` module)
     """
     def pop(self, index=-1):
         """Remove and return item at index (default last).
