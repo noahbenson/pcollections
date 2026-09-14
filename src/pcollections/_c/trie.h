@@ -459,8 +459,34 @@ EXTC typedef struct TrieData {
 // enabling a branchless algorithm. We want this to exist in the data segment
 // but to have a full set of cells; therefore, we need to put it in another
 // structure to make it viable.
+//
+// This struct deliberately does NOT embed `struct TrieData` (which is what
+// its name might suggest, and is what an earlier version of this file did):
+// TrieData ends in `char cells[]`, a C99 flexible array member (FAM), and
+// embedding a FAM-terminated struct as a *non-final* member of another
+// struct -- which is exactly what a `struct TrieData trie;` field followed
+// by anything else amounts to -- is undefined behavior per the C standard
+// (a struct containing a FAM "shall not appear ... as a member of any
+// structure"). GCC/Clang tolerate this as a well-established extension (this
+// compiled and ran correctly, and passed every test, on Linux/macOS for as
+// long as this project has existed), but MSVC does not: it fails with
+// "error C2229: struct 'TrieDummyData' has an illegal zero-sized array" on
+// the `cells[TRIEBITS_WIDTH]` member below, precisely because it correctly
+// refuses to let anything follow a member whose type ends in a flexible
+// array. So: skip the wrapper and declare the *same* leading layout
+// directly -- a `struct TrieHeader header` (identical to TrieData's own
+// first member, and at the same offset 0, since TrieHeader is itself
+// FAM-free) immediately followed by a real, fixed-size `cells` array. Every
+// use of this struct (see amt_lookup()/fat_lookup() below) only ever takes
+// the ADDRESS of the whole struct and reinterprets it as `Trie_t` (a
+// `struct TrieData*`) -- never actually dereferencing a `.trie` field -- so
+// this is purely a struct-shape change: the header start at offset 0
+// followed immediately by the cells (TrieHeader's own size is a multiple of
+// pointer alignment -- see its "Total: 24 bytes" comment above -- so
+// `cells` lands at the identical offset either way, with no layout change
+// for any code that follows a Trie_t pointer's header/cells regions).
 EXTC struct TrieDummyData {
-   struct TrieData trie;
+   struct TrieHeader header;
    void* cells[TRIEBITS_WIDTH];
 };
 
@@ -920,11 +946,9 @@ static inline int amt_lookup(Trie_t node,
    // lookup can ever actually read its cells; the leafsize is irrelevant and
    // is set to sizeof(void*) since that's a valid compile-time constant.
    static struct TrieDummyData amtnode_dummytwig_data = {
-      .trie = {
-         .header = {
-            .depth = AMT_MAX_DEPTH,
-            .leafsize = sizeof(void*)
-         }
+      .header = {
+         .depth = AMT_MAX_DEPTH,
+         .leafsize = sizeof(void*)
       }
    };
    static Trie_t amtnode_dummytwig = (Trie_t)&amtnode_dummytwig_data;
@@ -960,7 +984,14 @@ static inline int amt_lookup(Trie_t node,
       // which per the AMT invariants is never left with 0 occupancy) whenever
       // ok is false, keeping the read in-bounds without adding a branch.
       cellindex = amtnode_bit2cellindex(node, bitindex);
-      cellindex &= (triebits_t)(-(triebits_t)ok);
+      // Written as `0 - ok` rather than `-ok`: identical result for an
+      // unsigned type (two's-complement negation and "subtract from zero"
+      // are the same bit pattern), but MSVC's C4146 ("unary minus operator
+      // applied to unsigned type, result still unsigned") fires on the
+      // unary-minus spelling even though the operation is completely
+      // well-defined and intentional here; the subtraction spelling says
+      // the same thing without tripping that warning.
+      cellindex &= (triebits_t)((triebits_t)0 - (triebits_t)ok);
       cell = trienode_subt(node, cellindex);
       // Now, IF everything is okay, we set node to *cell; otherwise, we set
       // it to the dummy amt, which is always a twig and never contains any
@@ -992,11 +1023,9 @@ static inline int fat_lookup(Trie_t node, trieint_t key, void** result) {
    // touched by fat_lookup()'s own FAT-specific logic below, never by any
    // code that would need to ask what kind it is.)
    static struct TrieDummyData fatnode_dummytwig_data = {
-      .trie = {
-         .header = {
-            .depth = FAT_MAX_DEPTH,
-            .leafsize = sizeof(void*)
-         }
+      .header = {
+         .depth = FAT_MAX_DEPTH,
+         .leafsize = sizeof(void*)
       }
    };
    static Trie_t fatnode_dummytwig = (Trie_t)&fatnode_dummytwig_data;

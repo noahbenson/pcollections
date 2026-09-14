@@ -336,7 +336,13 @@
          0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
          31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9
       };
-      return deBruijn_values[((uint32_t)((v & -v) * 0x077CB531U)) >> 27];
+      // `(uint32_t)0 - v` rather than `-v`: identical result for an
+      // unsigned type (two's-complement negation and "subtract from zero"
+      // are the same bit pattern -- this is the standard isolate-lowest-
+      // set-bit idiom, `v & -v`, just spelled to avoid MSVC's C4146 "unary
+      // minus operator applied to unsigned type" warning, which fires here
+      // even though the operation is well-defined and intentional).
+      return deBruijn_values[((uint32_t)((v & ((uint32_t)0 - v)) * 0x077CB531U)) >> 27];
    }
    EXTC static inline uint16_t ctz16(uint16_t w) {
       return ctz32((uint32_t)w);
