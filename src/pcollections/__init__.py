@@ -94,9 +94,6 @@ def _load_python_backend():
     }
 
 
-# For now, we cause load_c_backend to faile overtly if it fails:
-_backend = _load_c_backend()
-
 try:
     _backend = _load_c_backend()
     #: True if the compiled C extension modules are backing the types in

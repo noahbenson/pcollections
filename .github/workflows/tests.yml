@@ -127,3 +127,73 @@ jobs:
           python -c "import pcollections; print('pcollections.using_c_extension =', pcollections.using_c_extension)"
 #      - name: Process Code Coverage
 #        uses: codecov/codecov-action@v1
+
+  # The `test` job above always builds the C extensions when the platform's
+  # toolchain allows it (`optional=True` in setup.py just means a build
+  # *failure* doesn't fail the job) -- and every test in pcollections.test
+  # is parametrized over whichever backends are available (see
+  # pcollections/test/_backends.py), so the pure-Python implementation
+  # already runs in every job above too, just *alongside* the C one
+  # wherever the C build happens to succeed. That's not the same as
+  # actually verifying the pure-Python fallback works completely on its
+  # own: as of the Windows/MSVC fixes, the C extensions now build
+  # successfully everywhere `test` runs, so there is no longer any job
+  # above where pcollections ever falls back to pure Python at all. This
+  # job forces that scenario deliberately (via setup.py's
+  # PCOLLECTIONS_NO_C_EXTENSIONS escape hatch) instead of depending on
+  # some platform's C build happening to fail, across every Python version
+  # this project supports. OS coverage is deliberately skipped here (a
+  # single ubuntu-latest is enough): the pure-Python implementation has no
+  # platform-specific code at all, so unlike `test` above, multiplying this
+  # job across OSes would only add CI time, not real coverage.
+  test-python-only:
+    name: ${{matrix.version}}/python-only - ${{github.event_name}}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same version list the main `test` job uses for ubuntu-latest
+        # (that job's '3.7' entries deliberately target macos-13/
+        # windows-latest instead -- ubuntu-latest doesn't offer a 3.7
+        # build via actions/setup-python -- so this list matches that
+        # constraint rather than introducing a new, unrelated CI failure).
+        version:
+          - '3.8'
+          - '3.9'
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+    env:
+      PYTHON: ${{ matrix.version }}
+      PCOLLECTIONS_NO_C_EXTENSIONS: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '2'
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.version }}
+      - name: Upgrade Setuptools
+        run: |
+          python -m pip install --upgrade setuptools
+      - name: Display Python version
+        run: python --version
+      - name: Install (no C extensions)
+        run: |
+          pip install -e .
+      # Fail loudly if the C backend somehow ended up available anyway --
+      # that would mean PCOLLECTIONS_NO_C_EXTENSIONS didn't actually
+      # suppress the build, silently turning this job back into a
+      # duplicate of `test` above instead of the python-only check it's
+      # meant to be.
+      - name: Confirm the C backend is absent
+        run: |
+          python -c "import pcollections, sys; sys.exit(0 if not pcollections.using_c_extension else 1)"
+      - name: Run Tests (pure Python only)
+        run: |
+          cd ~
+          python -m pcollections.test

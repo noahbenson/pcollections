@@ -38,6 +38,13 @@
 # switched to `optional=True`). Using the built-in `optional=True` avoids
 # reinventing -- and mis-implementing -- machinery setuptools already
 # provides for exactly this case.
+#
+# Separately, the PCOLLECTIONS_NO_C_EXTENSIONS environment variable (see
+# below, near ext_modules) forces a build/install with NO C extensions at
+# all, regardless of whether they'd compile -- used by
+# .github/workflows/tests.yml's dedicated "python-only" job to verify the
+# pure-Python fallback deliberately, rather than relying on some platform's
+# C build happening to fail.
 
 import os
 import platform
@@ -72,7 +79,28 @@ version = version.split('"')[1]
 _is_windows = (platform.system() == 'Windows')
 _c_dir = os.path.join('src', 'pcollections', '_c')
 _ext_names = ('dict', 'list', 'set', 'lazy')
-ext_modules = [
+
+# PCOLLECTIONS_NO_C_EXTENSIONS: an explicit escape hatch to build/install
+# with NO C extensions at all, even on a platform where they'd otherwise
+# compile just fine. `optional=True` above already means every *existing*
+# CI job ends up exercising the pure-Python implementation -- every test in
+# pcollections.test is written once and parametrized over whichever
+# backends are available (see pcollections/test/_backends.py), so the
+# pure-Python classes always run *alongside* the C ones wherever the C
+# extensions happen to build -- but that's incidental coverage, not a
+# guarantee: as of the Windows/MSVC fixes, the C extensions now build
+# successfully on every platform this project tests, which means there is
+# no longer any CI job where the pure-Python fallback runs *on its own*.
+# A bug that only manifests when the C extension is truly absent (most
+# plausibly in pcollections/__init__.py's own fallback/import logic, but
+# in principle anywhere) could pass every job and still go unnoticed. This
+# flag lets .github/workflows/tests.yml's dedicated "python-only" job force
+# that scenario deliberately, instead of depending on some platform's C
+# build happening to fail.
+_no_c_ext = (os.environ.get('PCOLLECTIONS_NO_C_EXTENSIONS', '')
+             not in ('', '0', 'false', 'False'))
+
+ext_modules = [] if _no_c_ext else [
     Extension(
         f'pcollections._c.{name}',
         sources=[os.path.join(_c_dir, f'{name}.c')],
