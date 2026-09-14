@@ -36,12 +36,22 @@ _HAVE_C = 'c' in BACKENDS
 # per-instance slots CPython adds automatically and aren't meaningful to
 # compare. `__orig_bases__`/`__slots__`/`__abstractmethods__` etc. are
 # implementation bookkeeping from ABCMeta/typing, not part of the public
-# collection API.
+# collection API. `__firstlineno__`/`__static_attributes__` (3.13+) and
+# `__annotate_func__`/`__annotations_cache__` (3.14+, PEP 649/749's deferred-
+# evaluation machinery) are the same kind of thing, one CPython version
+# later: bookkeeping the compiler attaches to every ordinary `class`
+# statement regardless of whether the class actually has annotations,
+# which a C heap type built via PyType_FromSpecWithBases never goes
+# through (there's no class body for the compiler to have compiled in the
+# first place) -- confirmed as a real 3.14 CI failure (present on the
+# actual 3.14 release but not on the 3.14.0rc2 interpreter used to develop
+# this suite, so it never showed up locally).
 _IGNORE = {
     '__dict__', '__weakref__', '__slots__', '__module__', '__doc__',
     '__abstractmethods__', '__orig_bases__', '__parameters__',
     '__class_getitem__', '__init_subclass__', '__subclasshook__',
     '__firstlineno__', '__static_attributes__',
+    '__annotate_func__', '__annotations_cache__',
     # `lazy.__slots__ = ('partial', 'value')` in _lazy.py: these are raw
     # instance storage (what a lazy computation is waiting on / has cached),
     # analogous to pdict's `_els`/`_idx` but, unlike those, not given a

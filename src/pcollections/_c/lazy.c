@@ -64,8 +64,6 @@
 // Initialization.
 
 #include <Python.h>
-#include <stdatomic.h>
-#include <pthread.h>
 #include "uintbits.h"
 #include "trie.h"
 #include "fat.h"
@@ -74,6 +72,94 @@
 #  define EXTC extern "C"
 #else
 #  define EXTC
+#endif
+
+//=============================================================================
+// Portable mutex/atomic-flag shim.
+//
+// The rest of this file was originally written directly against POSIX
+// <pthread.h> (for the recursive mutex) and C11 <stdatomic.h> (for the
+// lock-free "ready" flag) -- see the thread-safety design comment above.
+// That's fine on Linux/macOS, but <pthread.h> does not exist *at all* on
+// stock MSVC (there is no POSIX-threads implementation in the Windows CRT;
+// this is a missing header, not merely an unsupported one, so it fails
+// every Windows build unconditionally with "cannot open include file:
+// 'pthread.h'") -- a strictly worse problem than <stdatomic.h>'s partial
+// MSVC support that setup.py's file-header comment already anticipated.
+// Confirmed as the actual cause of Windows CI reporting
+// `pcollections.using_c_extension == False` after install succeeded
+// (silently, via each Extension's `optional=True`): this module alone was
+// failing to compile, and since pcollections/__init__.py loads all four C
+// extensions as a single all-or-nothing unit (see that module's docstring),
+// one failing extension took the whole C backend down with it even though
+// dict.c/list.c/set.c don't need any of this.
+//
+// Rather than depend on either POSIX or C11 threading, MS_WINDOWS/_WIN32
+// gets its own implementation of the small set of operations this file
+// actually needs, built on Win32 primitives that have been stable since
+// Windows XP: `CRITICAL_SECTION` (a reentrant/recursive lock by construction
+// -- the same semantics PTHREAD_MUTEX_RECURSIVE was explicitly requested
+// for below) in place of `pthread_mutex_t`, and the `Interlocked*` intrinsics
+// in place of <stdatomic.h>. `InterlockedCompareExchange`/`InterlockedExchange`
+// are full (sequentially consistent) hardware fences -- a strictly stronger
+// guarantee than the acquire/release ordering the POSIX/C11 side asks for
+// explicitly, so this is safe on every Windows architecture Python supports
+// (x86, x64, and ARM64, which -- unlike x86/x64 -- is not naturally
+// strongly-ordered and genuinely needs the fence, not just the compiler
+// barrier a weaker shim might have gotten away with on x86/x64 alone).
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+   typedef CRITICAL_SECTION pcoll_mutex_t;
+   typedef volatile LONG pcoll_atomic_flag_t;
+   static int pcoll_mutex_init_recursive(pcoll_mutex_t* m) {
+      // CRITICAL_SECTION is always reentrant/recursive for its owning
+      // thread -- there is no non-recursive variant to opt out of, unlike
+      // pthread_mutex_t -- so, unlike the POSIX branch below, there's no
+      // separate attr object to configure. InitializeCriticalSectionAndSpinCount
+      // (rather than plain InitializeCriticalSection, which returns void and
+      // can only fail via a raised STATUS_NO_MEMORY structured exception) is
+      // used here so an out-of-memory failure surfaces as an ordinary
+      // integer return code the caller can check, matching how the POSIX
+      // branch's pthread_mutex_init failure is already handled.
+      return InitializeCriticalSectionAndSpinCount(m, 0) ? 0 : -1;
+   }
+#  define PCOLL_MUTEX_INIT(m) pcoll_mutex_init_recursive(m)
+#  define PCOLL_MUTEX_DESTROY(m) DeleteCriticalSection(m)
+#  define PCOLL_MUTEX_LOCK(m) EnterCriticalSection(m)
+#  define PCOLL_MUTEX_UNLOCK(m) LeaveCriticalSection(m)
+   // No other thread can be looking at `self` yet during construction (it
+   // isn't published anywhere), so the initializing write needs no atomicity
+   // or fence, exactly like atomic_init()'s own (non-atomic-op) semantics.
+#  define PCOLL_ATOMIC_INIT(flag, val) (*(flag) = (val))
+   // A same-value compare-exchange is a standard, portable way to get a
+   // fully-fenced *read* out of the Interlocked family, which otherwise only
+   // exposes read-modify-write operations: if *flag == 0, this "exchanges"
+   // 0 for 0 (a no-op store); if *flag == 1, the comparison fails and
+   // nothing is written either way -- so *flag's value is never altered by
+   // this macro, only observed, and the operation is still a full fence.
+#  define PCOLL_ATOMIC_LOAD_ACQUIRE(flag) InterlockedCompareExchange((flag), 0, 0)
+#  define PCOLL_ATOMIC_STORE_RELEASE(flag, val) ((void)InterlockedExchange((flag), (val)))
+#else
+#  include <stdatomic.h>
+#  include <pthread.h>
+   typedef pthread_mutex_t pcoll_mutex_t;
+   typedef atomic_int pcoll_atomic_flag_t;
+   static int pcoll_mutex_init_recursive(pcoll_mutex_t* m) {
+      pthread_mutexattr_t attr;
+      int rc = pthread_mutexattr_init(&attr);
+      if (rc == 0) rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+      if (rc == 0) rc = pthread_mutex_init(m, &attr);
+      pthread_mutexattr_destroy(&attr);
+      return rc;
+   }
+#  define PCOLL_MUTEX_INIT(m) pcoll_mutex_init_recursive(m)
+#  define PCOLL_MUTEX_DESTROY(m) pthread_mutex_destroy(m)
+#  define PCOLL_MUTEX_LOCK(m) pthread_mutex_lock(m)
+#  define PCOLL_MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
+#  define PCOLL_ATOMIC_INIT(flag, val) atomic_init((flag), (val))
+#  define PCOLL_ATOMIC_LOAD_ACQUIRE(flag) atomic_load_explicit((flag), memory_order_acquire)
+#  define PCOLL_ATOMIC_STORE_RELEASE(flag, val) atomic_store_explicit((flag), (val), memory_order_release)
 #endif
 
 
@@ -353,8 +439,8 @@ typedef struct {
    PyObject* kwargs;     // dict or NULL; NULL once ready
    PyObject* value;      // valid only once ready
    PyObject* init_error; // a LazyError, pre-built at construction time
-   pthread_mutex_t mutex;
-   atomic_int ready;     // 0 = pending, 1 = ready -- see the file header.
+   pcoll_mutex_t mutex;
+   pcoll_atomic_flag_t ready; // 0 = pending, 1 = ready -- see the file header.
 } LazyObject;
 
 static PyTypeObject* LazyType = NULL;
@@ -377,7 +463,7 @@ static int lazy_clear(LazyObject* self) {
 }
 static void lazy_dealloc(LazyObject* self) {
    PyObject_GC_UnTrack(self);
-   pthread_mutex_destroy(&self->mutex);
+   PCOLL_MUTEX_DESTROY(&self->mutex);
    Py_CLEAR(self->fn);
    Py_CLEAR(self->args);
    Py_CLEAR(self->kwargs);
@@ -394,7 +480,6 @@ static PyObject* lazy_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    PyObject* partial_tuple;
    PyObject* init_error;
    LazyObject* self;
-   pthread_mutexattr_t attr;
    int mutex_rc;
 
    nargs = PyTuple_GET_SIZE(args);
@@ -441,12 +526,9 @@ static PyObject* lazy_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    self->kwargs = fn_kwargs;
    self->value = NULL;
    self->init_error = init_error;
-   atomic_init(&self->ready, 0);
+   PCOLL_ATOMIC_INIT(&self->ready, 0);
 
-   mutex_rc = pthread_mutexattr_init(&attr);
-   if (mutex_rc == 0) mutex_rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-   if (mutex_rc == 0) mutex_rc = pthread_mutex_init(&self->mutex, &attr);
-   pthread_mutexattr_destroy(&attr);
+   mutex_rc = PCOLL_MUTEX_INIT(&self->mutex);
    if (mutex_rc != 0) {
       Py_DECREF(self);
       PyErr_SetString(PyExc_RuntimeError, "failed to initialize lazy's internal mutex");
@@ -492,7 +574,7 @@ static PyObject* lazy_call(LazyObject* self, PyObject* args, PyObject* kwds) {
 
    // Fast, lock-free path: already computed. See the file header for why
    // this acquire-load is sufficient without the mutex.
-   if (atomic_load_explicit(&self->ready, memory_order_acquire)) {
+   if (PCOLL_ATOMIC_LOAD_ACQUIRE(&self->ready)) {
       val = self->value;
       Py_INCREF(val);
       return val;
@@ -503,18 +585,18 @@ static PyObject* lazy_call(LazyObject* self, PyObject* args, PyObject* kwds) {
    // somewhere inside PyObject_Call(self->fn, ...) below -- arbitrary Python
    // code that will very often need to reacquire the GIL itself (e.g. after
    // a time.sleep(), an I/O wait, or simply running more bytecode) before it
-   // can finish and reach pthread_mutex_unlock(). If this thread held the
-   // GIL while blocked in pthread_mutex_lock(), that other thread could
+   // can finish and reach the matching unlock below. If this thread held the
+   // GIL while blocked acquiring the mutex, that other thread could
    // never get the GIL back, and the two threads would deadlock forever.
    Py_BEGIN_ALLOW_THREADS
-   pthread_mutex_lock(&self->mutex);
+   PCOLL_MUTEX_LOCK(&self->mutex);
    Py_END_ALLOW_THREADS
    // Double-checked: another thread may have finished computing this value
    // while we were waiting for the lock.
-   if (atomic_load_explicit(&self->ready, memory_order_acquire)) {
+   if (PCOLL_ATOMIC_LOAD_ACQUIRE(&self->ready)) {
       val = self->value;
       Py_INCREF(val);
-      pthread_mutex_unlock(&self->mutex);
+      PCOLL_MUTEX_UNLOCK(&self->mutex);
       return val;
    }
 
@@ -524,7 +606,7 @@ static PyObject* lazy_call(LazyObject* self, PyObject* args, PyObject* kwds) {
       // Left pending on purpose (fn/args/kwargs/ready untouched): a later
       // call may retry the computation, exactly as the Python reference
       // permits.
-      pthread_mutex_unlock(&self->mutex);
+      PCOLL_MUTEX_UNLOCK(&self->mutex);
       return NULL;
    }
 
@@ -545,20 +627,20 @@ static PyObject* lazy_call(LazyObject* self, PyObject* args, PyObject* kwds) {
    Py_CLEAR(self->args);
    Py_CLEAR(self->kwargs);
    Py_CLEAR(self->init_error);
-   atomic_store_explicit(&self->ready, 1, memory_order_release);
-   pthread_mutex_unlock(&self->mutex);
+   PCOLL_ATOMIC_STORE_RELEASE(&self->ready, 1);
+   PCOLL_MUTEX_UNLOCK(&self->mutex);
 
    Py_INCREF(val); // an additional reference for the caller
    return val;
 }
 
 static PyObject* lazy_is_ready(LazyObject* self, PyObject* Py_UNUSED(ignored)) {
-   int ready = atomic_load_explicit(&self->ready, memory_order_acquire);
+   int ready = PCOLL_ATOMIC_LOAD_ACQUIRE(&self->ready);
    return PyBool_FromLong(ready);
 }
 
 static PyObject* lazy_repr(LazyObject* self) {
-   int ready = atomic_load_explicit(&self->ready, memory_order_acquire);
+   int ready = PCOLL_ATOMIC_LOAD_ACQUIRE(&self->ready);
    return PyUnicode_FromFormat("lazy(<%zu>: %s)",
                                (size_t)(uintptr_t)self,
                                ready ? "ready" : "waiting");
