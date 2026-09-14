@@ -39,6 +39,7 @@ jobs:
           - '3.11'
           - '3.12'
           - '3.13'
+          - '3.14'
         os:
           - ubuntu-latest
           - windows-latest
@@ -48,12 +49,30 @@ jobs:
         include:
           - {"os": "macos-13", "arch": "x64", "version": "3.7"}
           - {"os": "windows-latest", "arch": "x64", "version": "3.7"}
+          # Apple Silicon (arm64): pcollections now ships C extensions, and
+          # Apple Silicon's stricter alignment/atomics behavior is exactly
+          # the kind of thing that can differ from x64 for lazy.c's
+          # stdatomic.h-based thread-safety code, so this isn't just a
+          # "same code, different label" matrix entry.
           - {"os": "macos-latest", "arch": "arm64", "version": "3.8"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.9"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.10"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.11"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.12"}
           - {"os": "macos-latest", "arch": "arm64", "version": "3.13"}
+          - {"os": "macos-latest", "arch": "arm64", "version": "3.14"}
+          # Linux/arm64 (GitHub-hosted arm64 Ubuntu runners): a second,
+          # independent arm64 target with a different OS/libc/compiler
+          # (glibc + gcc, vs. macOS's libc++/clang) than macos-latest/arm64
+          # above -- worth covering separately for a project with real C
+          # extensions rather than assuming "arm64 is arm64."
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.8"}
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.9"}
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.10"}
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.11"}
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.12"}
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.13"}
+          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.14"}
     # The job environment.
     env:
       OS: ${{ matrix.os }}
@@ -86,5 +105,20 @@ jobs:
           cd ~
           #coverage run -m pcollections.test
           python -m pcollections.test
+      # pcollections._c (dict/list/set/lazy) is an optional set of C
+      # extension modules: pcollections/__init__.py falls back to the
+      # pure-Python implementation when they aren't built for a given
+      # platform/toolchain (e.g. likely on Windows, where MSVC's
+      # <stdatomic.h> support is limited -- see setup.py), and
+      # pcollections.test above already runs against whichever backend(s)
+      # ended up available. This step doesn't gate the job (a pure-Python
+      # fallback is a valid, fully-tested outcome, not a failure) -- it
+      # just surfaces which backend this job actually exercised, so that's
+      # visible at a glance in the Actions log/summary instead of only
+      # showing up as an absence of C-specific tests deep in the test
+      # output.
+      - name: Report which backend was tested
+        run: |
+          python -c "import pcollections; print('pcollections.using_c_extension =', pcollections.using_c_extension)"
 #      - name: Process Code Coverage
 #        uses: codecov/codecov-action@v1

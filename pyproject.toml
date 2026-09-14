@@ -1,6 +1,18 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pcollections"
-version = "0.4.0"
+# The version lives in src/pcollections/__init__.py (as __version__) and is
+# read from there by setup.py, which supplies it to setuptools at build
+# time -- declared dynamic here so pyproject.toml's static metadata and
+# setup.py's setup() call don't both try to set it (setuptools treats that
+# as a conflict). setup.py is also where the optional C extension modules
+# (pcollections._c.dict/list/set/lazy) and the src/ package layout are
+# configured, since pyproject.toml's [project] table alone can't express
+# either of those.
+dynamic = ["version"]
 description = "A persistent collections library for Python"
 authors = [
     {name="Noah C. Benson", email="nben@uw.edu"}
@@ -22,6 +34,7 @@ classifiers = [
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
     'Topic :: Software Development',
     'Topic :: Software Development :: Libraries',
     'Topic :: Software Development :: Libraries :: Python Modules',
@@ -31,11 +44,31 @@ classifiers = [
     'Operating System :: MacOS'
 ]
 
-dependencies = [
-    "phamt >= 0.1.8"
-]
+# pcollections used to depend on the external `phamt` package (PHAMT/THAMT)
+# for the pure-Python fallback's underlying persistent trie. That dependency
+# has been removed: pcollections/_trie.py now ships an in-tree, dependency-
+# free port of the same AMT/FAT tries pcollections/_c uses (see that file's
+# module docstring), so pcollections has no required third-party
+# dependencies at all.
+dependencies = []
 
 [project.urls]
 homepage = "https://github.com/noahbenson/pcollections"
 documentation = "https://github.com/noahbenson/pcollections"
 repository = "https://github.com/noahbenson/pcollections"
+
+# Used by `.github/workflows/deploy.yml`'s wheel-building job (pypa/cibuildwheel).
+# pcollections._c's four extension modules are CPython-C-API code, so we only
+# target CPython (skip PyPy/GraalPy: their C-API emulation layers add real
+# risk for hand-written extension code like this for a benefit our pure-Python
+# fallback already covers reasonably well) and 64-bit platforms (skip 32-bit:
+# untested, and increasingly rare as an install target). manylinux and
+# musllinux (Alpine) builds are both included, since cibuildwheel produces
+# them for free from the same job. See the note by CIBW_TEST_COMMAND in
+# deploy.yml on why a platform where the C extension fails to compile simply
+# doesn't get a wheel (falls back to the sdist install path) rather than
+# shipping a platform-tagged wheel that's silently pure-Python inside.
+[tool.cibuildwheel]
+build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = "pp* *_i686 *-win32"
+test-command = "python -c \"import pcollections, sys; sys.exit(0 if pcollections.using_c_extension else 1)\" && python -m pcollections.test"

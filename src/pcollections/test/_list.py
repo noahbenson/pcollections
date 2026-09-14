@@ -7,10 +7,9 @@
 from random import randint
 from unittest import TestCase
 
-from .._list import (plist, tlist)
-from .._lazy import (lazy, llist, tllist)
+from ._backends import make_tests
 
-class TestPList(TestCase):
+class _PListTestMixin:
     """Tests for the `plist` and `tlist` classes.
 
     This both runs a number of simple tests of the `plist` API and a series of
@@ -20,13 +19,13 @@ class TestPList(TestCase):
     def test_api(self):
         """Tests/demonstrates the basic plist API."""
         # An empty plist can be created with `plist()`.
-        e = plist()
+        e = self.plist()
         self.assertEqual(len(e), 0)
-        self.assertIsInstance(e, plist)
+        self.assertIsInstance(e, self.plist)
         # This is identical to the plist.empty object.
-        self.assertIs(e, plist.empty)
+        self.assertIs(e, self.plist.empty)
         # A plist can also be created by passing an iterable to the type.
-        p1 = plist(range(10))
+        p1 = self.plist(range(10))
         self.assertEqual(len(p1), 10)
         # Element access is like with the list type.
         self.assertEqual(p1[0], 0)
@@ -34,21 +33,21 @@ class TestPList(TestCase):
         self.assertEqual(p1[-2], 8)
         # Slice access is supported (slices are plists)
         self.assertEqual(p1[0:10:2], [0,2,4,6,8])
-        self.assertIsInstance(p1[:-1], plist)
+        self.assertIsInstance(p1[:-1], self.plist)
         # plists can be equal to each other and to other lists (but, like with
         # list, not to other sequences like tuples or strings).
         l1 = list(range(10))
         self.assertEqual(l1, p1)
         self.assertEqual(p1, l1)
-        self.assertEqual(p1, plist(range(10)))
+        self.assertEqual(p1, self.plist(range(10)))
         self.assertNotEqual(p1, tuple(p1))
-        self.assertNotEqual(plist.empty, '')
+        self.assertNotEqual(self.plist.empty, '')
         # plists can perform ordering comparisons like list as well.
         self.assertLessEqual(p1[:4], p1)
         self.assertGreater(p1[4:], p1)
         self.assertLess(p1[:4], p1[6:])
         # Clearing a plist always yields the empty plist.
-        self.assertIs(p1.clear(), plist.empty)
+        self.assertIs(p1.clear(), self.plist.empty)
         # Copying a plist always just returns the plist (it is immutable).
         self.assertIs(p1.copy(), p1)
         # plists are hashable.
@@ -63,13 +62,13 @@ class TestPList(TestCase):
         # They can count and index items.
         self.assertEqual(p1.count(4), 1)
         self.assertEqual(p1.count(-4), 0)
-        self.assertEqual(plist([1,2,3,3,4,5,3,3,6]).count(3), 4)
+        self.assertEqual(self.plist([1,2,3,3,4,5,3,3,6]).count(3), 4)
         self.assertEqual(p1.index(5), 5)
         # The reverse method does not mutate it in-place; instead it returns
         # a reversed plist. This is equivalent to the __reversed__ method.
         self.assertEqual(p1.reverse(), list(reversed(p1)))
         self.assertIsNot(p1.reverse(), p1)
-        self.assertIsInstance(p1.reverse(), plist)
+        self.assertIsInstance(p1.reverse(), self.plist)
         # The sort method also returns a sorted plist.
         self.assertEqual(p1.sort(), p1)
         self.assertEqual(p1.reverse().sort(), p1)
@@ -89,7 +88,7 @@ class TestPList(TestCase):
             p2.delete(20)
         self.assertEqual(p2, p2.drop(20))
         # Items can be appended and prepended to the lists.
-        p3 = plist([1,2,3])
+        p3 = self.plist([1,2,3])
         self.assertEqual(p3.append(4), [1,2,3,4])
         self.assertEqual(p3.prepend(0), [0,1,2,3])
         # The extend method also appends sequences, which is basically the same
@@ -98,15 +97,15 @@ class TestPList(TestCase):
         self.assertEqual(p3.extend([4,5,6]), p3 + [4,5,6])
         self.assertEqual([-1,0] + p3, [-1,0,1,2,3])
         # plists can also be multiplied.
-        self.assertEqual(plist([1]) * 5, [1,1,1,1,1])
-        self.assertEqual(5 * plist([1]), [1,1,1,1,1])
+        self.assertEqual(self.plist([1]) * 5, [1,1,1,1,1])
+        self.assertEqual(5 * self.plist([1]), [1,1,1,1,1])
         # The pop method may be used to extract an item.
         self.assertEqual(p3.pop(1), (2, [1,3]))
         # Finally, the insert method can be used to insert items.
         self.assertEqual(p3.insert(1, 10), [1, 10, 2, 3])
     def test_immutable(self):
         """Ensures that `plist` throws the right errors when one mutates it."""
-        l = plist(range(10))
+        l = self.plist(range(10))
         # Cannot set-item.
         with self.assertRaises(TypeError):
             l[0] = 10
@@ -117,11 +116,11 @@ class TestPList(TestCase):
         with self.assertRaises(TypeError):
             l._start = -10
     def test_mul(self):
-        "Tests the plist multiplication operator."
-        l = plist(range(10))
+        "Tests the self.plist multiplication operator."
+        l = self.plist(range(10))
         # Zero * plist is an empty plist.
-        self.assertIs(l * 0, plist.empty)
-        self.assertIs(0 * l, plist.empty)
+        self.assertIs(l * 0, self.plist.empty)
+        self.assertIs(0 * l, self.plist.empty)
         # List * 2 doubles the list.
         ll = l * 2
         self.assertEqual(l, ll[:10])
@@ -135,12 +134,12 @@ class TestPList(TestCase):
             with self.assertRaises(ValueError):
                 u = notint * l
     def test_add(self):
-        "Tests the plist addition operator."
-        l = plist(range(10))
+        "Tests the self.plist addition operator."
+        l = self.plist(range(10))
         # A plist plus an empty list is the same plist.
         self.assertIs(l, l + [])
-        self.assertIs(l, l + plist.empty)
-        self.assertIs(l, plist.empty + l)
+        self.assertIs(l, l + self.plist.empty)
+        self.assertIs(l, self.plist.empty + l)
         # If the list comes first, the return value is a list.
         self.assertEqual(list(l), [] + l)
         # Doubling a list:
@@ -154,11 +153,11 @@ class TestPList(TestCase):
             with self.assertRaises(TypeError):
                 u = l + notlist
     def test_random(self):
-        "Performs a randomized test on the plist type."
+        "Performs a randomized test on the self.plist type."
         nops = 100
         valmax = 1000
-        p = plist()
-        t = tlist()
+        p = self.plist()
+        t = self.tlist()
         l = list()
         for opnum in range(nops):
             op = randint(0, 9)
@@ -222,7 +221,9 @@ class TestPList(TestCase):
                 self.assertEqual(tmp, p)
                 self.assertEqual(tmp, t)
 
-class TestLList(TestCase):
+
+
+class _LListTestMixin:
     """Tests for the `llist` and `lazy` classes.
 
     This runs a number of simple tests of the `llist` API; however, because the
@@ -232,16 +233,16 @@ class TestLList(TestCase):
     def test_api(self):
         """Tests/demonstrates the basic llist API."""
         # An empty plist can be created with `llist()`.
-        e = llist()
+        e = self.llist()
         self.assertEqual(len(e), 0)
-        self.assertIsInstance(e, llist)
-        self.assertIsInstance(e, plist)
+        self.assertIsInstance(e, self.llist)
+        self.assertIsInstance(e, self.plist)
         # This is identical to the llist.empty object.
-        self.assertIs(e, llist.empty)
+        self.assertIs(e, self.llist.empty)
         # ... but it is not identical to the plist.empty object.
-        self.assertIsNot(e, plist.empty)
+        self.assertIsNot(e, self.plist.empty)
         # A plist can also be created by passing an iterable to the type.
-        p1 = llist(range(10))
+        p1 = self.llist(range(10))
         self.assertEqual(len(p1), 10)
         # Element access is like with the list type.
         self.assertEqual(p1[0], 0)
@@ -249,22 +250,22 @@ class TestLList(TestCase):
         self.assertEqual(p1[-2], 8)
         # Slice access is supported (slices are llists)
         self.assertEqual(p1[0:10:2], [0,2,4,6,8])
-        self.assertIsInstance(p1[:-1], llist)
+        self.assertIsInstance(p1[:-1], self.llist)
         # llists can be equal to each other and to other lists (but, like with
         # list, not to other sequences like tuples or strings).
         l1 = list(range(10))
         self.assertEqual(l1, p1)
         self.assertEqual(p1, l1)
-        self.assertEqual(p1, llist(range(10)))
-        self.assertEqual(p1, plist(range(10)))
+        self.assertEqual(p1, self.llist(range(10)))
+        self.assertEqual(p1, self.plist(range(10)))
         self.assertNotEqual(p1, tuple(p1))
-        self.assertNotEqual(llist.empty, '')
+        self.assertNotEqual(self.llist.empty, '')
         # llists can perform ordering comparisons like list as well.
         self.assertLessEqual(p1[:4], p1)
         self.assertGreater(p1[4:], p1)
         self.assertLess(p1[:4], p1[6:])
         # Clearing an llist always yields the empty llist.
-        self.assertIs(p1.clear(), llist.empty)
+        self.assertIs(p1.clear(), self.llist.empty)
         # Copying an llist always just returns the plist (it is immutable).
         self.assertIs(p1.copy(), p1)
         # llists are hashable as long as their values are hashable.
@@ -279,13 +280,13 @@ class TestLList(TestCase):
         # They can count and index items.
         self.assertEqual(p1.count(4), 1)
         self.assertEqual(p1.count(-4), 0)
-        self.assertEqual(llist([1,2,3,3,4,5,3,3,6]).count(3), 4)
+        self.assertEqual(self.llist([1,2,3,3,4,5,3,3,6]).count(3), 4)
         self.assertEqual(p1.index(5), 5)
         # The reverse method does not mutate it in-place; instead it returns
         # a reversed llist. This is equivalent to the __reversed__ method.
         self.assertEqual(p1.reverse(), list(reversed(p1)))
         self.assertIsNot(p1.reverse(), p1)
-        self.assertIsInstance(p1.reverse(), llist)
+        self.assertIsInstance(p1.reverse(), self.llist)
         # The sort method also returns a sorted llist.
         self.assertEqual(p1.sort(), p1)
         self.assertEqual(p1.reverse().sort(), p1)
@@ -305,7 +306,7 @@ class TestLList(TestCase):
             p2.delete(20)
         self.assertEqual(p2, p2.drop(20))
         # Items can be appended and prepended to the lists.
-        p3 = llist([1,2,3])
+        p3 = self.llist([1,2,3])
         self.assertEqual(p3.append(4), [1,2,3,4])
         self.assertEqual(p3.prepend(0), [0,1,2,3])
         # The extend method also appends sequences, which is basically the same
@@ -314,8 +315,8 @@ class TestLList(TestCase):
         self.assertEqual(p3.extend([4,5,6]), p3 + [4,5,6])
         self.assertEqual([-1,0] + p3, [-1,0,1,2,3])
         # llists can also be multiplied.
-        self.assertEqual(llist([1]) * 5, [1,1,1,1,1])
-        self.assertEqual(5 * llist([1]), [1,1,1,1,1])
+        self.assertEqual(self.llist([1]) * 5, [1,1,1,1,1])
+        self.assertEqual(5 * self.llist([1]), [1,1,1,1,1])
         # The pop method may be used to extract an item.
         self.assertEqual(p3.pop(1), (2, [1,3]))
         # Finally, the insert method can be used to insert items.
@@ -328,7 +329,7 @@ class TestLList(TestCase):
             counter.count += n
             return counter.count
         counter.count = 0
-        p1 = llist([lazy(counter, 1), lazy(counter, 10)])
+        p1 = self.llist([self.lazy(counter, 1), self.lazy(counter, 10)])
         self.assertEqual(counter.count, 0)
         self.assertEqual(p1[0], 1)
         self.assertEqual(counter.count, 1)
@@ -343,21 +344,21 @@ class TestLList(TestCase):
         self.assertEqual(counter.count, 11)
         # Iteration also reifies the values.
         counter.count = 0
-        p1 = llist([lazy(counter, 1), lazy(counter, 10)])
+        p1 = self.llist([self.lazy(counter, 1), self.lazy(counter, 10)])
         self.assertEqual(list(iter(p1)), [1, 11])
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
         self.assertEqual(counter.count, 11)
         # Converstion via as_plist preserves the lazy items.
         counter.count = 0
-        p1 = llist([lazy(counter, 1), lazy(counter, 10)])
+        p1 = self.llist([self.lazy(counter, 1), self.lazy(counter, 10)])
         t1 = p1.as_plist()
-        self.assertIsInstance(t1, plist)
-        self.assertIsInstance(t1[0], lazy)
-        self.assertIsInstance(t1[1], lazy)
+        self.assertIsInstance(t1, self.plist)
+        self.assertIsInstance(t1[0], self.lazy)
+        self.assertIsInstance(t1[1], self.lazy)
         # Conversion to a transient creates a lazy transient.
         t1 = p1.transient()
-        self.assertIsInstance(t1, tllist)
+        self.assertIsInstance(t1, self.tllist)
         self.assertEqual(t1[0], 1)
         self.assertEqual(t1[1], 11)
         # Note that the new dictionary in this case shares the lazy values with
@@ -368,11 +369,11 @@ class TestLList(TestCase):
         self.assertIs(p1.getlazy(0), t1.getlazy(0))
         # Equality comparisons depend on the reified, not lazy, values.
         counter.count = 0
-        p1 = llist([lazy(counter, 1), lazy(counter, 10)])
+        p1 = self.llist([self.lazy(counter, 1), self.lazy(counter, 10)])
         self.assertEqual(p1, [1, 11])
     def test_immutable(self):
         """Ensures that `plist` throws the right errors when one mutates it."""
-        l = llist(range(10))
+        l = self.llist(range(10))
         # Cannot set-item.
         with self.assertRaises(TypeError):
             l[0] = 10
@@ -383,11 +384,11 @@ class TestLList(TestCase):
         with self.assertRaises(TypeError):
             l._start = -10
     def test_mul(self):
-        "Tests the plist multiplication operator."
-        l = llist(range(10))
+        "Tests the self.plist multiplication operator."
+        l = self.llist(range(10))
         # Zero * plist is an empty plist.
-        self.assertIs(l * 0, llist.empty)
-        self.assertIs(0 * l, llist.empty)
+        self.assertIs(l * 0, self.llist.empty)
+        self.assertIs(0 * l, self.llist.empty)
         # List * 2 doubles the list.
         ll = l * 2
         self.assertEqual(l, ll[:10])
@@ -401,12 +402,12 @@ class TestLList(TestCase):
             with self.assertRaises(ValueError):
                 u = notint * l
     def test_add(self):
-        "Tests the plist addition operator."
-        l = llist(range(10))
+        "Tests the self.plist addition operator."
+        l = self.llist(range(10))
         # A plist plus an empty list is the same plist.
         self.assertIs(l, l + [])
-        self.assertIs(l, l + llist.empty)
-        self.assertIs(l, llist.empty + l)
+        self.assertIs(l, l + self.llist.empty)
+        self.assertIs(l, self.llist.empty + l)
         # If the list comes first, the return value is a list.
         self.assertEqual(list(l), [] + l)
         # Doubling a list:
@@ -419,3 +420,7 @@ class TestLList(TestCase):
                 u = notlist + l
             with self.assertRaises(TypeError):
                 u = l + notlist
+
+
+make_tests('TestPList', _PListTestMixin, globals())
+make_tests('TestLList', _LListTestMixin, globals())

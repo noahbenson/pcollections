@@ -62,6 +62,10 @@ class PersistentSet(Set, Persistent):
      * `removeall(values)`
      * `__reduce__` (for pickling)
     """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     # Methods which must be implemented in the children.
     def add(self, obj):
         """Returns a copy of the persistent set that includes the given
@@ -337,6 +341,10 @@ class TransientSet(MutableSet, Transient):
      * `discardall(values)`
      * `removeall(values)`
     """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     # Methods which must be implemented in the children.
     def add(self, obj):
         """Adds the given object to the transient set."""

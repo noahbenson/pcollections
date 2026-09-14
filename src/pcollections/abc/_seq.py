@@ -63,6 +63,10 @@ class PersistentSequence(Persistent, Sequence):
      * ``__json__`` (for the ``json_fix`` module)
 
     """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     # Methods which must be implemented in the children.
     def set(self, index, obj):
         """Returns a copy of the persistent sequence with the given index set to
@@ -172,8 +176,8 @@ class PersistentSequence(Persistent, Sequence):
     def count(self, value):
         """Returns the number of occurences of value."""
         n = 0
-        for (k,obj) in self._phamt:
-            if obj == value: n += 1
+        for el in self:
+            if el == value: n += 1
         return n
     def extend(self, iterable):
         """Return a new persistent sequence with the iterables appended."""
@@ -308,6 +312,10 @@ class TransientSequence(Transient, MutableSequence):
      * ``__reduce__`` (for pickling)
      * ``__json__`` (for the ``json_fix`` module)
     """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     def pop(self, index=-1):
         """Remove and return item at index (default last).
 
@@ -350,15 +358,21 @@ class TransientSequence(Transient, MutableSequence):
 
         Raises ValueError if value is not present.
         """
+        if stop is None:
+            stop = len(self)
         for (ii,el) in enumerate(self):
-            if value == el:
+            if ii < start:
+                continue
+            elif ii >= stop:
+                break
+            elif value == el:
                 return ii
         raise ValueError(f'{value} is not in {type(self)}')
     def reverse(self):
         """Reverses *IN PLACE*."""
         n = len(self)
         for k in range(n//2):
-            kk = n - k
+            kk = n - 1 - k
             tmp = self[k]
             self[k] = self[kk]
             self[kk] = tmp
@@ -405,36 +419,6 @@ class TransientSequence(Transient, MutableSequence):
     def __reversed__(self):
         n = len(self)
         return map(self.__getitem__, range(n - 1, -1, -1))
-    def count(self, value):
-        """Returns the number of occurences of value."""
-        n = 0
-        for (k,obj) in self._phamt:
-            if obj == value: n += 1
-        return n
-    def extend(self, iterable):
-        """Return a new persistent sequence with the iterables appended."""
-        for el in iterable:
-            self.append(el)
-    def index(self, value, start=0, stop=None):
-        """Returns first index of value.
-
-        Raises ValueError if value is not present.
-        """
-        if start == 0:
-            for (ii,val) in enumerate(self):
-                if ii >= stop:
-                    break
-                elif val == value:
-                    return ii
-        else:
-            for (ii,val) in enumerate(self):
-                if ii >= stop:
-                    break
-                elif ii < start:
-                    pass
-                elif val == value:
-                    return ii
-        raise ValueError(f"{value} is not in {type(self)}")
     def __iadd__(self, obj):
         if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
             msg = (f"unsuppoorted operand type for +=:"
@@ -464,7 +448,7 @@ class TransientSequence(Transient, MutableSequence):
             t = self.copy()
             for el in reversed(obj):
                 t.prepend(el)
-            return r
+            return t
     def __imul__(self, value):
         if not isinstance(value, Integral):
             msg = f"can't multiply sequence by non-int of type '{type(value)}'"
@@ -475,13 +459,16 @@ class TransientSequence(Transient, MutableSequence):
         if reps == 0:
             self.clear()
         elif reps > 1:
-            n = len(self)
+            # Snapshot the current elements before appending: appending
+            # directly while iterating over `self` (a live, mutating
+            # transient sequence) would violate the no-mutation-during-
+            # iteration assumption transient types rely on, and would also
+            # just be wrong (each pass would see the elements appended by
+            # the previous pass too).
+            orig = list(self)
             for r in range(reps - 1):
-                for (ii,el) in enumerate(self):
-                    if ii > n:
-                        break
-                    else:
-                        self.append(el)
+                for el in orig:
+                    self.append(el)
         return self
     def __mul__(self, value):
         t = self.copy()

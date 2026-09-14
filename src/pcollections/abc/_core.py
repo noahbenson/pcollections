@@ -22,6 +22,18 @@ class Persistent(Hashable):
     The class includes one abstract method, ``transient()``, which can be
     overloaded if the object has a transient companion type.
     """
+    # No instance state of its own, and no __dict__/__weakref__ either: like
+    # collections.abc's own mixins, this is meant to be combined with other
+    # bases via multiple inheritance, and a concrete leaf class decides for
+    # itself (via its own __slots__, or lack thereof) whether instances get a
+    # __dict__. Without this, *every* class in the MRO that omits __slots__
+    # gives instances a __dict__ regardless of what the leaf class declares,
+    # silently defeating any __slots__ a concrete subclass (e.g. plist/pdict)
+    # declares -- and, for a C-implemented subclass, inheriting a nonzero
+    # tp_dictoffset/tp_weaklistoffset computed for *this* class's own (much
+    # smaller) layout onto a C struct with extra native fields corrupts
+    # memory the instant a weakref or instance attribute touches it.
+    __slots__ = ()
     # Abstract methods.
     def transient(self):
         """Efficiently returns a transient copy of the persistent object."""
@@ -54,6 +66,10 @@ class Transient:
     new persistent object, and ``copy()``, which by default returns
     ``self.persistent().transient()``.
     """
+    # See the matching comment on Persistent.__slots__ above: this keeps
+    # Transient (and everything that mixes it in) from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     def persistent(self):
         """Efficiently returns a persistent copy of the transient object."""
         raise NotImplementedError()

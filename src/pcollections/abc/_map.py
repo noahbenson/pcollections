@@ -62,6 +62,10 @@ class PersistentMapping(Mapping, Persistent):
      * `__reduce__` (for pickling)
      * `__json__` (for `json_fix` module)
     """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     # Methods which must be implemented in the children.
     def set(self, key, val):
         """Returns a copy of the pdict that maps the given key to the given
@@ -233,6 +237,10 @@ class TransientMapping(MutableMapping, Transient):
      * `__reduce__` (for pickling)
      * `__json__` (for the `json_fix` module)
     """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
     # Methods which must be implemented in the children.
     def clear(self):
         """Returns the empty persistent mapping of the same type."""
@@ -242,9 +250,7 @@ class TransientMapping(MutableMapping, Transient):
         # We have a max length of 60 characters, not counting the delimiters.
         return f"{{<{seqstr(self, maxlen=60)}>}}"
     def __repr__(self):
-        #s = repr(dict(self))
-        #return f"{{<{s[1:-1]}>}}"
-        return f"{{|{seqstr(self)}|}}"
+        return f"{{<{seqstr(self)}>}}"
     def __contains__(self, k):
         try:
             self[k]

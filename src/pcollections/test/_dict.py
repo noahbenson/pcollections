@@ -7,18 +7,24 @@
 from random import randint
 from unittest import TestCase
 
-from .._dict import (pdict, tdict)
-from .._lazy import (lazy, ldict, tldict, holdlazy)
+from ._backends import make_tests
 
-class TestPDict(TestCase):
+class _PDictTestMixin:
     """Tests for the `pdict` and `tdict` classes.
 
     This both runs a number of simple tests of the `pdict` API and a series of
     randomized tests in which `pdict` must match the behavior of Python's
     native `dict` type.
+
+    This is a backend-parametrized mixin (see `_backends.make_tests`): the
+    `pdict`/`tdict`/etc. class attributes are bound per-backend ('python',
+    and 'c' when the compiled extension is available), so the exact same
+    test bodies run against both implementations.
     """
     def test_api(self):
         """Tests/demonstrates the basic pdict API."""
+        pdict = self.pdict
+        tdict = self.tdict
         # An empty pdict can be created with `pdict()`.
         e = pdict()
         self.assertEqual(len(e), 0)
@@ -90,6 +96,7 @@ class TestPDict(TestCase):
                          {0:0, 1:10, 2:20})
     def test_immutable(self):
         """Ensures that `pdict` throws the right errors when one mutates it."""
+        pdict = self.pdict
         l = pdict(zip(range(10), range(0,100,10)))
         # Cannot set-item.
         with self.assertRaises(TypeError):
@@ -102,6 +109,8 @@ class TestPDict(TestCase):
             l._top = -10
     def test_random(self):
         "Performs a randomized test on the pdict type."
+        pdict = self.pdict
+        tdict = self.tdict
         nops = 100
         valmax = 1000
         keymax = 200
@@ -114,7 +123,6 @@ class TestPDict(TestCase):
             el = randint(0, valmax)
             if op < 4:
                 ii = randint(0, len(l))
-                #print(f"set ({ii}, {el}) at {len(l)}")
                 p = p.set(ii, el)
                 t[ii] = el
                 l[ii] = el
@@ -122,7 +130,6 @@ class TestPDict(TestCase):
                 if len(p) > 0:
                     k = list(l.keys())[randint(0, len(l) - 1)]
                     lel = l.pop(k)
-                    #print(f"pop {k} {lel} at {len(l)}")
                     (pel, p) = p.pop(k)
                     tel = t.pop(k)
                     self.assertEqual(pel, tel)
@@ -130,13 +137,9 @@ class TestPDict(TestCase):
             elif op == 5:
                 if len(p) > 0:
                     k = list(l.keys())[randint(0, len(l) - 1)]
-                    #print(f"drop {k} at {len(l)}")
                     p = p.drop(k)
                     del t[k]
                     del l[k]
-            #print('   -', repr(p), ' [', p._start, ']')
-            #print('   -', repr(t), ' [', t._start, ']')
-            #print('   -', repr(l))
             self.assertEqual(p, t)
             self.assertEqual(p, l)
             self.assertEqual(l, t)
@@ -145,7 +148,7 @@ class TestPDict(TestCase):
                 self.assertEqual(tmp, p)
                 self.assertEqual(tmp, t)
 
-class TestLDict(TestCase):
+class _LDictTestMixin:
     """Tests for the `ldict` and `lazy` classes.
 
     Because the `ldict` code is based largely on the `pdict` code, only API
@@ -153,6 +156,8 @@ class TestLDict(TestCase):
     """
     def test_api(self):
         """Tests/demonstrates the basic ldict API."""
+        pdict = self.pdict
+        ldict = self.ldict
         # An empty ldict can be created with `ldict()`.
         e = ldict()
         self.assertEqual(len(e), 0)
@@ -233,6 +238,10 @@ class TestLDict(TestCase):
                          {0:0, 1:10, 2:20})
     def test_lazy(self):
         "Tests the lazy aspects of the ldict class."
+        ldict = self.ldict
+        lazy = self.lazy
+        pdict = self.pdict
+        holdlazy = self.holdlazy
         # Lazy dictionaries don't evaluate lazy arguments until they are
         # requested, and they only evaluate them once.
         def counter(n):
@@ -300,6 +309,8 @@ class TestLDict(TestCase):
         self.assertEqual(p1, {'a': 1, 'b': 11})
     def test_tdict(self):
         """Ensures that tdict objects can be used with pdicts."""
+        pdict = self.pdict
+        tdict = self.tdict
         p = pdict(a=1, b=2, c=3)
         t = p.transient()
         self.assertEqual(p, t)
@@ -311,8 +322,18 @@ class TestLDict(TestCase):
         self.assertIs(type(t.persistent()), pdict)
         self.assertEqual(t['d'], 10)
         self.assertEqual(t.persistent(), t)
+        # tdict's __str__ and __repr__ both use the "{<...>}" transient
+        # delimiter (unlike ldict/tldict, which deliberately use "{|...|}"
+        # for both -- see test_tldict below); __repr__ previously had a
+        # copy-paste bug that used "{|...|}" here instead, matching
+        # pdict's delimiter rather than tdict's own.
+        self.assertEqual(str(t), repr(t))
+        self.assertTrue(str(t).startswith('{<'))
+        self.assertTrue(str(t).endswith('>}'))
     def test_tldict(self):
         """Ensures that tldict objects can be used with ldicts."""
+        ldict = self.ldict
+        tldict = self.tldict
         p = ldict(a=1, b=2, c=3)
         t = p.transient()
         self.assertEqual(p, t)
@@ -324,8 +345,17 @@ class TestLDict(TestCase):
         self.assertIs(type(t.persistent()), ldict)
         self.assertEqual(t['d'], 10)
         self.assertEqual(t.persistent(), t)
+        # Regression test for a fixed infinite-recursion bug: tldict.pop
+        # used to call `self.pop(...)` from inside its own `pop` override,
+        # recursing forever instead of delegating to tdict.pop.
+        self.assertEqual(t.pop('d'), 10)
+        self.assertNotIn('d', t)
+        with self.assertRaises(KeyError):
+            t.pop('d')
+        self.assertEqual(t.pop('d', -1), -1)
     def test_immutable(self):
-        """Ensures that `pdict` throws the right errors when one mutates it."""
+        """Ensures that `ldict` throws the right errors when one mutates it."""
+        ldict = self.ldict
         l = ldict(zip(range(10), range(0,100,10)))
         # Cannot set-item.
         with self.assertRaises(TypeError):
@@ -338,11 +368,16 @@ class TestLDict(TestCase):
             l._top = -10
     def test_lazy_error_unwrap(self):
         """Ensures that `lazy_error_unwrap` works correctly."""
-        from pcollections import LazyError, lazy_error_unwrap, lazy
+        LazyError = self.LazyError
+        lazy_error_unwrap = self.lazy_error_unwrap
+        lazy = self.lazy
         x = 0
         d = lazy(lambda:x[0])  # x[0] raises a TypeError.
         with self.assertRaises(LazyError):
             d()
+        # lazy_error_unwrap's __exit__ only rewrites a LazyError that
+        # propagates *out of* the with-block, so the try/except has to wrap
+        # the with statement, not sit inside it.
         with self.assertRaises(TypeError):
             with lazy_error_unwrap:
                 d()
@@ -352,3 +387,6 @@ class TestLDict(TestCase):
             e = exc
         self.assertIsInstance(e, LazyError)
         self.assertIsInstance(lazy_error_unwrap(e), TypeError)
+
+make_tests('TestPDict', _PDictTestMixin, globals())
+make_tests('TestLDict', _LDictTestMixin, globals())

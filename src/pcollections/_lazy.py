@@ -7,7 +7,17 @@
 from functools import partial
 from threading import RLock
 
-from phamt import (PHAMT, THAMT)
+# See _list.py's import comment: llist/tllist reuse plist/tlist's FAT-backed
+# value-table encoding directly (self._phamt), and tldict wraps tdict's
+# already-FAT/AMT-typed self._els/self._idx -- so, as in _list.py, these are
+# imported under the PHAMT/THAMT names this file already uses throughout.
+from ._trie import (
+    AMT,
+    FAT,
+    FAT as PHAMT,
+    TFAT as THAMT
+)
+from ._compact import is_tombstone
 
 from .util import seqstr
 from ._list import (
@@ -417,8 +427,10 @@ class ldict(pdict):
             return True
     def ready_all(self):
         "Caches all lazy items then returns the dictionary."
-        for arg in self._els:
-            (k,v) = arg[1][0]
+        for (_ii, (kv, _next)) in self._els:
+            if is_tombstone(kv):
+                continue
+            (k,v) = kv
             if isinstance(v, lazy):
                 v()
         return self
@@ -431,7 +443,8 @@ class ldict(pdict):
         mapped to their associated `lazy` objects. This is essentially a way to
         expose the raw values of a lazy dictionary.
         """
-        return pdict._new(self._els, self._idx, self._top)
+        return pdict._new(self._els, self._idx, self._top, self._count,
+                          self._ndeleted)
     def __holdlazy__(self):
         return self.as_pdict()
     def getlazy(self, key, default=None):
@@ -446,9 +459,10 @@ class ldict(pdict):
     def clear(self):
         return ldict.empty
     def transient(self):
-        return tldict._new(THAMT(self._els), THAMT(self._idx), self._top, self)
+        return tldict._new(THAMT(self._els), THAMT(self._idx), self._top,
+                           self._count, self._ndeleted, self)
 # Make the empty pdict.
-ldict.empty = ldict._new(PHAMT.empty, PHAMT.empty, 0)
+ldict.empty = ldict._new(FAT.empty, AMT.empty, 0, 0, 0)
 
 # The Transient Lazy Dictionary Type -------------------------------------------
 class tldict_items(tdict_items):
@@ -496,7 +510,9 @@ class tldict(tdict):
         else:
             return ldict._new(self._els.persistent(),
                               self._idx.persistent(),
-                              self._top)
+                              self._top,
+                              self._count,
+                              self._ndeleted)
     def is_lazy(self, key):
         """Determines if the given key is mapped to a `lazy` value.
 
@@ -520,8 +536,10 @@ class tldict(tdict):
             return True
     def ready_all(self):
         "Caches all lazy items then returns the dictionary."
-        for arg in self._els:
-            (k,v) = arg[1][0]
+        for (_ii, (kv, _next)) in self._els:
+            if is_tombstone(kv):
+                continue
+            (k,v) = kv
             if isinstance(v, lazy):
                 v()
         return self
@@ -534,7 +552,8 @@ class tldict(tdict):
         mapped to their associated `lazy` objects. This is essentially a way to
         expose the raw values of a lazy dictionary.
         """
-        return tdict._new(self._els, self._idx, self._top)
+        return tdict._new(self._els, self._idx, self._top, self._count,
+                          self._ndeleted)
     def __holdlazy__(self):
         return self.as_tdict()
     def getlazy(self, k, default=None):
@@ -551,7 +570,11 @@ class tldict(tdict):
     def get(self, k, default=None):
         return unlazy(tdict.get(self, k, default))
     def pop(self, *args):
-        return unlazy(self.pop(*args))
+        # NB: this must delegate to tdict.pop (like __getitem__/get above
+        # delegate to tdict.__getitem__/tdict.get), not call self.pop(...)
+        # again -- the latter was an infinite-recursion bug (every call
+        # would just re-invoke this same override).
+        return unlazy(tdict.pop(self, *args))
     def items(self):
         return tldict_items(self)
     def values(self):

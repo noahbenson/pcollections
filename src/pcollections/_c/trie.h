@@ -22,6 +22,9 @@
 
 
 #include <Python.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <string.h>
 #include "uintbits.h"
 
 #ifdef __cplusplus
@@ -89,7 +92,7 @@ EXTC typedef size_t trieint_t;
 #  define gtmask_triebits     gtmask8
 #  define gemask_triebits     gemask8
 #  define nextbinpow_triebits nextbinpow8
-#if (defined(UINT16_WIDTH) && (TRIEBITS_WIDTH == UINT16_WIDTH))
+#elif (defined(UINT16_WIDTH) && (TRIEBITS_WIDTH == UINT16_WIDTH))
    EXTC typedef uint16_t triebits_t;
 #  define TRIEBITS_C(x)       UINT16_C(x)
 #  define TRIEBITS_MAX        UINT16_MAX 
@@ -101,7 +104,7 @@ EXTC typedef size_t trieint_t;
 #  define gtmask_triebits     gtmask16
 #  define gemask_triebits     gemask16
 #  define nextbinpow_triebits nextbinpow16
-#if (defined(UINT32_WIDTH) && (TRIEBITS_WIDTH == UINT32_WIDTH))
+#elif (defined(UINT32_WIDTH) && (TRIEBITS_WIDTH == UINT32_WIDTH))
    EXTC typedef uint32_t triebits_t;
 #  define TRIEBITS_C(x)       UINT32_C(x)
 #  define TRIEBITS_MAX        UINT32_MAX 
@@ -113,7 +116,7 @@ EXTC typedef size_t trieint_t;
 #  define gtmask_triebits     gtmask32
 #  define gemask_triebits     gemask32
 #  define nextbinpow_triebits nextbinpow32
-#if (defined(UINT64_WIDTH) && (TRIEBITS_WIDTH == UINT64_WIDTH))
+#elif (defined(UINT64_WIDTH) && (TRIEBITS_WIDTH == UINT64_WIDTH))
    EXTC typedef uint64_t triebits_t;
 #  define TRIEBITS_C(x)       UINT64_C(x)
 #  define TRIEBITS_MAX        UINT64_MAX 
@@ -125,7 +128,7 @@ EXTC typedef size_t trieint_t;
 #  define gtmask_triebits     gtmask64
 #  define gemask_triebits     gemask64
 #  define nextbinpow_triebits nextbinpow64
-#if (defined(UINT128_WIDTH) && (TRIEBITS_WIDTH == UINT128_WIDTH))
+#elif (defined(UINT128_WIDTH) && (TRIEBITS_WIDTH == UINT128_WIDTH))
    EXTC typedef uint128_t triebits_t;
 #  define TRIEBITS_C(x)       UINT128_C(x)
 #  define TRIEBITS_MAX        UINT128_MAX
@@ -203,6 +206,16 @@ static inline bool amtdepth_prefix_match(triebits_t depth,
                                          trieint_t prefix,
                                          trieint_t k) {
    triebits_t shmask = amtdepth_shiftmask(depth);
+   // At depth 0 (the root's own window is the topmost AMT_DIVBITS bits),
+   // shmask is exactly TRIEINT_WIDTH: there are no bits above the root left
+   // to compare, so the match is vacuously true. A shift by the full width
+   // is undefined behavior in C, and on x86 a 64-bit shift silently wraps
+   // to a no-op (shift-by-0) rather than "shift everything out", which
+   // would otherwise turn this into "match iff the entire key is
+   // bit-for-bit identical to the stored prefix" -- wrong for every root
+   // (or other depth-0) node.
+   if (shmask >= TRIEINT_WIDTH)
+      return true;
    return (prefix >> shmask) == (k >> shmask);
 }
 
@@ -245,47 +258,65 @@ static inline bool amtdepth_prefix_match(triebits_t depth,
 #define FAT_LAYERS (FAT_MAX_DEPTH + 1)
 
 // We also need to manually define the divisors for each layer of the FAT.
+// Each entry below is a power of 29 (up to 29^13 for a 64-bit trieint_t, or
+// 29^26 for 128-bit) -- large enough that computing it as a plain `int`
+// product (the literal `29` defaults to `int`) silently overflows well
+// before the higher powers are reached: signed integer overflow is
+// undefined behavior in C, and in practice the compiler warns about it and
+// folds the expression to a wrapped, wrong value at compile time (confirmed
+// via -Wall: e.g. 29^13 folded to a nonsense 8-digit result instead of the
+// correct ~20-digit value). Every one of the shallower FAT depths silently
+// got a garbage divisor as a result, corrupting fatdepth_bitindex() for any
+// node above roughly depth 7 -- fatal, since fat_lookup(), fat_subjoin(),
+// and every path-descent function depend on it (caught the hard way: a
+// 2-key FAT tree lost its first key immediately, root-caused by tracing
+// _fat_divs's printed values against hand-computed powers of 29). The fix
+// is to force the entire product chain into trieint_t (or uint128_t, on a
+// 128-bit build) arithmetic instead of `int` arithmetic: casting just the
+// *first* literal in each left-associative product chain is enough, since
+// C's usual arithmetic conversions then promote every subsequent operand
+// once the running product is already the wider type.
 #if (FAT_CELLS == 29)
-   const trieint_t[] _fat_divs = {
+   const trieint_t _fat_divs[] = {
 #    if (TRIEINT_WIDTH == 128)
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29,
 
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29,
 
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29 * 29,
 
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29*29,
 #    endif
 #    if (TRIEINT_WIDTH >= 64)
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29*29,
-        29*29*29*29*29 * 29*29*29*29*29 * 29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29 * 29,
 
-        29*29*29*29*29 * 29*29*29*29*29,
-        29*29*29*29*29 * 29*29*29*29,
-        29*29*29*29*29 * 29*29*29,
-        29*29*29*29*29 * 29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29*29,
+        TRIEINT_C(29)*29*29*29*29 * 29*29,
 #    endif 
 #    if (TRIEINT_WIDTH >= 32)
-        29*29*29*29*29 * 29,
+        TRIEINT_C(29)*29*29*29*29 * 29,
 
-        29*29*29*29*29,
-        29*29*29*29,
+        TRIEINT_C(29)*29*29*29*29,
+        TRIEINT_C(29)*29*29*29,
 #    endif 
 #    if (TRIEINT_WIDTH >= 16)
-        29*29*29,
-        29*29,
+        TRIEINT_C(29)*29*29,
+        TRIEINT_C(29)*29,
 #    endif
-        29,
+        TRIEINT_C(29),
         1
    };
 #else
@@ -302,7 +333,7 @@ static inline trieint_t fatdepth_bitindex(uint8_t depth, trieint_t k) {
    return (k / fatdepth_div(depth)) % TRIEINT_C(FAT_CELLS);
 }
 static inline bool fatdepth_prefix_match(uint8_t depth,
-                                         trient_t prefix, trieint_t k) {
+                                         trieint_t prefix, trieint_t k) {
    trieint_t div = fatdepth_div(depth) * TRIEINT_C(FAT_CELLS);
    return (depth == 0) | ((prefix / div) == (k / div));
 }
@@ -321,16 +352,17 @@ EXTC typedef struct TrieHeader {
    // Size: 8 bytes (64 bits)
    _Atomic uint64_t refcount;
    // The hash prefix of the node. This prefix is always stored in unshifted
-   // bits, meaning that for a hash key k, you can tell if k falls beneath the
-   // node by comparing (k >> shift) == (prefix >> shift).
-   // Because we are using 64-bit hashes, there are 4 bits at the low end of
-   // the prefix that are never used in a trie node (not counting leaves, which
-   // aren't stored in trie nodes). We use these to store two flags:
-   //  - is_transient bit: is this node transient (1) or persistent (0)?
-   //  - is_fat bit: is this node a FAT (1) or an AMT (0)?
-   // As long as we are using 32-bit, 64-bit, or 128-bit hashes, there are
-   // enough bits for up to at least 2 bits to be stored; if the hash size is
-   // 256 bits or 16 bits, then there's still 1 bit for is_transient.
+   // bits, meaning that for a hash key k and an AMT node's real shift amount
+   // s (see amtnode_shift() below), you can tell if k falls beneath the node
+   // by comparing (k >> s) == (prefix >> s). `prefix` is always stored
+   // EXACTLY as given -- no flag bits are ever packed into it, for either
+   // AMT or FAT nodes. See "The trieint_t is_transient flag" comment below
+   // for where is_transient actually lives and why (short version: FAT's
+   // base-29 div/mod digit arithmetic can't tolerate ANY bit of `prefix`
+   // being stolen for a flag, so it lives in a dedicated `flags` byte
+   // instead, uniformly for AMT and FAT alike). There is no is_fat flag
+   // anywhere in this header at all -- see that same comment for why one
+   // isn't needed.
    // Size: 8 bytes (64 bits)
    trieint_t prefix;
    // -------------------------------------------------------------------------
@@ -343,9 +375,35 @@ EXTC typedef struct TrieHeader {
    // Other metadata stored by a trie node.
    uint8_t depth;  // The node's trie depth.
    uint8_t leafsize;  // The size of leaves in the twig nodes.
-   // The following two items are used by AMTs but not FATs.
-   uint8_t shift;  // The node's bit-shift for an AMT node.
-   uint8_t ncells;  // How many cells allocated in this node?
+   // `flags` holds only is_transient (bit 0 -- see "The trieint_t
+   // is_transient flag" comment below), for both AMT and FAT nodes alike,
+   // via the exact same bitmask, checked without first needing to know
+   // which kind of node this is.
+   // An earlier design stored an AMT node's real bit-shift amount in this
+   // byte (there was no need for the shift itself to persist: it's just
+   // AMT_ROOT_SHIFT - depth*AMT_NODE_BITS, a couple of cheap ALU ops from
+   // `depth`, which is already loaded from this same cache line by
+   // essentially every operation anyway) and stole its spare top bit for
+   // is_transient. That worked -- an AMT shift is always < TRIEINT_WIDTH,
+   // currently capped at 128, so it never came close to needing bit 7 --
+   // but it meant one more "don't read this field raw, you have to mask it
+   // first" trap (the same shape of bug that once corrupted FAT's prefix
+   // field), for a value nothing in this codebase currently even calls
+   // (amtnode_minleaf()/amtnode_maxleaf() are the only readers, and were
+   // unused). Recomputing on the rare occasions the real shift is actually
+   // needed (see amtnode_shift() below) costs a handful of register-only
+   // instructions -- confirmed by compiling both versions and comparing
+   // the generated code -- which is strictly cheaper than computing AND
+   // storing it on every node construction, given nothing was reading the
+   // stored value. So this byte is now nothing but flags, plainly.
+   uint8_t flags;
+   // `ncells` is how many cells are allocated in this node -- a real,
+   // ordinary count, for AMT nodes only (meaningless for FAT, which always
+   // has exactly FAT_CELLS cells and never reads or writes this field).
+   // Unlike an earlier design, no bit of `ncells` is reserved for a flag:
+   // there is no is_fat bit anywhere in a trie node's header (see "The
+   // trieint_t is_transient flag" comment below for why one was removed).
+   uint8_t ncells;
    // Total: 24 bytes.
 } *TrieHeader_t;
 
@@ -372,49 +430,120 @@ EXTC struct TrieDummyData {
 //-----------------------------------------------------------------------------
 // Trie Methods
 // Methods are prefixed with various strings:
-// - Any method trie_* such as trie_is_amt() is intended as a public interface
-//   method for any trie object such as the user can obtain using these public
-//   functions; these trie objects differ from those that might be found
-//   internally to a trie by, for example, crawling the trie's subnodes.
-// - Any method trienode_* such as trienode_is_transient() is intended as a
-//   private method for use within the module, and is intended to work on any
-//   trie node.
+// - Any method trie_* such as trie_is_transient() is intended as a public
+//   interface method for any trie object such as the user can obtain using
+//   these public functions; these trie objects differ from those that might
+//   be found internally to a trie by, for example, crawling the trie's
+//   subnodes.
+// - Any method trienode_* such as trienode_prefix() is intended as a private
+//   method for use within the module. Unlike an earlier design, these are
+//   never a kind-dispatching wrapper around separate amtnode_*/fatnode_*
+//   submethods -- there is no is_fat flag to dispatch on (see "The trieint_t
+//   is_transient flag" comment above), and no genuine need for one, since
+//   every trienode_* function here is instead written to work identically
+//   on either kind's node directly (pure header/cell field access, e.g.
+//   trienode_occupancy() or trienode_subt()), with no kind-dependent branch
+//   inside it at all.
 // - For AMT and FAT nodes, a similar paradigm applies with the prefixes
-//   amt_ / amtnode_ and fat_ / fatnode_.
-// - When there are duplicate implementations of a function (e.g., some
-//   function trienode_f() has been written but so have amtnode_f() and
-//   fatnode_f()), then typically the trienode_f() function will do nothing but
-//   check whether the node is an amtnode or fatnode and run it through the
-//   appropriate submethod.
+//   amt_ / amtnode_ and fat_ / fatnode_ -- these DO differ in behavior by
+//   kind (that's the whole point of having two of them), but each one only
+//   ever touches nodes of its own kind, so which one to call is always
+//   already decided by the caller's own context, never by inspecting the
+//   node passed in.
 
-// The trieint_t prefix flags.
-#define TRIE_BIT_ISTRANSIENT  0
-#define TRIE_BIT_ISFAT        1
-#define TRIE_FLAG(bit)        (TRIEINT_1 << (bit))
-#define TRIE_PREFIX_MASK      (~TRIEINT_C(3))
+// The trieint_t is_transient flag.
+// ---------------------------------------------------------------------------
+// A note on where is_transient actually lives, and why there is no is_fat
+// flag at all:
+//
+// An earlier design packed both an is_transient flag AND an is_fat flag
+// into the low bits of `prefix`, alongside the real numeric prefix value.
+// That works fine for AMT: every AMT prefix comparison is a power-of-2
+// bit-shift/mask (`(k >> shift) == (prefix >> shift)`), and every non-twig
+// depth's shift is large enough (a multiple of AMT_DIVBITS, i.e. >= 5) that
+// the low bits are already "don't care" for the comparison -- clearing or
+// overwriting them changes nothing.
+//
+// FAT prefix comparisons, by contrast, are base-29 DIVISION/MODULO
+// operations (fatdepth_prefix_match() computes prefix/div and key/div for
+// div a power of 29), not bit-shifts. Div-by-N and mask-low-bits are not
+// interchangeable the way div-by-power-of-2 and mask-low-bits are: an exact
+// multiple of div, once its low bits are cleared (or overwritten by an
+// OR'd-in flag), is in general no longer FLOOR-DIVISION-equal to that same
+// multiple -- concretely, floor((m*div - r)/div) == m - 1, not m, for any
+// r > 0 (an exact multiple sits at the very bottom edge of its own
+// division bucket, so *any* nonzero adjustment drops it into the previous
+// bucket, not just a large one). This was caught the hard way: a freshly
+// built 2-key FAT tree lost its first key immediately after the second
+// insert, root-caused by tracing the actual stored `prefix` field of the
+// resulting node against a hand-computed value and finding it off by
+// exactly a flag bit's contribution.
+//
+// So `prefix` cannot have ANY bits stolen from it -- not even one, and not
+// just for FAT -- without corrupting FAT's digit arithmetic (AMT tolerates
+// it, but there's no reason to keep two different rules for the two kinds
+// when one rule that works for both is available). is_transient therefore
+// lives in its own dedicated `flags` byte instead (bit 0), uniformly for
+// AMT and FAT alike, one mechanism rather than two.
+//
+// An earlier design put is_transient in the spare top bit of `shift`
+// instead of giving it a byte of its own, on the reasoning that an AMT
+// node's real shift value never gets anywhere near bit 7. That was true
+// (and would still be true up to the widest hash width this trie
+// currently supports), but it was solving a problem that didn't need
+// solving: nothing in this codebase actually reads an AMT node's real
+// shift value on any hot path -- amtnode_minleaf()/amtnode_maxleaf() are
+// the only two places that ever want it, and it's a couple of cheap ALU
+// ops to recompute from `depth` (which every caller has already loaded
+// anyway) rather than a real per-node cost to store -- see amtnode_shift()
+// below. So `shift` was retired as a stored field entirely: no numeric
+// shift value lives in the header at all anymore, which means there's
+// nothing left in `flags` to protect a stolen bit from, and no "remember
+// to mask this before using it as a number" trap for a future maintainer
+// to fall into (the same shape of bug that once corrupted FAT's prefix
+// field).
+//
+// is_fat, similarly, doesn't exist anywhere in a trie node's header at
+// all -- there was previously a bit stashed in header.ncells's top bit,
+// readable via one uniform computation on ANY node without first knowing
+// which kind it was. That flag turned out to be pure overhead too: every
+// place in this codebase that ever asked "is this node AMT or FAT?"
+// already knew the answer from *context*, not from the node itself. An AMT
+// node's cells only ever point to other AMT nodes, and a FAT node's cells
+// only ever point to other FAT nodes -- the two trees never interleave --
+// so every function here is written as either an amt_*/amtnode_* function
+// (which only ever touches AMT nodes) or a fat_*/fatnode_* function (which
+// only ever touches FAT nodes); nothing in this file ever receives a Trie_t
+// whose kind is genuinely unknown to its caller. (Below the C layer, the
+// Python-level PAMT/TAMT/PFAT/TFAT wrapper types each know their own kind
+// by construction too, for the same reason.) Wherever this file used to
+// call the generic, kind-dispatching trienode_is_twig()/trienode_decref()/
+// trienode_free() from within a function that already statically knew its
+// own kind (amtnode_free() calling trienode_is_twig() on a node it already
+// knows is an AMT node, say), it now just calls the kind-specific
+// amtnode_is_twig()/amtnode_decref()/etc. or fatnode_* equivalent directly.
+#define TRIE_FLAG_ISTRANSIENT UINT8_C(0x01)
 
+// trienode_prefix() returns the numeric prefix, suitable for arithmetic
+// (AMT's shift/mask arithmetic, or FAT's div/mod arithmetic). Neither kind
+// ever steals a bit from `prefix` for flag storage, so this is just
+// `t->header.prefix`, unconditionally, for either kind -- kept as its own
+// function (rather than inlined at each call site) so callers don't need
+// to care whether that remains true in the future.
 static inline trieint_t trienode_prefix(const Trie_t t) {
-   return TRIE_PREFIX_MASK & t->prefix;
+   return t->header.prefix;
 }
 static inline bool trie_is_persistent(const Trie_t t) {
-   return TRIE_FLAG(TRIE_BIT_ISTRANSIENT) & ~t->prefix;
+   return (t->header.flags & TRIE_FLAG_ISTRANSIENT) == 0;
 }
 static inline bool trie_is_transient(const Trie_t t) {
-   return TRIE_FLAG(TRIE_BIT_ISTRANSIENT) & t->prefix;
+   return (t->header.flags & TRIE_FLAG_ISTRANSIENT) != 0;
 }
 static inline void trienode_set_transient(Trie_t th, bool is_tr) {
-   th->header.prefix &= ~TRIE_FLAG(TRIE_BIT_ISTRANSIENT);
-   th->header.prefix |= (trieint_t)is_tr << TRIE_BIT_ISTRANSIENT;
-}
-static inline bool trie_is_amt(const Trie_t t) {
-   return TRIE_FLAG_ISFAT & ~t->prefix;
-}
-static inline bool trie_is_fat(const Trie_t t) {
-   return TRIE_FLAG_ISFAT & t->prefix;
-}
-static inline void trienode_set_fat(Trie_t th, bool is_fat) {
-   th->header.prefix &= ~TRIE_FLAG(TRIE_BIT_ISFAT);
-   th->header.prefix |= (trieint_t)is_tr << TRIE_BIT_ISFAT;
+   if (is_tr)
+      th->header.flags |= TRIE_FLAG_ISTRANSIENT;
+   else
+      th->header.flags &= (uint8_t)~TRIE_FLAG_ISTRANSIENT;
 }
 static inline bool amtnode_is_twig(const Trie_t th) {
    return th->header.depth == AMT_MAX_DEPTH;
@@ -422,23 +551,29 @@ static inline bool amtnode_is_twig(const Trie_t th) {
 static inline bool fatnode_is_twig(const Trie_t th) {
    return th->header.depth == FAT_MAX_DEPTH;
 }
-static inline bool trienode_is_twig(const Trie_t th) {
-   return th->header.depth == (trie_is_fat(th)? FAT_MAX_DEPTH : AMT_MAX_DEPTH);
-}
 static inline bool amtnode_prefix_match(const Trie_t th, trieint_t k) {
    return amtdepth_prefix_match(th->header.depth, th->header.prefix, k);
 }
 static inline bool fatnode_prefix_match(const Trie_t th, trieint_t k) {
    return fatdepth_prefix_match(th->header.depth, th->header.prefix, k);
 }
+// amtnode_shift() returns an AMT node's real numeric shift amount. This is
+// no longer a stored field (see "The trieint_t is_transient flag" comment
+// above): it's recomputed from `depth`, which the caller has virtually
+// always already loaded from this same header for some other reason.
+// Meaningless for a FAT node (which has no notion of a bit-shift at all);
+// only call this on a node already known to be AMT.
+static inline uint8_t amtnode_shift(const Trie_t th) {
+   return amtdepth_shift(th->header.depth);
+}
 static inline trieint_t amtnode_minleaf(const Trie_t th) {
-   return (th->header.prefix & (TRIEINT_MAX << th->header.shift));
+   return (th->header.prefix & (TRIEINT_MAX << amtnode_shift(th)));
 }
 static inline trieint_t amtnode_maxleaf(const Trie_t th) {
-   return (th->header.prefix | ~(TRIEINT_MAX << th->header.shift));
+   return (th->header.prefix | ~(TRIEINT_MAX << amtnode_shift(th)));
 }
 static inline trieint_t fatnode_minleaf(const Trie_t th) {
-   return (th->header.prefix / triedepth_div(th->header.depth));
+   return (th->header.prefix / fatdepth_div(th->header.depth));
 }
 static inline trieint_t fatnode_maxleaf(const Trie_t th) {
    return fatnode_minleaf(th) * TRIEINT_C(FAT_CELLS) - TRIEINT_1;
@@ -466,7 +601,7 @@ static inline Trie_t trienode_subt(const Trie_t th, trieint_t cellindex) {
    return ((Trie_t*)th->cells)[cellindex];
 }
 static inline Trie_t trienode_leaf(const Trie_t th, trieint_t cellindex) {
-   return (void*)(th->cells + cellindex*th->leafsize);
+   return (void*)(th->cells + cellindex*th->header.leafsize);
 }
 static inline void trienode_set_subt(Trie_t th,
                                      trieint_t cellindex,
@@ -476,20 +611,54 @@ static inline void trienode_set_subt(Trie_t th,
 static inline void trienode_set_leaf(Trie_t th,
                                      trieint_t cellindex,
                                      void* data) {
-   memcpy(th->cells + cellindex*th->leafsize, data, th->leafsize);
+   memcpy(th->cells + cellindex*th->header.leafsize, data, th->header.leafsize);
 }
 static inline size_t amtnode_cellsize(const Trie_t node) {
-   return amtnode_is_twig(node)? node->leafsize : sizeof(void*);
+   return amtnode_is_twig(node)? node->header.leafsize : sizeof(void*);
 }
 static inline size_t fatnode_cellsize(const Trie_t node) {
-   return fatnode_is_twig(node)? node->leafsize : sizeof(void*);
+   return fatnode_is_twig(node)? node->header.leafsize : sizeof(void*);
 }
 // Bitindex and cellindex scanning functions for iterating over tries.
+// Both of the following are written to tolerate two things a naive
+// ctz-based implementation gets wrong:
+//  1. "No more set bits" must come back as some index >= TRIEBITS_WIDTH
+//     (i.e. past the end of any real cell range, FAT_CELLS included) so
+//     that a caller's "while (bi < N)" scan terminates. Whether ctz(0)
+//     itself returns TRIEBITS_WIDTH depends on which ctz_triebits
+//     implementation this build picked: the C23 <stdbit.h> path guarantees
+//     it, but the manual De Bruijn fallback (used whenever <stdbit.h> isn't
+//     available -- confirmed via a standalone check to be what this build
+//     actually uses) returns 0 for a zero input instead. Both functions
+//     below special-case the "no bits left" condition explicitly rather
+//     than relying on ctz(0)'s value, so they behave identically on either
+//     implementation.
+//  2. trienode_next_bitindex(th, prev) must find the next set bit *after*
+//     prev, not prev itself. Shifting by `prev` (rather than `prev + 1`)
+//     leaves bit 0 of the shifted value equal to bit `prev` of the
+//     original -- which is always set, since `prev` is by construction a
+//     previously-found set bit -- so ctz of that shifted value is always
+//     0, making the naive `ctz(bits >> prev) + prev` formula return `prev`
+//     right back, unconditionally. Every caller that scans with this
+//     pattern (fattwig_free, fatnode_free, and the FAT set-cell iteration
+//     used elsewhere) would loop forever the moment it tried to advance
+//     past its first hit -- confirmed empirically, and never previously
+//     exercised since FAT wasn't wired up to anything that actually built
+//     or freed real bit-populated nodes until now. Shifting by `prev + 1`
+//     instead fixes this: bit 0 of the shifted value is now the bit right
+//     after `prev`, so ctz of it correctly measures the gap to the next
+//     set bit (or reports "none left" per point 1 above).
 static inline triebits_t trienode_first_bitindex(Trie_t th) {
-   return ctz_triebits(th->header.bits);
+   triebits_t bits = th->header.bits;
+   return (bits == 0)? TRIEBITS_WIDTH : ctz_triebits(bits);
 }
 static inline triebits_t trienode_next_bitindex(Trie_t th, triebits_t prev) {
-   return ctz_triebits(th->header.bits >> prev) + prev;
+   triebits_t nextpos = prev + 1;
+   triebits_t rest;
+   if (nextpos >= TRIEBITS_WIDTH)
+      return TRIEBITS_WIDTH;
+   rest = th->header.bits >> nextpos;
+   return (rest == 0)? TRIEBITS_WIDTH : (ctz_triebits(rest) + nextpos);
 }
 static inline triebits_t amtnode_first_cellindex(Trie_t th) {
    return TRIEBITS_0;
@@ -523,7 +692,7 @@ static inline void amttwig_free(Trie_t t, void (*leaf_decref)(void*)) {
    // each of the leaves.
    nocc = trienode_occupancy(t);
    for (ci = 0; ci < nocc; ++ci)
-      (*leaf_deref)(trienode_leaf(t, ci));
+      (*leaf_decref)(trienode_leaf(t, ci));
    // Once that's done, we free the node.
    free(t);
 }
@@ -541,7 +710,7 @@ static inline void fattwig_free(Trie_t t, void (*leaf_deref)(void*)) {
    for (bi = trienode_first_bitindex(t);
         bi < FAT_CELLS;
         bi = trienode_next_bitindex(t, bi))
-      (*leaf_deref)(trienode_leaf(t, fatnode_bit2cellindex(bi)));
+      (*leaf_deref)(trienode_leaf(t, fatnode_bit2cellindex(t, bi)));
    // Once that's done, we free the node.
    free(t);
 }
@@ -564,7 +733,6 @@ static inline void trietwig_decref_noprop(Trie_t t) {
 static inline void amtnode_free(Trie_t t, void (*leaf_deref)(void*)) {
    uint64_t r;
    Trie_t u, node;
-   void* leaf;
    Trie_t nodes[AMT_LAYERS];
    uint8_t cis[AMT_LAYERS];
    uint8_t noccs[AMT_LAYERS];
@@ -576,14 +744,14 @@ static inline void amtnode_free(Trie_t t, void (*leaf_deref)(void*)) {
    // first two words in its memory (the refcount and the prefix) and use
    // them as indicators of where we are in our dereferencing (and
    // deallocation) search.
-   if (trienode_is_twig(t)) {
+   if (amtnode_is_twig(t)) {
       if (leaf_deref)
          amttwig_free(t, leaf_deref);
       else
          free(t);
       return;
    }
-   node = a;
+   node = t;
    ci = 0;
    nocc = trienode_occupancy(t);
    top = 0;
@@ -592,12 +760,12 @@ static inline void amtnode_free(Trie_t t, void (*leaf_deref)(void*)) {
    while (1) {
       if (ci < nocc) {
          // We need to process subtree ci of node.
-         u = amtnode_subt(node, ci);
+         u = trienode_subt(node, ci);
          r = atomic_fetch_sub_explicit(
             &u->header.refcount, 1, memory_order_acq_rel);
          if (r <= 1) {
             if (amtnode_is_twig(u)) {
-               if (leaf_decref)
+               if (leaf_deref)
                   amttwig_free(u, leaf_deref);
                else
                   free(u);
@@ -636,7 +804,6 @@ static inline void amtnode_decref(Trie_t t, void (*leaf_deref)(void*)) {
 static inline void fatnode_free(Trie_t t, void (*leaf_deref)(void*)) {
    uint64_t r;
    Trie_t u, node;
-   void* leaf;
    Trie_t nodes[AMT_LAYERS];
    uint8_t bis[AMT_LAYERS];
    uint8_t bi, top;
@@ -648,28 +815,28 @@ static inline void fatnode_free(Trie_t t, void (*leaf_deref)(void*)) {
    // them as indicators of where we are in our dereferencing (and
    // deallocation) search.
    // Twigs get handled differently:
-   if (trienode_is_twig(t)) {
+   if (fatnode_is_twig(t)) {
       if (leaf_deref)
          fattwig_free(t, leaf_deref);
       else
          free(t);
       return;
    }
-   node = a;
-   bi = trienode_first_bitindex(a);
+   node = t;
+   bi = trienode_first_bitindex(t);
    top = 0;
    // To start with, we write slightly different code depending on whether we
    // have a leaf dereference function or not.
    while (1) {
       if (bi < FAT_CELLS) {
          // We need to process subtree ci of node.
-         u = fatnode_subt(node, bi);
+         u = trienode_subt(node, bi);
          r = atomic_fetch_sub_explicit(
             &u->header.refcount, 1, memory_order_acq_rel);
          if (r <= 1) {
             // We need to deallocate this node too!
             if (fatnode_is_twig(u)) {
-               if (leaf_decref)
+               if (leaf_deref)
                   fattwig_free(u, leaf_deref);
                else
                   free(u);
@@ -678,7 +845,7 @@ static inline void fatnode_free(Trie_t t, void (*leaf_deref)(void*)) {
                bis[top] = trienode_next_bitindex(node, bi);
                ++top;
                node = u;
-               bi = trienode_first_bitinidex(node);
+               bi = trienode_first_bitindex(node);
                continue;
             }
          }
@@ -701,28 +868,27 @@ static inline void fatnode_decref(Trie_t t, void (*leaf_deref)(void*)) {
    if (r <= 1)
       fatnode_free(t, leaf_deref);
 }
-static inline void trienode_free(Trie_t t, void (*leaf_deref)(void*)) {
-   if (trienode_is_fat(t))
-      fatnode_free(t, leaf_deref);
-   else
-      amtnode_free(t, leaf_deref);
-}
-static inline void trienode_decref(Trie_t t, void (*leaf_deref)(void*)) {
-   uint64_t r;
-   r = atomic_fetch_sub_explicit(&t->header.refcount, 1, memory_order_acq_rel);
-   if (r <= 1)
-      trienode_free(t, leaf_deref);
-}
+// There is deliberately no generic trienode_free()/trienode_decref() here
+// (an earlier design had them, dispatching on the is_fat flag): every call
+// site in amt.h decrefs a node it already knows is an AMT node, and every
+// call site in fat.h decrefs a node it already knows is a FAT node, so they
+// call amtnode_decref()/fatnode_decref() directly instead. See "The
+// trieint_t is_transient flag" comment above for the full rationale.
 
 // Lookup ---------------------------------------------------------------------
 
 static inline int amt_lookup(Trie_t node,
                              trieint_t key,
                              void** result) {
+   // The dummy's bits are always zero (a twig with no occupied cells), so no
+   // lookup can ever actually read its cells; the leafsize is irrelevant and
+   // is set to sizeof(void*) since that's a valid compile-time constant.
    static struct TrieDummyData amtnode_dummytwig_data = {
       .trie = {
-         .depth = AMT_MAX_DEPTH,
-         .leafsize = node->leafsize
+         .header = {
+            .depth = AMT_MAX_DEPTH,
+            .leafsize = sizeof(void*)
+         }
       }
    };
    static Trie_t amtnode_dummytwig = (Trie_t)&amtnode_dummytwig_data;
@@ -742,12 +908,24 @@ static inline int amt_lookup(Trie_t node,
       //ok = ((keyshift & ~AMT_DIVMASK) == (node->header.prefix >> shift));
       // Next, check if the appropriate bit is set.
       bitindex = keyshift & AMT_DIVMASK;
-      bit = node->header.bits & (AMTBITS_1 << bitindex);
+      bit = node->header.bits & (TRIEBITS_1 << bitindex);
       // Things are only okay if bit is truthy.
       ok = (bit > 0);
-      // Now get the pointer to the cell itself.
+      // Now get the pointer to the cell itself. Note that amtnode_bit2cellindex()
+      // returns popcount(bits below bitindex): if the queried bit ISN'T set
+      // (ok is false) and every occupied bit happens to sort below it, this is
+      // exactly equal to the node's occupancy -- i.e. one past the last valid
+      // cell. A persistent node built via amt_and()/amt_but() is packed with
+      // exactly as many cells as it has occupied bits (no slack), so reading
+      // that one-past-the-end index is a real out-of-bounds heap read, not
+      // just harmless speculation -- confirmed via AddressSanitizer. Since the
+      // read cell is discarded below whenever !ok anyway, branchlessly mask
+      // cellindex down to 0 (always a valid index for a real, non-dummy node,
+      // which per the AMT invariants is never left with 0 occupancy) whenever
+      // ok is false, keeping the read in-bounds without adding a branch.
       cellindex = amtnode_bit2cellindex(node, bitindex);
-      cell = amtnode_subt(node, cellindex);
+      cellindex &= (triebits_t)(-(triebits_t)ok);
+      cell = trienode_subt(node, cellindex);
       // Now, IF everything is okay, we set node to *cell; otherwise, we set
       // it to the dummy amt, which is always a twig and never contains any
       // cells.
@@ -758,11 +936,11 @@ static inline int amt_lookup(Trie_t node,
    ok = amtnode_prefix_match(node, key);
    // Next, check if the appropriate bit is set.
    bitindex = (key & AMT_TWIG_MASK);
-   bit = node->header.bits & (AMTBITS_1 << bitindex);
+   bit = node->header.bits & (TRIEBITS_1 << bitindex);
    // Things are only okay if bit is truthy.
    ok &= (bit > 0);
    // get the cell itself.
-   cell = amtnode_leaf(node, amtnode_bit2cellindex(node, bitindex));
+   cell = trienode_leaf(node, amtnode_bit2cellindex(node, bitindex));
    // Now, IF everything is okay, we set *result to *cell and return 1;
    // otherwise we don't set it and we return 0.
    if (result && ok)
@@ -771,99 +949,75 @@ static inline int amt_lookup(Trie_t node,
 }
 
 static inline int fat_lookup(Trie_t node, trieint_t key, void** result) {
+   // As with the AMT dummy, the bits are always zero, so the leafsize is
+   // irrelevant and is set to sizeof(void*) since that's a valid
+   // compile-time constant. (There's no is_fat flag to set here -- see "The
+   // trieint_t is_transient flag" comment above -- this dummy is only ever
+   // touched by fat_lookup()'s own FAT-specific logic below, never by any
+   // code that would need to ask what kind it is.)
    static struct TrieDummyData fatnode_dummytwig_data = {
       .trie = {
-         .depth = FAT_MAX_DEPTH,
-         .leafsize = sizeof(void*)
+         .header = {
+            .depth = FAT_MAX_DEPTH,
+            .leafsize = sizeof(void*)
+         }
       }
    };
-   triebits_t depth;
-   trieint_t shift, cellindex, addrmask;
-   uintptr_t ok, tmp;
+   static Trie_t fatnode_dummytwig = (Trie_t)&fatnode_dummytwig_data;
+   triebits_t depth, cellindex, bit;
+   bool ok;
    void* cell;
-   void* dummy = (void*)&fatnode_dummytwig_data;
-   result = (result? &dummy : result);
-   // In an FAT, we branch once to the appropriate depth then fall down to
-   // the max depth.
-#  define FATNODE_LOOKUP_STEP(depth)                                          \
-      do {                                                                    \
-         cellidx = fatdepth_bitindex((depth), k);                             \
-         ok = (node->header.bits & (TRIEBITS_1 << cellidx)? UINTPTR_MAX : 0); \
-         cell = (node->depth == depth                                         \
-            ? ((void**)node->cells)[cellidx]                                  \
-            : node);                                                          \
-          node = (Trie_t)(                                                    \
-             + ((+ok) & ((uintptr_t)cell))                                    \
-             | ((~ok) & ((uintptr_t)dummy)));                                 \
-       } while (0)
-   // Note that in the above, we don't check the address; this is because we
-   // only need to check that the twig address matches; if we end up in a weird
-   // twig node because we didn't check the addresses on the way down, that's
-   // fine because that twig node's address won't match, and we check the
-   // address in the twig step code below.
-#  define FATTWIG_LOOKUP_STEP()                                               \
-      do {                                                                    \
-         cellidx = fatdepth_bitindex(FAT_MAX_DEPTH, key);                     \
-         ok = (node->header.bits & (TRIEBITS_1 << cellidx)? UINTPTR_MAX : 0); \
-         cell = (void*)(node->cells + node->leafsize*cellidx);                \
-         cell = (void*)(ok & ((uintptr_t)cell));                              \
-      } while (0)
-   // Notice that we don't check prefixes above, because we can just check the
-   // prefix once now; then if matches are found below prefixes must match.
-   ok = fatdepth_prefix_match(node->depth, node->header.prefix, key);
-   node = (ok? node : (Trie_t)dummy);
-   depth = node->depth;
-   // In this switch statement, we deliberately do not use breaks because we   
-   // want to jump to the initial depth then trickle down the lower depths.
-   switch (depth) {
-   case 0: FATNODE_LOOKUP_STEP(0);
-#  if (TRIEINT_MAX_DEPTH == 1)
-      case 1: FATTWIG_LOOKUP_STEP(1);
-#  else
-      case 1: FATNODE_LOOKUP_STEP(1);
-      case 2: FATNODE_LOOKUP_STEP(2);
-#     if (TRIEINT_MAX_DEPTH == 3)
-         case 3: FATTWIG_LOOKUP_STEP(3);
-#     else
-         case 3: FATNODE_LOOKUP_STEP(3);
-         case 4: FATNODE_LOOKUP_STEP(4);
-         case 5: FATNODE_LOOKUP_STEP(5);
-#        if (TRIEINT_MAX_DEPTH == 6)
-            case 6: FATTWIG_LOOKUP_STEP(6);
-#        else
-         case 6:  FATNODE_LOOKUP_STEP(6);
-         case 7:  FATNODE_LOOKUP_STEP(7);
-         case 8:  FATNODE_LOOKUP_STEP(8);
-         case 9:  FATNODE_LOOKUP_STEP(9);
-         case 10: FATNODE_LOOKUP_STEP(10);
-         case 11: FATNODE_LOOKUP_STEP(11);
-         case 12: FATNODE_LOOKUP_STEP(12);
-#        if (TRIEINT_MAX_DEPTH == 13)
-            case 13: FATTWIG_LOOKUP_STEP(13);
-#        else
-            case 13: FATNODE_LOOKUP_STEP(13);
-            case 14: FATNODE_LOOKUP_STEP(14);
-            case 15: FATNODE_LOOKUP_STEP(15);
-            case 16: FATNODE_LOOKUP_STEP(16);
-            case 17: FATNODE_LOOKUP_STEP(17);
-            case 18: FATNODE_LOOKUP_STEP(18);
-            case 19: FATNODE_LOOKUP_STEP(19);
-            case 20: FATNODE_LOOKUP_STEP(20);
-            case 21: FATNODE_LOOKUP_STEP(21);
-            case 22: FATNODE_LOOKUP_STEP(22);
-            case 23: FATNODE_LOOKUP_STEP(23);
-            case 24: FATNODE_LOOKUP_STEP(24);
-            case 25: FATNODE_LOOKUP_STEP(25);
-            case 26: FATTWIG_LOOKUP_STEP(26);
-#        endif
-#     endif
-#  endif
+   void* discard;
+   result = (result? result : &discard);
+   // This function used to be a switch()-with-intentional-fallthrough that
+   // stepped through a fixed sequence of case labels, one per depth,
+   // assuming every real transition advances depth by exactly 1. That
+   // assumption happens to hold for FAT now (see fat.h's file header
+   // comment: FAT indexes densely sequential keys and maintains a
+   // dense-tree invariant, so a branch node's child is always at exactly
+   // parent-depth+1, never deeper -- unlike AMT, which deliberately skips
+   // ahead whenever two subtrees agree on several digits, to keep its own
+   // tree minimal), but the switch construct was still wrong even before
+   // that invariant was settled on, and is left as a real loop rather than
+   // reverted, both because it's exactly what amt_lookup() already does and
+   // because it costs nothing to also be correct if FAT's per-depth
+   // materialization were ever relaxed again in the future. The bug: once
+   // the switch landed on the real child (however deep), it kept falling
+   // through the remaining case labels regardless, each one re-testing the
+   // *already-arrived* node's occupancy bits against an essentially
+   // arbitrary cellindex derived from an irrelevant, already-passed depth
+   // -- silently overwriting the correct `ok` with a bogus one (confirmed
+   // via a minimal 2-key repro: a node landed correctly, with the right bit
+   // set and the right prefix match, yet fat_lookup() still reported
+   // not-found, because a later spurious case label's bit test happened to
+   // come up false and swapped `node` for the dummy on the way to the final
+   // twig step). A real loop that re-reads each node's *actual* depth every
+   // iteration handles this correctly regardless of how deep any given
+   // transition turns out to be.
+   // Unlike amt_lookup(), there's no need for a branchless "mask the
+   // speculative cellindex to stay in-bounds" trick here (see amt_lookup()'s
+   // Bug 8 comment): every FAT node, at every depth, always has all
+   // FAT_CELLS cells physically allocated regardless of occupancy, so
+   // reading cell `cellindex` for any cellindex in [0, FAT_CELLS) is always
+   // an in-bounds read, whether or not that cell happens to be occupied.
+   depth = node->header.depth;
+   while (depth < FAT_MAX_DEPTH) {
+      ok = fatnode_prefix_match(node, key);
+      cellindex = (triebits_t)fatdepth_bitindex(depth, key);
+      bit = node->header.bits & (TRIEBITS_1 << cellindex);
+      ok = ok && (bit > 0);
+      cell = trienode_subt(node, cellindex);
+      node = (ok? (Trie_t)cell : fatnode_dummytwig);
+      depth = node->header.depth;
    }
-#  undef FATTWIG_LOOKUP_STEP
-#  undef FATNODE_LOOKUP_STEP
-   // At this point, we've stepped through each depth; if ok is nonzero then
-   // node is the ready to be returned. Otherwise, we return a failure code.
-   *result = cell;
+   // This is a twig, so we return from this node.
+   ok = fatnode_prefix_match(node, key);
+   cellindex = (triebits_t)fatdepth_bitindex(FAT_MAX_DEPTH, key);
+   bit = node->header.bits & (TRIEBITS_1 << cellindex);
+   ok = ok && (bit > 0);
+   cell = trienode_leaf(node, cellindex);
+   if (result && ok)
+      *result = cell;
    return (ok > 0);
 }
 
@@ -882,35 +1036,58 @@ struct TriePathData {
    uint8_t steps;
    // Set to 1 if the searched for node is beneath the current node.
    // (1 byte; 2 bytes total)
-   bool is_beneath;  
+   bool is_beneath;
+   // A cached pointer to the leaf value at the final step, filled in whenever
+   // a find/iteration function successfully lands on a twig cell, so callers
+   // don't need to re-derive it with triepath_val(). Only valid when the path
+   // encodes a found element (mirrors triepath_val()'s own precondition).
+   // (8 bytes; 10 bytes total)
+   void* value;
    // The cellindex or bitindex of the current match in the associated node.
-   // (14 bytes; 16 bytes total)
+   // (14 bytes; 24 bytes total)
    uint8_t index[TRIE_MAX_LAYERS];
    // The stack of nodes followed along the path; node[0] is always the start
    // node, and node[steps-1] is always the final step.
-   // (8 * 14 = 112 bytes; 128 bytes total)
+   // (8 * 14 = 112 bytes; 136 bytes total)
    Trie_t node[TRIE_MAX_LAYERS];
    // A nice feature of this data structure is that most of the time, there
    // only be a few depths searched, so the final 5 or 6 node[] elements will
    // never be touched. The first 64 bytes of this struct contains everything
-   // up to the first 6 node depths, so for most iterations, the entire
+   // up to the first 5 node depths, so for most iterations, the entire
    // iteration memory needed can fit in 1 64-byte cache line.
 };
 EXTC typedef struct TriePathData TriePath, *TriePath_t;
 // Get the key found by a TriePath.
 // This only returns a valid value if the TriePath encodes a found element.
+// Requires that path->index[last] hold the twig's real per-depth digit (the
+// raw bit position within that twig's own window, i.e. what
+// trienode_first_bitindex()/trienode_next_bitindex() report) rather than a
+// compacted cellindex: trienode_prefix() only encodes the bits *above* the
+// twig's own depth, so the twig's own digit has to be added back in raw, not
+// as whatever physical slot happens to hold it. This holds uniformly for
+// every path-building function below: triepath_amtfind()/triepath_fatfind()
+// always stored the raw digit here, and amt_firstpath()/amt_nextpath() (see
+// their comments) were fixed to do the same instead of storing a cellindex.
 static inline trieint_t triepath_key(const TriePath_t p) {
    uint8_t ii = p->steps - 1;
    return trienode_prefix(p->node[ii]) + p->index[ii];
 }
+// Get the value found by a TriePath. Simply returns the cached `value`
+// field rather than re-deriving it from node[last]/index[last]: `value` is
+// always kept correct by every path-building function below the moment it
+// lands on a twig cell (see the field's own doc comment), and re-deriving it
+// here via trienode_leaf(node[last], index[last]) would need index[last] to
+// be a cellindex -- which, per triepath_key()'s comment above, it deliberately
+// is not (it's the raw digit instead, needed for correct key reconstruction).
+// A single `return p->value` works uniformly for both AMT and FAT paths
+// without needing to know which kind built this path.
 static inline void* triepath_val(const TriePath_t p) {
-   uint8_t ii = p->steps - 1;
-   return trienode_leaf(p->node[ii], p->index[ii]);
+   return p->value;
 }
 // Fill in a path to a node (or fail to find it).
 static inline int triepath_amtfind(TriePath_t path, Trie_t a, trieint_t key) {
    triebits_t cellindex;
-   triebits_t bitindex = (key >> a->shift) & amtdepth_mask(a->depth);
+   triebits_t bitindex = amtdepth_bitindex(a->header.depth, key);
    bool ok = amtnode_prefix_match(a, key);
    path->node[0] = a;
    path->index[0] = bitindex;
@@ -920,10 +1097,10 @@ static inline int triepath_amtfind(TriePath_t path, Trie_t a, trieint_t key) {
       return 0;
    }
    cellindex = amtnode_bit2cellindex(a, bitindex);
-   while (a->depth < AMT_MAX_DEPTH) {
+   while (a->header.depth < AMT_MAX_DEPTH) {
       // descend a node...
-      a = amtnode_subt(a, cellindex);
-      bitindex = (key >> a->shift) & AMT_NODE_MASK;
+      a = trienode_subt(a, cellindex);
+      bitindex = amtdepth_bitindex(a->header.depth, key);
       path->node[path->steps] = a;
       path->index[path->steps] = bitindex;
       path->steps++;
@@ -939,34 +1116,79 @@ static inline int triepath_amtfind(TriePath_t path, Trie_t a, trieint_t key) {
    }
    // We've reached a twig node with the appropriate bit set.
    path->is_beneath = 1;
+   path->value = trienode_leaf(a, cellindex);
    return 1;
 }
+// amt_firstpath()/amt_nextpath() walk cells in *bit* order (via
+// trienode_first_bitindex()/trienode_next_bitindex(), the same primitives
+// fat_firstpath()/fat_nextpath() use below), converting a bitindex to the
+// physical cellindex trienode_subt()/trienode_leaf() need via
+// amtnode_bit2cellindex() only at the point of actually reading a cell.
+// This is deliberately NOT the cheaper-looking alternative of walking the
+// compacted cellindex range [0, occupancy) directly with a plain ++index:
+// that would visit cells in the right order (the compacted array is stored
+// in ascending-bitindex order) but path->index[] would then hold a
+// cellindex rather than the real per-depth digit, and triepath_key() (see
+// its own comment) needs the real digit to reconstruct the key -- a
+// cellindex is only numerically equal to the true digit when every lower
+// bit happens to also be occupied, which is not the general case. Storing
+// the real digit here costs one extra amtnode_bit2cellindex() call (a
+// popcount) per cell visited versus the plain-increment version; on any
+// modern CPU that's on the order of one cycle, negligible next to the
+// pointer chase/cache-line fetch each step already does, and it's exactly
+// what fat_firstpath()/fat_nextpath() already pay (fatnode_bit2cellindex()
+// is just the identity function there, but the shape of the code, and the
+// cost model, match).
 static inline int amt_firstpath(Trie_t a, TriePath_t path) {
    Trie_t node = a;
-   triebits_t ci = 0;
-   triebits_t nocc = trienode_occupancy(t);
    triebits_t top = 0;
+   triebits_t bi;
+   // `a` itself may already be a twig: per AMT's minimal-tree invariant, a
+   // tree holding 0 or exactly 1 item is represented as a single twig node
+   // with no branch nodes above it at all (see amt_anditem()'s "if a is
+   // empty" case and amt_1leaf()). The do/while loop below assumes its
+   // *current* node is a branch (so that trienode_subt() reads a real
+   // child pointer out of it) and only checks amtnode_is_twig() on the
+   // node it just descended *into* -- so a twig `a` must be handled here,
+   // up front, rather than being fed into that loop: descending "into" a
+   // twig's cell would reinterpret a leaf's raw value bytes (or, for the
+   // canonical empty node, memory past the end of its zero-cell allocation)
+   // as a child pointer.
+   if (amtnode_is_twig(a)) {
+      bi = trienode_first_bitindex(a);
+      if (bi >= TRIEBITS_WIDTH)
+         return 0;  // the canonical empty tree: no first element.
+      path->index[0] = bi;
+      path->node[0] = a;
+      path->steps = 1;
+      path->value = trienode_leaf(a, amtnode_bit2cellindex(a, bi));
+      return 1;
+   }
    do {
-      // We descend into the first subtree.
-      path->index[top] = 0;
+      // We descend into the first occupied cell.
+      bi = trienode_first_bitindex(node);
+      path->index[top] = bi;
       path->node[top] = node;
-      node = amtnode_subt(node, 0);
+      node = trienode_subt(node, amtnode_bit2cellindex(node, bi));
       ++top;
    } while (!amtnode_is_twig(node));
    // We've reached a twig node.
-   path->index[top] = 0;
+   bi = trienode_first_bitindex(node);
+   path->index[top] = bi;
    path->node[top] = node;
    path->steps = top + 1;
+   path->value = trienode_leaf(node, amtnode_bit2cellindex(node, bi));
    return 1;
 }
 static inline int amt_nextpath(TriePath_t path) {
    triebits_t top = path->steps - 1;
    Trie_t node = path->node[top];
-   triebits_t nocc = trienode_occupancy(node);
-   triebits_t ci;
+   triebits_t bi = trienode_next_bitindex(node, path->index[top]);
    // The path always leaves off at a twig.
-   if (++path->index[top] < nocc) {
+   if (bi < TRIEBITS_WIDTH) {
       // We can just return this next leaf!
+      path->index[top] = bi;
+      path->value = trienode_leaf(node, amtnode_bit2cellindex(node, bi));
       return 1;
    } else if (top == 0) {
       // Otherwise, if we're at the top, we're already done.
@@ -976,9 +1198,10 @@ static inline int amt_nextpath(TriePath_t path) {
    --top;
    while (1) {
       node = path->node[top];
-      nocc = trienode_occupancy(node);
-      if (++path->index[top] < nocc) {
+      bi = trienode_next_bitindex(node, path->index[top]);
+      if (bi < TRIEBITS_WIDTH) {
          // This is where we descend.
+         path->index[top] = bi;
          break;
       } else if (top == 0) {
          return 0;
@@ -989,19 +1212,22 @@ static inline int amt_nextpath(TriePath_t path) {
       }
    }
    // At this point we've found a node with something to descend into.
-   node = amtnode_subt(node, path->index[top]);
+   node = trienode_subt(node, amtnode_bit2cellindex(node, path->index[top]));
    while (!amtnode_is_twig(node)) {
-      // We descend into the first subtree.
+      // We descend into the first occupied cell.
       ++top;
-      path->index[top] = 0;
+      bi = trienode_first_bitindex(node);
+      path->index[top] = bi;
       path->node[top] = node;
-      node = amtnode_subt(node, 0);
+      node = trienode_subt(node, amtnode_bit2cellindex(node, bi));
    }
    // We've reached a twig node.
    ++top;
-   path->index[top] = 0;
+   bi = trienode_first_bitindex(node);
+   path->index[top] = bi;
    path->node[top] = node;
    path->steps = top + 1;
+   path->value = trienode_leaf(node, amtnode_bit2cellindex(node, bi));
    return 1;
 }
 // To iterate over AMT nodes, the correct method is as so:
@@ -1009,9 +1235,15 @@ static inline int amt_nextpath(TriePath_t path) {
 //    for (int ok = amt_firstpath(amt, &iter); ok; ok = amt_nextpath(&iter)) {
 //        process_key_value(triepath_key(&iter), triepath_val(&iter));
 //    }
+// Fill in a path to a node in a FAT (or fail to find it). Mirrors
+// triepath_amtfind() above; the one structural simplification is that a
+// FAT's cellindex is always identical to its bitindex (fatnode_bit2cellindex
+// is the identity function -- FAT nodes are never compacted the way AMT
+// nodes are), so there's no separate cellindex variable to track through
+// the descent the way triepath_amtfind() needs one.
 static inline int triepath_fatfind(TriePath_t path, Trie_t a, trieint_t key) {
-   bool ok = amtnode_prefix_match(a, key);
-   triebits_t bitindex = fatdepth_bitindex(a->depth, key);
+   bool ok = fatnode_prefix_match(a, key);
+   triebits_t bitindex = (triebits_t)fatdepth_bitindex(a->header.depth, key);
    path->node[0] = a;
    path->index[0] = bitindex;
    path->steps = 1;
@@ -1019,134 +1251,75 @@ static inline int triepath_fatfind(TriePath_t path, Trie_t a, trieint_t key) {
       path->is_beneath = ok;
       return 0;
    }
-   // In an FAT, we branch once to the appropriate depth then fall down to
-   // the max depth.
-#  define FATFIND_STEP(depth)                                                 \
-      do {                                                                    \
-         cellidx = fatdepth_bitindex((depth), key);                           \
-         ok = (node->header.bits & (TRIEBITS_1 << cellidx)? UINTPTR_MAX : 0); \
-         cell = (node->depth == (depth)                                       \
-            ? ((void**)node->cells)[cellidx]                                  \
-            : node);                                                          \
-          node = (Trie_t)(                                                    \
-             + ((+ok) & ((uintptr_t)cell))                                    \
-             | ((~ok) & ((uintptr_t)dummy)));                                 \
-       } while (0)
-   // Note that in the above, we don't check the address; this is because we
-   // only need to check that the twig address matches; if we end up in a weird
-   // twig node because we didn't check the addresses on the way down, that's
-   // fine because that twig node's address won't match, and we check the
-   // address in the twig step code below.
-#  define FATTWIG_LOOKUP_STEP()                                               \
-      do {                                                                    \
-         cellidx = fatdepth_bitindex(FAT_MAX_DEPTH, key);                     \
-         ok = (node->header.bits & (TRIEBITS_1 << cellidx)? UINTPTR_MAX : 0); \
-         cell = (void*)(node->cells + node->leafsize*cellidx);                \
-         cell = (void*)(ok & ((uintptr_t)cell));                              \
-      } while (0)
-   // Notice that we don't check prefixes above, because we can just check the
-   // prefix once now; then if matches are found below prefixes must match.
-   ok = fatdepth_prefix_match(node->depth, node->header.prefix, key);
-   node = (ok? node : (Trie_t)dummy);
-   depth = node->depth;
-   // In this switch statement, we deliberately do not use breaks because we   
-   // want to jump to the initial depth then trickle down the lower depths.
-   switch (depth) {
-   case 0: FATNODE_LOOKUP_STEP(0);
-#  if (TRIEINT_MAX_DEPTH == 1)
-      case 1: FATTWIG_LOOKUP_STEP(1);
-#  else
-      case 1: FATNODE_LOOKUP_STEP(1);
-      case 2: FATNODE_LOOKUP_STEP(2);
-#     if (TRIEINT_MAX_DEPTH == 3)
-         case 3: FATTWIG_LOOKUP_STEP(3);
-#     else
-         case 3: FATNODE_LOOKUP_STEP(3);
-         case 4: FATNODE_LOOKUP_STEP(4);
-         case 5: FATNODE_LOOKUP_STEP(5);
-#        if (TRIEINT_MAX_DEPTH == 6)
-            case 6: FATTWIG_LOOKUP_STEP(6);
-#        else
-         case 6:  FATNODE_LOOKUP_STEP(6);
-         case 7:  FATNODE_LOOKUP_STEP(7);
-         case 8:  FATNODE_LOOKUP_STEP(8);
-         case 9:  FATNODE_LOOKUP_STEP(9);
-         case 10: FATNODE_LOOKUP_STEP(10);
-         case 11: FATNODE_LOOKUP_STEP(11);
-         case 12: FATNODE_LOOKUP_STEP(12);
-#        if (TRIEINT_MAX_DEPTH == 13)
-            case 13: FATTWIG_LOOKUP_STEP(13);
-#        else
-            case 13: FATNODE_LOOKUP_STEP(13);
-            case 14: FATNODE_LOOKUP_STEP(14);
-            case 15: FATNODE_LOOKUP_STEP(15);
-            case 16: FATNODE_LOOKUP_STEP(16);
-            case 17: FATNODE_LOOKUP_STEP(17);
-            case 18: FATNODE_LOOKUP_STEP(18);
-            case 19: FATNODE_LOOKUP_STEP(19);
-            case 20: FATNODE_LOOKUP_STEP(20);
-            case 21: FATNODE_LOOKUP_STEP(21);
-            case 22: FATNODE_LOOKUP_STEP(22);
-            case 23: FATNODE_LOOKUP_STEP(23);
-            case 24: FATNODE_LOOKUP_STEP(24);
-            case 25: FATNODE_LOOKUP_STEP(25);
-            case 26: FATTWIG_LOOKUP_STEP(26);
-#        endif
-#     endif
-#  endif
-   }
-#  undef FATTWIG_LOOKUP_STEP
-#  undef FATNODE_LOOKUP_STEP
-         
-   switch (a->depth) {
-   }
-   while (a->depth < FAT_MAX_DEPTH) {
+   while (a->header.depth < FAT_MAX_DEPTH) {
       // descend a node...
-      a = amtnode_subt(a, cellindex);
-      bitindex = (key >> a->shift) & AMT_NODE_MASK;
+      a = trienode_subt(a, bitindex);
+      bitindex = (triebits_t)fatdepth_bitindex(a->header.depth, key);
       path->node[path->steps] = a;
       path->index[path->steps] = bitindex;
       path->steps++;
-      cellindex = amtnode_bit2cellindex(a, bitindex);
-      ok = amtnode_prefix_match(a, key);
+      ok = fatnode_prefix_match(a, key);
       if (!(ok & ((a->header.bits >> bitindex) & TRIEBITS_1))) {
-         // If we didn't match prefixes, it's a 0-step match; if we didn't match
-         // on the on the bit, it's still a step-1 match.
+         // If we didn't match prefixes, it's a 0-step match; if we didn't
+         // match on the bit, it's still a step-1 match.
          path->is_beneath = ok;
          return 0;
-      } 
+      }
       // Otherwise, we're continuing to descend.
    }
    // We've reached a twig node with the appropriate bit set.
    path->is_beneath = 1;
+   path->value = trienode_leaf(a, bitindex);
    return 1;
 }
-static inline int amt_firstpath(Trie_t a, TriePath_t path) {
+static inline int fat_firstpath(Trie_t a, TriePath_t path) {
    Trie_t node = a;
-   triebits_t ci = 0;
-   triebits_t nocc = trienode_occupancy(t);
    triebits_t top = 0;
+   triebits_t bi;
+   // `a` itself may already be a twig: a lone key/value pair needs nothing
+   // explicitly represented above it (see fat_anditem()'s "if a is empty"
+   // case and fat_1leaf()), and the canonical fat_empty() node is a twig
+   // too. The do/while loop below assumes its *current* node is a branch
+   // (so that trienode_subt(node, bi) reads a real child pointer out of
+   // it) and only checks fatnode_is_twig() on the node it just descended
+   // *into* -- so a twig `a` must be handled here, up front, rather than
+   // being fed into that loop: descending "into" a twig's occupied cell
+   // would reinterpret a leaf's raw value bytes as a child pointer.
+   if (fatnode_is_twig(a)) {
+      bi = trienode_first_bitindex(a);
+      if (bi >= FAT_CELLS)
+         return 0;  // the canonical empty tree: no first element.
+      path->index[0] = bi;
+      path->node[0] = a;
+      path->steps = 1;
+      path->value = trienode_leaf(a, bi);
+      return 1;
+   }
    do {
-      // We descend into the first subtree.
-      path->index[top] = 0;
+      // We descend into the first occupied cell.
+      bi = trienode_first_bitindex(node);
+      path->index[top] = bi;
       path->node[top] = node;
-      node = amtnode_subt(node, 0);
+      node = trienode_subt(node, bi);
       ++top;
-   } while (!amtnode_is_twig(node));
+   } while (!fatnode_is_twig(node));
    // We've reached a twig node.
-   path->index[top] = 0;
+   bi = trienode_first_bitindex(node);
+   path->index[top] = bi;
    path->node[top] = node;
    path->steps = top + 1;
+   path->value = trienode_leaf(node, bi);
    return 1;
 }
-static inline int amt_nextpath(TriePath_t path) {
+static inline int fat_nextpath(TriePath_t path) {
    triebits_t top = path->steps - 1;
    Trie_t node = path->node[top];
-   triebits_t nocc = trienode_occupancy(node);
-   triebits_t ci;
+   triebits_t bi = trienode_next_bitindex(node, path->index[top]);
    // The path always leaves off at a twig.
-   if (++path->index[top] < nocc) {
+   if (bi < FAT_CELLS) {
       // We can just return this next leaf!
+      path->index[top] = bi;
+      path->value = trienode_leaf(node, bi);
       return 1;
    } else if (top == 0) {
       // Otherwise, if we're at the top, we're already done.
@@ -1156,9 +1329,10 @@ static inline int amt_nextpath(TriePath_t path) {
    --top;
    while (1) {
       node = path->node[top];
-      nocc = trienode_occupancy(node);
-      if (++path->index[top] < nocc) {
+      bi = trienode_next_bitindex(node, path->index[top]);
+      if (bi < FAT_CELLS) {
          // This is where we descend.
+         path->index[top] = bi;
          break;
       } else if (top == 0) {
          return 0;
@@ -1169,18 +1343,30 @@ static inline int amt_nextpath(TriePath_t path) {
       }
    }
    // At this point we've found a node with something to descend into.
-   node = amtnode_subt(node, path->index[top]);
-   while (!amtnode_is_twig(node)) {
-      // We descend into the first subtree.
+   node = trienode_subt(node, path->index[top]);
+   while (!fatnode_is_twig(node)) {
+      // We descend into the first occupied cell.
       ++top;
-      path->index[top] = 0;
+      bi = trienode_first_bitindex(node);
+      path->index[top] = bi;
       path->node[top] = node;
-      node = amtnode_subt(node, 0);
+      node = trienode_subt(node, bi);
    }
    // We've reached a twig node.
    ++top;
-   path->index[top] = 0;
+   bi = trienode_first_bitindex(node);
+   path->index[top] = bi;
    path->node[top] = node;
    path->steps = top + 1;
+   path->value = trienode_leaf(node, bi);
    return 1;
 }
+// To iterate over FAT nodes, the correct method is as so:
+//    struct TriePath iter;
+//    for (int ok = fat_firstpath(fat, &iter); ok; ok = fat_nextpath(&iter)) {
+//        process_key_value(triepath_key(&iter), triepath_val(&iter));
+//    }
+
+#undef EXTC
+
+#endif  // ifndef _PCOLLECTIONS__C_TRIE_H

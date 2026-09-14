@@ -11,9 +11,18 @@
 //  - popcount8, popcount16, popcount32, popcount64, popcount128 (count ones);
 //  - clz8, clz16, clz32, clz64, clz128 (count leading zeros);
 //  - ctz8, ctz16, ctz32, ctz64, ctz128 (count trailing zeros);
+//  - pow8, pow16, pow32, pow64, pow128 (integer exponentiation);
+//  - ltmask8/lemask8/gtmask8/gemask8 and the 16/32/64/128-bit equivalents
+//    (bit masks for "less/greater than (or equal to) bit k");
+//  - nextbinpow8, nextbinpow16, nextbinpow32, nextbinpow64, nextbinpow128
+//    (lowest power of 2 strictly greater than the argument);
 //  - popcount_uintptr, popcount_size;
 //  - clz_uintptr, clz_size;
-//  - ctz_uintptr, ctz_size.
+//  - ctz_uintptr, ctz_size;
+//  - pow_uintptr, pow_size;
+//  - ltmask_uintptr/lemask_uintptr/gtmask_uintptr/gemask_uintptr and the
+//    _size equivalents;
+//  - nextbinpow_uintptr, nextbinpow_size.
 // The 64-bit and 128-bit versions are only defined if uint64_t and uint128_t
 // types are available on the system.
 // The uint128_t type is defined if it is available as a type on the system but
@@ -33,7 +42,7 @@
 // Dependencies ===============================================================
 
 // We need stdint for uint64_t and similar types.
-#incude <stdint.h>
+#include <stdint.h>
 // We also need limits for mapping the normal type names to the stdint types.
 #include <limits.h>
 // We also need stddef for size_t.
@@ -57,7 +66,7 @@
 #endif
 
 // If the stdbit header is available, we want to use those functions.
-#ifdef __STDC_VERSION_STDBIT_H__ && __STDC_VERSION_STDBIT_H__ >= 202311L
+#if defined(__STDC_VERSION_STDBIT_H__) && (__STDC_VERSION_STDBIT_H__ >= 202311L)
 #  include <stdbit.h>
 #  define _PCOLLECTIONS__STDBIT_H
 #endif
@@ -163,13 +172,13 @@
    }
    EXTC static inline uint8_t popcount8(uint8_t w) {return popcount32(w);}
    EXTC static inline uint16_t popcount16(uint16_t w) {return popcount32(w);}
-#  ifdef uint64_t
+#  ifdef UINT64_MAX
       EXTC static inline uint64_t popcount64(uint64_t w) {
          return ( (uint64_t)popcount32((uint32_t)w)
                 + (uint64_t)popcount32((uint32_t)(w >> 32)) );
       }
 #  endif
-#  ifdef uint128_t
+#  ifdef UINT128_MAX
       EXTC static inline uint128_t popcount128(uint128_t w) {
          return ( (uint128_t)popcount32((uint32_t)w)
                 + (uint128_t)popcount32((uint32_t)(w >> 32))
@@ -212,14 +221,14 @@
    EXTC static inline uint16_t clz16(uint16_t w) {
       return (uint16_t)clz32((uint32_t)w) - 16;
    }
-#  ifdef uint64_t
-      static inline uint64_t clz64(uint64_t w) {
+#  ifdef UINT64_MAX
+      EXTC static inline uint64_t clz64(uint64_t w) {
          uint64_t c1 = clz32((uint32_t)(w >> 32));
          uint64_t c2 = clz32((uint32_t)w);
          return (c1 == 32 ? 32 + c2 : c1);
       }
 #  endif
-#  ifdef uint128_t
+#  ifdef UINT128_MAX
       EXTC static inline uint128_t clz128(uint128_t w) {
          uint32_t c1 = clz32((uint32_t)(w >> 96));
          uint32_t c2 = clz32((uint32_t)(w >> 64));
@@ -262,13 +271,13 @@
    EXTC static inline uint16_t ctz16(uint16_t w) {
       return ctz32((uint32_t)w);
    }
-#  ifdef uint64_t
-      static inline uint64_t ctz64(uint64_t w) {
+#  ifdef UINT64_MAX
+      EXTC static inline uint64_t ctz64(uint64_t w) {
          uint32_t c = ctz32((uint32_t)w);
          return (c == 32 ? 32 + ctz32((uint32_t)(w >> 32)) : c);
       }
 #  endif
-#  ifdef uint128_t
+#  ifdef UINT128_MAX
       EXTC static inline uint128_t ctz128(uint128_t w) {
          uint32_t c = ctz32((uint32_t)w);
          if (c < 32) return c;
@@ -284,8 +293,8 @@
 
 // Other Utilities ============================================================
 
-#ifdef uint128_t
-static inline uint128_t pow128(uint128_t base, uint128_t expt) {
+#ifdef UINT128_MAX
+EXTC static inline uint128_t pow128(uint128_t base, uint128_t expt) {
    uint128_t result = UINT128_C(1);
    while (expt > 0) {
       result *= (expt & UINT128_C(1)? base : UINT128_C(1));
@@ -295,7 +304,7 @@ static inline uint128_t pow128(uint128_t base, uint128_t expt) {
    return result;
 }
 #endif
-static inline uint64_t pow64(uint64_t base, uint64_t expt) {
+EXTC static inline uint64_t pow64(uint64_t base, uint64_t expt) {
    uint64_t result = UINT64_C(1);
    while (expt > 0) {
       result *= (expt & UINT64_C(1)? base : UINT64_C(1));
@@ -304,7 +313,7 @@ static inline uint64_t pow64(uint64_t base, uint64_t expt) {
    }
    return result;
 }
-static inline uint32_t pow32(uint32_t base, uint32_t expt) {
+EXTC static inline uint32_t pow32(uint32_t base, uint32_t expt) {
    uint32_t result = UINT32_C(1);
    while (expt > 0) {
       result *= (expt & UINT32_C(1)? base : UINT32_C(1));
@@ -313,7 +322,7 @@ static inline uint32_t pow32(uint32_t base, uint32_t expt) {
    }
    return result;
 }
-static inline uint16_t pow16(uint16_t base, uint16_t expt) {
+EXTC static inline uint16_t pow16(uint16_t base, uint16_t expt) {
    uint16_t result = UINT16_C(1);
    while (expt > 0) {
       result *= (expt & UINT16_C(1)? base : UINT16_C(1));
@@ -322,7 +331,7 @@ static inline uint16_t pow16(uint16_t base, uint16_t expt) {
    }
    return result;
 }
-static inline uint8_t pow8(uint8_t base, uint8_t expt) {
+EXTC static inline uint8_t pow8(uint8_t base, uint8_t expt) {
    uint8_t result = UINT8_C(1);
    while (expt > 0) {
       result *= (expt & UINT8_C(1)? base : UINT8_C(1));
@@ -332,91 +341,94 @@ static inline uint8_t pow8(uint8_t base, uint8_t expt) {
    return result;
 }
 // Various masking operations
-static inline uint8_t ltmask8(uint8_t k) {
+EXTC static inline uint8_t ltmask8(uint8_t k) {
    return ~(UINT8_MAX << k);
 }
-static inline uint8_t lemask8(uint8_t k) {
+EXTC static inline uint8_t lemask8(uint8_t k) {
    return ~(UINT8_MAX << (k+1));
 }
-static inline uint8_t gtmask8(uint8_t k) {
+EXTC static inline uint8_t gtmask8(uint8_t k) {
    return UINT8_MAX << (k+1);
 }
-static inline uint8_t gemask8(uint8_t k) {
+EXTC static inline uint8_t gemask8(uint8_t k) {
    return UINT8_MAX << k;
 }
-static inline uint16_t ltmask16(uint16_t k) {
+EXTC static inline uint16_t ltmask16(uint16_t k) {
    return ~(UINT16_MAX << k);
 }
-static inline uint16_t lemask16(uint16_t k) {
+EXTC static inline uint16_t lemask16(uint16_t k) {
    return ~(UINT16_MAX << (k+1));
 }
-static inline uint16_t gtmask16(uint16_t k) {
+EXTC static inline uint16_t gtmask16(uint16_t k) {
    return UINT16_MAX << (k+1);
 }
-static inline uint16_t gemask16(uint16_t k) {
+EXTC static inline uint16_t gemask16(uint16_t k) {
    return UINT16_MAX << k;
 }
-static inline uint32_t ltmask32(uint32_t k) {
+EXTC static inline uint32_t ltmask32(uint32_t k) {
    return ~(UINT32_MAX << k);
 }
-static inline uint32_t lemask32(uint32_t k) {
+EXTC static inline uint32_t lemask32(uint32_t k) {
    return ~(UINT32_MAX << (k+1));
 }
-static inline uint32_t gtmask32(uint32_t k) {
+EXTC static inline uint32_t gtmask32(uint32_t k) {
    return UINT32_MAX << (k+1);
 }
-static inline uint32_t gemask32(uint32_t k) {
+EXTC static inline uint32_t gemask32(uint32_t k) {
    return UINT32_MAX << k;
 }
-static inline uint64_t ltmask64(uint64_t k) {
+EXTC static inline uint64_t ltmask64(uint64_t k) {
    return ~(UINT64_MAX << k);
 }
-static inline uint64_t lemask64(uint64_t k) {
+EXTC static inline uint64_t lemask64(uint64_t k) {
    return ~(UINT64_MAX << (k+1));
 }
-static inline uint64_t gtmask64(uint64_t k) {
+EXTC static inline uint64_t gtmask64(uint64_t k) {
    return UINT64_MAX << (k+1);
 }
-static inline uint64_t gemask64(uint64_t k) {
+EXTC static inline uint64_t gemask64(uint64_t k) {
    return UINT64_MAX << k;
 }
-#ifdef uint128_t
-static inline uint128_t ltmask128(uint128_t k) {
+#ifdef UINT128_MAX
+EXTC static inline uint128_t ltmask128(uint128_t k) {
    return ~(UINT128_MAX << k);
 }
-static inline uint128_t lemask128(uint128_t k) {
+EXTC static inline uint128_t lemask128(uint128_t k) {
    return ~(UINT128_MAX << (k+1));
 }
-static inline uint128_t gtmask128(uint128_t k) {
+EXTC static inline uint128_t gtmask128(uint128_t k) {
    return UINT128_MAX << (k+1);
 }
-static inline uint128_t gemask128(uint128_t k) {
+EXTC static inline uint128_t gemask128(uint128_t k) {
    return UINT128_MAX << k;
 }
 #endif
 // Finding the next binary power of an integer: For an integer x, the
 // next binary power is the lowest y for which y > x and y is a power
 // of 2.
-static inline trient_t nexbinpow8(uint8_t k) {
-   k = clz_uint8(k - 1);
-   return UINT8_1 << k;
+// Note: the result overflows (wraps, per normal unsigned-integer semantics)
+// when x is large enough that the true next power of 2 doesn't fit in the
+// return type (e.g. nextbinpow8(200), since 256 isn't a uint8_t); callers
+// that care about this range need to check for it themselves.
+EXTC static inline uint8_t nextbinpow8(uint8_t k) {
+   return (uint8_t)(UINT8_C(1) << (8 - clz8(k)));
 }
-static inline trient_t nexbinpow16(uint16_t k) {
-   k = clz_uint16(k - 1);
-   return UINT16_1 << k;
+EXTC static inline uint16_t nextbinpow16(uint16_t k) {
+   return (uint16_t)(UINT16_C(1) << (16 - clz16(k)));
 }
-static inline trient_t nexbinpow32(uint32_t k) {
-   k = clz_uint32(k - 1);
-   return UINT32_1 << k;
+EXTC static inline uint32_t nextbinpow32(uint32_t k) {
+   return (uint32_t)(UINT32_C(1) << (32 - clz32(k)));
 }
-static inline trient_t nexbinpow64(uint64_t k) {
-   k = clz_uint64(k - 1);
-   return UINT64_1 << k;
+#ifdef UINT64_MAX
+EXTC static inline uint64_t nextbinpow64(uint64_t k) {
+   return (uint64_t)(UINT64_C(1) << (64 - clz64(k)));
 }
-static inline trient_t nexbinpow128(uint128_t k) {
-   k = clz_uint128(k - 1);
-   return UINT128_1 << k;
+#endif
+#ifdef UINT128_MAX
+EXTC static inline uint128_t nextbinpow128(uint128_t k) {
+   return (uint128_t)(UINT128_C(1) << (128 - clz128(k)));
 }
+#endif
 
 
 
