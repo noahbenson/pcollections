@@ -65,9 +65,13 @@
 // Initialization.
 
 #include <Python.h>
-#include <stdatomic.h>
 #include <string.h>
 #include "uintbits.h"
+// trie.h provides pcoll_atomic_u64_t/PCOLL_ATOMIC_U64_FETCH_*1 (a portable
+// stand-in for <stdatomic.h>, which MSVC doesn't have at all without
+// /std:c11 -- see trie.h's shim comment); this file doesn't call any
+// atomic_* function directly, so it doesn't need its own <stdatomic.h>
+// include (and, on Windows, must not have one).
 #include "trie.h"
 #include "amt.h"
 #include "fat.h"

@@ -22,7 +22,6 @@
 
 
 #include <Python.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <string.h>
 #include "uintbits.h"
@@ -31,6 +30,45 @@
 #  define EXTC extern "C"
 #else
 #  define EXTC
+#endif
+
+// Portable 64-bit atomic refcount -------------------------------------------
+// Trie nodes are refcounted as plain C objects (not Python objects -- see
+// the TrieHeader.refcount comment below), and that refcounting has to be
+// atomic since a persistent trie node can be shared, and concurrently
+// incref'd/decref'd, across threads. C11's <stdatomic.h> is the natural way
+// to write that -- but MSVC has NO implementation of <stdatomic.h> at all
+// unless the translation unit is built with /std:c11 or /std:c17, and
+// setup.py deliberately does *not* pass that flag on Windows (see its own
+// comment for why), so `#include <stdatomic.h>` fails outright there. This
+// is exactly the same problem lazy.c's mutex/atomic-flag shim solves for
+// its own <pthread.h>/<stdatomic.h> use (see that file's shim comment for
+// the full rationale) -- this is the same fix, applied here instead of
+// duplicating lazy.c's shim, since every trie node in dict.c/list.c/set.c
+// (via amt.h/fat.h) shares this one refcount implementation through this
+// header. `InterlockedExchangeAdd64` is a full-fence (a strictly stronger,
+// and thus safe, superset of the acq_rel ordering the POSIX code below
+// explicitly requests) 64-bit fetch-and-add intrinsic, stable since Windows
+// Vista on x64 (the only Windows arch this project's CI targets -- see
+// tests.yml), and -- like C11's atomic_fetch_add/atomic_fetch_sub_explicit
+// -- it returns the value from *before* the operation, so passing -1 to it
+// below reproduces `atomic_fetch_sub_explicit(..., 1, memory_order_acq_rel)`
+// exactly (fetch_sub's return value is defined as what fetch_add with the
+// negated operand would return).
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+   typedef volatile LONG64 pcoll_atomic_u64_t;
+#  define PCOLL_ATOMIC_U64_FETCH_ADD1(ptr) \
+      ((uint64_t)InterlockedExchangeAdd64((ptr), 1))
+#  define PCOLL_ATOMIC_U64_FETCH_SUB1(ptr) \
+      ((uint64_t)InterlockedExchangeAdd64((ptr), -1))
+#else
+#  include <stdatomic.h>
+   typedef _Atomic uint64_t pcoll_atomic_u64_t;
+#  define PCOLL_ATOMIC_U64_FETCH_ADD1(ptr) atomic_fetch_add((ptr), 1)
+#  define PCOLL_ATOMIC_U64_FETCH_SUB1(ptr) \
+      atomic_fetch_sub_explicit((ptr), 1, memory_order_acq_rel)
 #endif
 
 
@@ -350,7 +388,7 @@ EXTC typedef struct TrieHeader {
    // objects. This makes them more space-efficient and faster, but it means
    // we have to do garbage collection ourselves.
    // Size: 8 bytes (64 bits)
-   _Atomic uint64_t refcount;
+   pcoll_atomic_u64_t refcount;
    // The hash prefix of the node. This prefix is always stored in unshifted
    // bits, meaning that for a hash key k and an AMT node's real shift amount
    // s (see amtnode_shift() below), you can tell if k falls beneath the node
@@ -682,7 +720,7 @@ static inline triebits_t fatnode_sup_cellindex(Trie_t th) {
 // Memory and Reference Management --------------------------------------------
 
 static inline void trienode_incref(Trie_t th) {
-   atomic_fetch_add(&th->header.refcount, 1);
+   PCOLL_ATOMIC_U64_FETCH_ADD1(&th->header.refcount);
 }
 // Note that after calling amtnode_decref(t) it is quite possible that t is no
 // longer a valid pointer!
@@ -698,7 +736,7 @@ static inline void amttwig_free(Trie_t t, void (*leaf_decref)(void*)) {
 }
 static inline void amttwig_decref(Trie_t t, void (*leaf_deref)(void*)) {
    uint64_t r;
-   r = atomic_fetch_sub_explicit(&t->header.refcount, 1, memory_order_acq_rel);
+   r = PCOLL_ATOMIC_U64_FETCH_SUB1(&t->header.refcount);
    // If we aren't the last one holding the reference, we don't do anything.
    if (r <= 1)
       amttwig_free(t, leaf_deref);
@@ -716,14 +754,14 @@ static inline void fattwig_free(Trie_t t, void (*leaf_deref)(void*)) {
 }
 static inline void fattwig_decref(Trie_t t, void (*leaf_deref)(void*)) {
    uint64_t r;
-   r = atomic_fetch_sub_explicit(&t->header.refcount, 1, memory_order_acq_rel);
+   r = PCOLL_ATOMIC_U64_FETCH_SUB1(&t->header.refcount);
    // If we aren't the last one holding the reference, we don't do anything.
    if (r <= 1)
       fattwig_free(t, leaf_deref);
 }
 static inline void trietwig_decref_noprop(Trie_t t) {
    uint64_t r;
-   r = atomic_fetch_sub_explicit(&t->header.refcount, 1, memory_order_acq_rel);
+   r = PCOLL_ATOMIC_U64_FETCH_SUB1(&t->header.refcount);
    // If we aren't the last one holding the reference, we don't do anything.
    if (r > 1) return;
    // We need to deallocate this node, but since there's no leaf cleanup,
@@ -761,8 +799,7 @@ static inline void amtnode_free(Trie_t t, void (*leaf_deref)(void*)) {
       if (ci < nocc) {
          // We need to process subtree ci of node.
          u = trienode_subt(node, ci);
-         r = atomic_fetch_sub_explicit(
-            &u->header.refcount, 1, memory_order_acq_rel);
+         r = PCOLL_ATOMIC_U64_FETCH_SUB1(&u->header.refcount);
          if (r <= 1) {
             if (amtnode_is_twig(u)) {
                if (leaf_deref)
@@ -797,7 +834,7 @@ static inline void amtnode_free(Trie_t t, void (*leaf_deref)(void*)) {
 }
 static inline void amtnode_decref(Trie_t t, void (*leaf_deref)(void*)) {
    uint64_t r;
-   r = atomic_fetch_sub_explicit(&t->header.refcount, 1, memory_order_acq_rel);
+   r = PCOLL_ATOMIC_U64_FETCH_SUB1(&t->header.refcount);
    if (r <= 1)
       amtnode_free(t, leaf_deref);
 }
@@ -831,8 +868,7 @@ static inline void fatnode_free(Trie_t t, void (*leaf_deref)(void*)) {
       if (bi < FAT_CELLS) {
          // We need to process subtree ci of node.
          u = trienode_subt(node, bi);
-         r = atomic_fetch_sub_explicit(
-            &u->header.refcount, 1, memory_order_acq_rel);
+         r = PCOLL_ATOMIC_U64_FETCH_SUB1(&u->header.refcount);
          if (r <= 1) {
             // We need to deallocate this node too!
             if (fatnode_is_twig(u)) {
@@ -864,7 +900,7 @@ static inline void fatnode_free(Trie_t t, void (*leaf_deref)(void*)) {
 }
 static inline void fatnode_decref(Trie_t t, void (*leaf_deref)(void*)) {
    uint64_t r;
-   r = atomic_fetch_sub_explicit(&t->header.refcount, 1, memory_order_acq_rel);
+   r = PCOLL_ATOMIC_U64_FETCH_SUB1(&t->header.refcount);
    if (r <= 1)
       fatnode_free(t, leaf_deref);
 }
