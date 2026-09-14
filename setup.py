@@ -16,13 +16,33 @@
 # CPython's C API, so a install on an unusual platform/compiler/Python
 # implementation should still end up with a working, pure-Python
 # pcollections rather than a failed install.
+#
+# That non-fatal behavior is provided entirely by each Extension's own
+# `optional=True` flag below -- distutils/setuptools' build_ext command
+# already understands this flag natively: it catches a failing extension's
+# compiler/linker errors and demotes them to a warning
+# (`_filter_build_errors` in setuptools._distutils.command.build_ext), *and*
+# `copy_extensions_to_source` (used by `pip install -e .`'s editable-install
+# path) skips copying a missing output rather than erroring -- but only when
+# the extension is marked optional. An earlier version of this file
+# reimplemented a version of this by hand via a custom `build_ext` cmdclass
+# subclass that only wrapped `build_extension`/`run` -- which caught the
+# compile failure but, since it never marked the extensions `optional`, left
+# `copy_extensions_to_source` unaware they were allowed to be missing, so it
+# tried to copy a .so/.pyd that was never built and raised a
+# DistutilsFileError our wrapper's exception list didn't even catch (broke
+# `pip install -e .` on every platform where any extension failed to
+# compile -- confirmed directly: a deliberately-broken extension crashed
+# the editable install with that exact error under the old cmdclass, and
+# installed cleanly with a pure-Python fallback for just that one type once
+# switched to `optional=True`). Using the built-in `optional=True` avoids
+# reinventing -- and mis-implementing -- machinery setuptools already
+# provides for exactly this case.
 
 import os
-import warnings
+import platform
 
 from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext
-from setuptools.errors import CCompilerError, ExecError, PlatformError
 
 # Get the version from src/pcollections/__init__.py.
 _here = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +55,21 @@ version = version.split('"')[1]
 # The four optional C extension modules. Each is built from a single .c file
 # in pcollections/_c, and each compiles standalone (they don't link against
 # each other), so a failure in one doesn't need to take down the others --
-# see optional_build_ext below, which lets each extension fail independently
-# and simply omits it from the install rather than aborting the whole build.
+# `optional=True` (see the file header above) is what makes that true.
+#
+# `-std=c11`/`-pthread` are GCC/Clang spellings -- MSVC (used on Windows)
+# doesn't recognize either flag and would fail the whole compile on a
+# spurious "unrecognized command-line option" before ever getting to the
+# real question of whether it supports what the code actually needs
+# (`<stdatomic.h>`, which MSVC's C mode has only very limited/recent support
+# for). We could pass MSVC's nearest equivalents (`/std:c11`, and threads
+# are linked implicitly, no `/...pthread` equivalent needed), but since a
+# failure here just falls back to the pure-Python implementation either way
+# (via `optional=True`), it's simplest -- and avoids the confusing unrelated
+# "bad flag" error in CI logs -- to just not pass the Unix-only flags on
+# Windows and let the *real* compatibility question (stdatomic.h support)
+# decide the outcome.
+_is_windows = (platform.system() == 'Windows')
 _c_dir = os.path.join('src', 'pcollections', '_c')
 _ext_names = ('dict', 'list', 'set', 'lazy')
 ext_modules = [
@@ -47,52 +80,12 @@ ext_modules = [
         # lazy.c uses <stdatomic.h>/pthread primitives for its thread-safe
         # lazy-value implementation; the others don't need -pthread but it's
         # harmless to link it in for all four uniformly.
-        extra_compile_args=['-std=c11'],
-        extra_link_args=['-pthread'],
+        extra_compile_args=[] if _is_windows else ['-std=c11'],
+        extra_link_args=[] if _is_windows else ['-pthread'],
+        optional=True,
     )
     for name in _ext_names
 ]
-
-# Exceptions that a failed C compile/link can surface, across platforms and
-# setuptools versions (older setuptools raises the equivalent errors from
-# distutils.errors instead; those are themselves aliases for/of these on the
-# setuptools versions this package requires, so no separate import is
-# needed).
-_BUILD_EXT_ERRORS = (CCompilerError, ExecError, PlatformError, OSError)
-
-
-class optional_build_ext(build_ext):
-    """A build_ext that treats failing to build the optional C extension
-    modules as a warning instead of a fatal error.
-
-    pcollections has a complete, interface- and behavior-identical
-    pure-Python fallback for every type the C extensions provide (see
-    `pcollections/__init__.py` and `pcollections.test`), so a
-    platform/toolchain that can't build them should still end up with a
-    fully working install of pcollections -- just without the C speedups --
-    rather than a failed `pip install`.
-    """
-
-    def run(self):
-        try:
-            build_ext.run(self)
-        except _BUILD_EXT_ERRORS as e:
-            warnings.warn(
-                "pcollections: could not build the optional C extension "
-                f"modules ({e!r}). Falling back to the pure-Python "
-                "implementation -- this is not an error, pcollections will "
-                "work normally, just without the C speedups.")
-
-    def build_extension(self, ext):
-        try:
-            build_ext.build_extension(self, ext)
-        except _BUILD_EXT_ERRORS as e:
-            warnings.warn(
-                f"pcollections: could not build the {ext.name!r} C "
-                f"extension module ({e!r}); the types it would have "
-                "provided will use their pure-Python fallback "
-                "implementation instead.")
-
 
 # All other static metadata (name, description, authors, license,
 # classifiers, dependencies, urls, ...) lives in pyproject.toml's [project]
@@ -115,6 +108,5 @@ setup(
         'pcollections._c': ['*.h', '*.c'],
     },
     ext_modules=ext_modules,
-    cmdclass={'build_ext': optional_build_ext},
     zip_safe=False,
     include_package_data=True)

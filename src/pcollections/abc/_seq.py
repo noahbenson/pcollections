@@ -8,64 +8,29 @@
 from numbers         import (Integral)
 from collections.abc import (Sequence, MutableSequence)
 
-from ._core import (Persistent, Transient)
+from ._core import (_PersistentBase, Persistent, Transient)
 from ..util import (seqstr, seqcmp)
 
 
 #==============================================================================
-# PersistentSequence
+# _PersistentSequenceBase
 
-class PersistentSequence(Persistent, Sequence):
-    """All the operations on a persistent sequence.
+class _PersistentSequenceBase(_PersistentBase):
+    """Plain (non-``ABCMeta``) mixin holding ``PersistentSequence``'s concrete
+    method bodies, so that ``pcollections._c.list.plist`` can inherit them
+    without inheriting ``ABCMeta`` anywhere in its base chain -- see
+    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
+    3.14 rationale.
 
-    ``PersistentSequence`` objects are sequences (i.e., objects that inherit
-    from ``collections.abc.Sequence``), but they differ from other sequences in
-    that they support efficient updating by means of efficiently producing
-    copies of themselves that incorporate requested changes.
-
-    The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of `PersistentSequence`, that class is noted in
-    parentheses.
-     * ``set(index, object)``
-     * ``delete(index=-1)``
-     * ``append(object)``
-     * ``prepend(object)``
-     * ``insert(index, object)``
-     * ``clear()``
-     * ``transient()`` (``Persistent``)
-     * ``__iter__`` (``Iterable``)
-     * ``__len__`` (``Sized``)
-     * ``__getitem__`` (``Sequence``)
-     * ``__reduce__`` (for pickling)
-
-    Additionally, ``PersistentSequence`` includes default implementations of
-    the following methods, which may or may not be optimal for any particular
-    base-class.
-     * ``__str__`` (``object`)
-     * ``__repr__`` (``object`)
-     * ``__eq__`` (``object`)
-     * ``__hash__`` (``Hashable`)
-     * ``__contains__`` (``Container`)
-     * ``__reversed__`` (``Reversible`)
-     * ``count`` (``Sequence`)
-     * ``extend(iterable)`` (``Sequence`)
-     * ``index(value)`` (``Sequence`)
-     * ``copy()`` (``Persistent`)
-     * ``__add__``
-     * ``__radd__``
-     * ``__mul__``
-     * ___rmul__``
-     * ``drop(index=-1)``
-     * ``pop(index=-1)``
-     * ``remove(value)``
-     * ``sort()``
-     * ``reverse()``
-     * ``__json__`` (for the ``json_fix`` module)
-
+    Like ``PersistentSet``, ``PersistentSequence`` never actually relied on
+    any concrete method from ``collections.abc.Sequence`` -- every method
+    below was already implemented directly on ``PersistentSequence`` itself,
+    so this is a pure relocation of that existing code (list.c's plist/tlist
+    additionally implement their own native ``__eq__``/``__lt__``/etc. via a
+    real ``Py_tp_richcompare`` slot, so the comparison methods here are never
+    actually reached for the C backend -- but are kept, faithfully, for the
+    pure-Python backend and any other subclass that doesn't override them).
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
-    # and anything that mixes it in, from acquiring an instance
-    # __dict__/__weakref__ of its own.
     __slots__ = ()
     # Methods which must be implemented in the children.
     def set(self, index, obj):
@@ -262,55 +227,77 @@ class PersistentSequence(Persistent, Sequence):
         return dumps(list(self))
 
 
-#===============================================================================
-# TransientSequence
+#==============================================================================
+# PersistentSequence
 
-class TransientSequence(Transient, MutableSequence):
-    """All the operations on a transient sequence.
+class PersistentSequence(_PersistentSequenceBase, Persistent, Sequence):
+    """All the operations on a persistent sequence.
 
-    `TransientSequence` objects are mutable sequences (i.e., objects that
-    inherit from ``collections.abc.MutableSequence``), but they differ from
-    other sequences in that they support efficient conversion to and from a
-    paired persistent datatype.
+    ``PersistentSequence`` objects are sequences (i.e., objects that inherit
+    from ``collections.abc.Sequence``), but they differ from other sequences in
+    that they support efficient updating by means of efficiently producing
+    copies of themselves that incorporate requested changes.
 
     The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of ``TransientSequence`, that class is noted in
+    inherited from a superclass of `PersistentSequence`, that class is noted in
     parentheses.
-     * ``clear()`
-     * ``persistent()`` (``Transient``)
+     * ``set(index, object)``
+     * ``delete(index=-1)``
+     * ``append(object)``
+     * ``prepend(object)``
+     * ``insert(index, object)``
+     * ``clear()``
+     * ``transient()`` (``Persistent``)
      * ``__iter__`` (``Iterable``)
      * ``__len__`` (``Sized``)
      * ``__getitem__`` (``Sequence``)
-     * ``__setitem__(index, object)`` (``MutableSequence``)
-     * ``__delitem__(index)`` (``MutableSequence``)
-     * ``append(object)`` (``MutableSequence``)
-     * ``prepend(object)`` (``MutableSequence``)
-     * ``insert(index, object)`` (``MutableSequence``)
+     * ``__reduce__`` (for pickling)
 
-    Additionally, ``TransientSequence`` includes default implementations of the
-    following methods, which may or may not be optimal for any particular
+    Additionally, ``PersistentSequence`` includes default implementations of
+    the following methods, which may or may not be optimal for any particular
     base-class.
+     * ``__str__`` (``object`)
+     * ``__repr__`` (``object`)
+     * ``__eq__`` (``object`)
+     * ``__hash__`` (``Hashable`)
+     * ``__contains__`` (``Container`)
+     * ``__reversed__`` (``Reversible`)
+     * ``count`` (``Sequence`)
+     * ``extend(iterable)`` (``Sequence`)
+     * ``index(value)`` (``Sequence`)
+     * ``copy()`` (``Persistent`)
+     * ``__add__``
+     * ``__radd__``
+     * ``__mul__``
+     * ___rmul__``
+     * ``drop(index=-1)``
      * ``pop(index=-1)``
      * ``remove(value)``
      * ``sort()``
      * ``reverse()``
-     * ``__str__`` (``object``)
-     * ``__repr__`` (``object``)
-     * ``__eq__`` (``object``)
-     * ``__contains__`` (``Container``)
-     * ``__reversed__`` (``Reversible``)
-     * ``count`` (``Sequence``)
-     * ``extend(iterable)`` (``Sequence``)
-     * ``index(value)`` (``Sequence``)
-     * ``copy()`` (``Transient```)
-     * ``__add__``
-     * ``__radd__``
-     * ``__iadd__``
-     * ``__mul__``
-     * ``__rmul__``
-     * ``__imul__``
-     * ``__reduce__`` (for pickling)
      * ``__json__`` (for the ``json_fix`` module)
+
+    """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
+
+
+#===============================================================================
+# _TransientSequenceBase
+
+class _TransientSequenceBase(Transient):
+    """Plain (non-``ABCMeta``) mixin holding ``TransientSequence``'s concrete
+    method bodies, so that ``pcollections._c.list.tlist`` can inherit them
+    without inheriting ``ABCMeta`` anywhere in its base chain -- see
+    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
+    3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
+    can subclass it directly.)
+
+    As with ``_PersistentSequenceBase``, this is a pure relocation of
+    ``TransientSequence``'s already-self-contained methods -- nothing here is
+    a new port from stdlib ``collections.abc.Sequence``/``MutableSequence``.
     """
     # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
@@ -342,7 +329,7 @@ class TransientSequence(Transient, MutableSequence):
         The reverse flag can be set to sort in descending order.
         """
         for (ii,el) in enumerate(sorted(self, key=key, reverse=reverse)):
-            t[ii] = el
+            self[ii] = el
     def count(self, value):
         """Returns the number of occurences of value."""
         n = 0
@@ -484,8 +471,67 @@ class TransientSequence(Transient, MutableSequence):
         return (self.__new__, (type(self), list(self),))
     def __json__(self):
         from json import dumps
-        return dumps(list(self))    
+        return dumps(list(self))
+
+
+#===============================================================================
+# TransientSequence
+
+class TransientSequence(_TransientSequenceBase, Transient, MutableSequence):
+    """All the operations on a transient sequence.
+
+    `TransientSequence` objects are mutable sequences (i.e., objects that
+    inherit from ``collections.abc.MutableSequence``), but they differ from
+    other sequences in that they support efficient conversion to and from a
+    paired persistent datatype.
+
+    The following abstract methods must be implemented; if these methods are
+    inherited from a superclass of ``TransientSequence`, that class is noted in
+    parentheses.
+     * ``clear()`
+     * ``persistent()`` (``Transient``)
+     * ``__iter__`` (``Iterable``)
+     * ``__len__`` (``Sized``)
+     * ``__getitem__`` (``Sequence``)
+     * ``__setitem__(index, object)`` (``MutableSequence``)
+     * ``__delitem__(index)`` (``MutableSequence``)
+     * ``append(object)`` (``MutableSequence``)
+     * ``prepend(object)`` (``MutableSequence``)
+     * ``insert(index, object)`` (``MutableSequence``)
+
+    Additionally, ``TransientSequence`` includes default implementations of the
+    following methods, which may or may not be optimal for any particular
+    base-class.
+     * ``pop(index=-1)``
+     * ``remove(value)``
+     * ``sort()``
+     * ``reverse()``
+     * ``__str__`` (``object``)
+     * ``__repr__`` (``object``)
+     * ``__eq__`` (``object``)
+     * ``__contains__`` (``Container``)
+     * ``__reversed__`` (``Reversible``)
+     * ``count`` (``Sequence``)
+     * ``extend(iterable)`` (``Sequence``)
+     * ``index(value)`` (``Sequence``)
+     * ``copy()`` (``Transient```)
+     * ``__add__``
+     * ``__radd__``
+     * ``__iadd__``
+     * ``__mul__``
+     * ``__rmul__``
+     * ``__imul__``
+     * ``__reduce__`` (for pickling)
+     * ``__json__`` (for the ``json_fix`` module)
+    """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()
+
 
 # Setup the _eq_types, which decides what types can be considered equal.
+_PersistentSequenceBase._eq_types = (list, PersistentSequence, TransientSequence)
+_TransientSequenceBase._eq_types = (list, PersistentSequence, TransientSequence)
 PersistentSequence._eq_types = (list, PersistentSequence, TransientSequence)
 TransientSequence._eq_types = (list, PersistentSequence, TransientSequence)

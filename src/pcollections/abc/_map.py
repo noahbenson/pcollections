@@ -6,66 +6,40 @@
 
 from collections.abc import (Mapping, MutableMapping)
 
-from ._core import (Persistent, Transient)
+from ._core import (_PersistentBase, Persistent, Transient)
 from ..util import (seqstr)
 
 
 #===============================================================================
-# PersistentMapping
+# _PersistentMappingBase
 
-class PersistentMapping(Mapping, Persistent):
-    """All the operations on a persistent mapping.
+class _PersistentMappingBase(_PersistentBase):
+    """Plain (non-``ABCMeta``) mixin holding ``PersistentMapping``'s concrete
+    method bodies, so that ``pcollections._c.dict.pdict`` can inherit them
+    without inheriting ``ABCMeta`` anywhere in its base chain -- see
+    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
+    3.14 rationale.
 
-    Persistent mappings are mappings (i.e., objects that inherit from
-    `collections.abc.Mapping`), but they differ from other mappings in that they
-    support efficient updating by means of efficiently producing copies of
-    themselves that incorporate requested changes.
-
-    The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of `PersistentMapping`, that class is noted in
-    parentheses.
-     * `__len__` (`Sized`)
-     * `__iter__` (`Iterable`)
-     * `__getitem__` (`Mapping`)
-     * `transient()` (`Persistent`)
-     * `set(key, value)`
-     * `drop(key)`
-     * `clear()`
-
-    Additionally, `PersistentMapping` includes default implementations of the
-    following methods, which may or may not be optimal for any particular
-    base-class.
-     * `__setattr__` (`object`; raises a `TypeError`)
-     * `__setitem__` (`object`; raises a `TypeError`)
-     * `__str__` (`object`)
-     * `__repr__` (`object`)
-     * `__eq__` (`object`)
-     * `__ne__` (`object`)
-     * `__hash__` (`Hashable`)
-     * `__contains__` (`Container`)
-     * `get(key, default=None)` (`Mapping`)
-     * `keys()` (`Mapping`)
-     * `items()` (`Mapping`)
-     * `values()` (`Mapping`)
-     * `setdefault(key, default=None)` (`MutableMapping`)
-     * `popitem()` (`MutableMapping`)
-     * `pop(key)` (`MutableMapping`)
-     * `copy()` (`Persistent`)
-     * `delete(key)`
-     * `remove(value)`
-     * `setall(values)`
-     * `dropall(key)`
-     * `deleteall(key)`
-     * `discardall(values)`
-     * `removeall(values)`
-     * `update(map, **kw)`
-     * `__reduce__` (for pickling)
-     * `__json__` (for `json_fix` module)
+    Every method here (other than the newly-added ``__eq__``) used to be
+    defined directly in ``PersistentMapping``'s own class body; only
+    ``__eq__`` is new -- ``PersistentMapping`` never defined its own, relying
+    instead on the real ``collections.abc.Mapping.__eq__`` it inherited, which
+    a plain (non-``Mapping``) base obviously can't do, so this is a faithful,
+    unmodified port of that stdlib method (comparing two mappings' items as
+    dicts) rather than a new algorithm.
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
-    # and anything that mixes it in, from acquiring an instance
-    # __dict__/__weakref__ of its own.
     __slots__ = ()
+    # Mirrors collections.abc.Mapping.__abc_tpflags__/__reversed__: Mapping
+    # explicitly sets `__reversed__ = None` (rather than just not defining
+    # it) so that the `reversed()` builtin fails fast and clearly on a plain
+    # Mapping, rather than falling through to the len+getitem sequence
+    # protocol. Ported here as a plain class attribute -- not something
+    # PersistentMapping ever defined itself, but something it always
+    # inherited from Mapping -- so pdict/tdict's public interface (and
+    # reversed(pdict(...))'s behavior) stays identical to before this fix;
+    # see test/_parity.py's test_public_api_matches, which checks for
+    # exactly this kind of gap.
+    __reversed__ = None
     # Methods which must be implemented in the children.
     def set(self, key, val):
         """Returns a copy of the pdict that maps the given key to the given
@@ -88,6 +62,16 @@ class PersistentMapping(Mapping, Persistent):
         return f"{{|{seqstr(self, maxlen=60)}|}}"
     def __repr__(self):
         return f"{{|{seqstr(self)}|}}"
+    def __eq__(self, other):
+        # Ported verbatim from collections.abc.Mapping.__eq__: only ever
+        # comparable to other Mappings -- real subclasses and virtual ones
+        # registered via .register() both satisfy this isinstance check, so
+        # e.g. a pdict compares fine against a plain dict (Mapping.register()'d
+        # in the stdlib) or another pdict/tdict -- by comparing their
+        # contents as plain dicts.
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return dict(self.items()) == dict(other.items())
     def __hash__(self):
         return hash(frozenset(map(lambda u: u[1][0], self._els))) + 2
     def __contains__(self, k):
@@ -156,7 +140,7 @@ class PersistentMapping(Mapping, Persistent):
         return (kv, self.drop(kv[0]))
     def pop(self, key, *args):
         """Returns a tuple of the value mapped to the given key and a copy of
-        the persistent mapping with that key removed. 
+        the persistent mapping with that key removed.
 
         If the key is not found, the second argument is returned, if given,
         otherwise, a `KeyError` is raised.
@@ -195,35 +179,37 @@ class PersistentMapping(Mapping, Persistent):
 
 
 #===============================================================================
-# TransientMapping
+# PersistentMapping
 
-class TransientMapping(MutableMapping, Transient):
-    """All the operations on a transient mapping.
+class PersistentMapping(_PersistentMappingBase, Mapping, Persistent):
+    """All the operations on a persistent mapping.
 
-    Transient mappings are mutable mappings (i.e., objects that inherit from
-    `collections.abc.MutableMapping`), but they differ from other mutable
-    mappings in that they support efficient conversion to and from persistent
-    mappings.
+    Persistent mappings are mappings (i.e., objects that inherit from
+    `collections.abc.Mapping`), but they differ from other mappings in that they
+    support efficient updating by means of efficiently producing copies of
+    themselves that incorporate requested changes.
 
     The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of `TransientMapping`, that class is noted in
+    inherited from a superclass of `PersistentMapping`, that class is noted in
     parentheses.
      * `__len__` (`Sized`)
      * `__iter__` (`Iterable`)
      * `__getitem__` (`Mapping`)
-     * `__setitem__` (`MutableMapping`)
-     * `__delitem__` (`MutableMapping`)
      * `transient()` (`Persistent`)
+     * `set(key, value)`
+     * `drop(key)`
      * `clear()`
 
-    Additionally, `TransientMapping` includes default implementations of the
+    Additionally, `PersistentMapping` includes default implementations of the
     following methods, which may or may not be optimal for any particular
     base-class.
      * `__setattr__` (`object`; raises a `TypeError`)
+     * `__setitem__` (`object`; raises a `TypeError`)
      * `__str__` (`object`)
      * `__repr__` (`object`)
      * `__eq__` (`object`)
      * `__ne__` (`object`)
+     * `__hash__` (`Hashable`)
      * `__contains__` (`Container`)
      * `get(key, default=None)` (`Mapping`)
      * `keys()` (`Mapping`)
@@ -231,16 +217,46 @@ class TransientMapping(MutableMapping, Transient):
      * `values()` (`Mapping`)
      * `setdefault(key, default=None)` (`MutableMapping`)
      * `popitem()` (`MutableMapping`)
-     * `pop()` (`MutableMapping`)
-     * `update(map, **kw)` (`MutableMapping`)
-     * `copy()` (`Transient`)
+     * `pop(key)` (`MutableMapping`)
+     * `copy()` (`Persistent`)
+     * `delete(key)`
+     * `remove(value)`
+     * `setall(values)`
+     * `dropall(key)`
+     * `deleteall(key)`
+     * `discardall(values)`
+     * `removeall(values)`
+     * `update(map, **kw)`
      * `__reduce__` (for pickling)
-     * `__json__` (for the `json_fix` module)
+     * `__json__` (for `json_fix` module)
     """
     # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()
+
+
+#===============================================================================
+# _TransientMappingBase
+
+class _TransientMappingBase(Transient):
+    """Plain (non-``ABCMeta``) mixin holding ``TransientMapping``'s concrete
+    method bodies, so that ``pcollections._c.dict.tdict`` can inherit them
+    without inheriting ``ABCMeta`` anywhere in its base chain -- see
+    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
+    3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
+    can subclass it directly rather than needing its own ``_core.py``-style
+    split.)
+
+    As with ``_PersistentMappingBase``, every method here except ``__eq__`` was
+    already defined directly on ``TransientMapping``; ``__eq__`` is a faithful
+    port of the real ``collections.abc.Mapping.__eq__`` that ``TransientMapping``
+    used to inherit instead (via ``MutableMapping``).
+    """
+    __slots__ = ()
+    # See _PersistentMappingBase.__reversed__'s comment: ported from
+    # collections.abc.Mapping (inherited via MutableMapping before this fix).
+    __reversed__ = None
     # Methods which must be implemented in the children.
     def clear(self):
         """Returns the empty persistent mapping of the same type."""
@@ -251,6 +267,12 @@ class TransientMapping(MutableMapping, Transient):
         return f"{{<{seqstr(self, maxlen=60)}>}}"
     def __repr__(self):
         return f"{{<{seqstr(self)}>}}"
+    def __eq__(self, other):
+        # See _PersistentMappingBase.__eq__'s comment: a verbatim port of
+        # collections.abc.Mapping.__eq__.
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return dict(self.items()) == dict(other.items())
     def __contains__(self, k):
         try:
             self[k]
@@ -323,4 +345,52 @@ class TransientMapping(MutableMapping, Transient):
     def __json__(self):
         from json import dumps
         return dumps(dict(self))
-        
+
+
+#===============================================================================
+# TransientMapping
+
+class TransientMapping(_TransientMappingBase, MutableMapping, Transient):
+    """All the operations on a transient mapping.
+
+    Transient mappings are mutable mappings (i.e., objects that inherit from
+    `collections.abc.MutableMapping`), but they differ from other mutable
+    mappings in that they support efficient conversion to and from persistent
+    mappings.
+
+    The following abstract methods must be implemented; if these methods are
+    inherited from a superclass of `TransientMapping`, that class is noted in
+    parentheses.
+     * `__len__` (`Sized`)
+     * `__iter__` (`Iterable`)
+     * `__getitem__` (`Mapping`)
+     * `__setitem__` (`MutableMapping`)
+     * `__delitem__` (`MutableMapping`)
+     * `transient()` (`Persistent`)
+     * `clear()`
+
+    Additionally, `TransientMapping` includes default implementations of the
+    following methods, which may or may not be optimal for any particular
+    base-class.
+     * `__setattr__` (`object`; raises a `TypeError`)
+     * `__str__` (`object`)
+     * `__repr__` (`object`)
+     * `__eq__` (`object`)
+     * `__ne__` (`object`)
+     * `__contains__` (`Container`)
+     * `get(key, default=None)` (`Mapping`)
+     * `keys()` (`Mapping`)
+     * `items()` (`Mapping`)
+     * `values()` (`Mapping`)
+     * `setdefault(key, default=None)` (`MutableMapping`)
+     * `popitem()` (`MutableMapping`)
+     * `pop()` (`MutableMapping`)
+     * `update(map, **kw)` (`MutableMapping`)
+     * `copy()` (`Transient`)
+     * `__reduce__` (for pickling)
+     * `__json__` (for the `json_fix` module)
+    """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()

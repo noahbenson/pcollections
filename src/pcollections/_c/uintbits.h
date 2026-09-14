@@ -50,10 +50,17 @@
 
 // For starters, it's possible that the uint128_t isn't defined explicitly but
 // could be... if this is the case, we can go ahead and define it.
+// (The comparison below is written as ULLONG_MAX > UINT64_MAX, rather than
+// the more obvious ULLONG_MAX >> 64 == UINT64_MAX, because the latter is
+// undefined behavior -- and triggers a real "integer overflow in
+// preprocessor expression" warning under clang -- whenever unsigned long
+// long is exactly 64 bits, since shifting by the full width of the type is
+// never well-defined. ULLONG_MAX > UINT64_MAX asks the same question --
+// "is unsigned long long wider than 64 bits?" -- without ever shifting.)
 #if (!defined(uint128_t)                  \
      && defined(ULLONG_MAX)               \
      && defined(UINT64_MAX)               \
-     && (ULLONG_MAX >> 64 == UINT64_MAX))
+     && (ULLONG_MAX > UINT64_MAX))
    EXTC typedef unsigned long long uint128_t;
    EXTC typedef unsigned long long uint_fast128_t;
    EXTC typedef unsigned long long uint_least128_t;
@@ -62,6 +69,69 @@
 #  endif
 #  ifndef UINT128_C
 #    define UINT128_C(x) (x ## ULL)
+#  endif
+#endif
+
+// Bit widths of the fixed-size integer types and of uintptr_t/size_t.
+// C23's <stdint.h> defines these directly (UINT8_WIDTH, ..., UINTPTR_WIDTH,
+// SIZE_WIDTH), and this codebase relies on them further down (and in
+// trie.h). But they aren't available pre-C23, and in practice that matters:
+// e.g. glibc happens to expose them as an extension even in -std=c11 mode
+// (because Python.h pulls in _GNU_SOURCE before this header is reached), but
+// Apple's libc and MSVC's UCRT do not, so a strict-C11 build on macOS or
+// Windows would otherwise fail with "cannot deduce size/type of ..." errors
+// despite compiling fine on Linux (confirmed directly: reproduced the exact
+// "Cannot deduce size of uintptr_t"/"Cannot deduce size of size_t"/"Could
+// not deduce type of triebits_t" failures from the macOS CI log by
+// #undef-ing these macros before including this header on Linux, and
+// confirmed the fallback below resolves them all correctly). So: use the
+// real macro if the platform already defines it (never redefine it out from
+// under a compliant C23 implementation), and otherwise derive it here from
+// each type's MAX macro, which is guaranteed by C99 regardless of C standard
+// mode.
+#ifndef UINT8_WIDTH
+#  define UINT8_WIDTH 8
+#endif
+#ifndef UINT16_WIDTH
+#  define UINT16_WIDTH 16
+#endif
+#ifndef UINT32_WIDTH
+#  define UINT32_WIDTH 32
+#endif
+#if defined(UINT64_MAX) && !defined(UINT64_WIDTH)
+#  define UINT64_WIDTH 64
+#endif
+#if defined(UINT128_MAX) && !defined(UINT128_WIDTH)
+#  define UINT128_WIDTH 128
+#endif
+#ifndef UINTPTR_WIDTH
+#  if (UINTPTR_MAX == UINT8_MAX)
+#     define UINTPTR_WIDTH 8
+#  elif (UINTPTR_MAX == UINT16_MAX)
+#     define UINTPTR_WIDTH 16
+#  elif (UINTPTR_MAX == UINT32_MAX)
+#     define UINTPTR_WIDTH 32
+#  elif defined(UINT64_MAX) && (UINTPTR_MAX == UINT64_MAX)
+#     define UINTPTR_WIDTH 64
+#  elif defined(UINT128_MAX) && (UINTPTR_MAX == UINT128_MAX)
+#     define UINTPTR_WIDTH 128
+#  else
+#     error Cannot deduce width of uintptr_t.
+#  endif
+#endif
+#ifndef SIZE_WIDTH
+#  if (SIZE_MAX == UINT8_MAX)
+#     define SIZE_WIDTH 8
+#  elif (SIZE_MAX == UINT16_MAX)
+#     define SIZE_WIDTH 16
+#  elif (SIZE_MAX == UINT32_MAX)
+#     define SIZE_WIDTH 32
+#  elif defined(UINT64_MAX) && (SIZE_MAX == UINT64_MAX)
+#     define SIZE_WIDTH 64
+#  elif defined(UINT128_MAX) && (SIZE_MAX == UINT128_MAX)
+#     define SIZE_WIDTH 128
+#  else
+#     error Cannot deduce width of size_t.
 #  endif
 #endif
 

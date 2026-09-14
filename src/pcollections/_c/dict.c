@@ -1891,8 +1891,38 @@ static PyTypeObject* build_abc_subtype(PyType_Spec* spec, PyObject* abc_module,
    return result_t;
 }
 
-// Builds one of the six view heap types, inheriting from `base` (an ABC type
-// object from collections.abc: KeysView/ItemsView/ValuesView). Unlike
+// Registers `concrete` as a virtual subclass (via .register()) of the type
+// named `attr_name` on `module`. Used so that isinstance()/issubclass()
+// checks against e.g. pcollections.abc.PersistentMapping (and, transitively,
+// against collections.abc.Mapping -- confirmed empirically that .register()
+// with a *real* subclass of a stdlib ABC is honored by that stdlib ABC too)
+// keep succeeding for pdict/tdict/the view types even though their real base
+// is now a plain, non-ABCMeta mixin (see build_abc_subtype()'s own comment,
+// and pcollections.abc._core's _PersistentBase docstring, for why that
+// mixin swap was necessary at all on CPython 3.14). Returns 0 on success, -1
+// (with an exception set) on failure.
+static int register_as_virtual_subclass(PyObject* abc_cls, PyTypeObject* concrete) {
+   PyObject* result = PyObject_CallMethod(abc_cls, "register", "O", (PyObject*)concrete);
+   if (!result) return -1;
+   Py_DECREF(result);
+   return 0;
+}
+static int register_virtual_subclass(PyObject* module, const char* attr_name,
+                                      PyTypeObject* concrete) {
+   PyObject* abc_cls;
+   int rc;
+   abc_cls = PyObject_GetAttrString(module, attr_name);
+   if (!abc_cls) return -1;
+   rc = register_as_virtual_subclass(abc_cls, concrete);
+   Py_DECREF(abc_cls);
+   return rc;
+}
+
+// Builds one of the six view heap types, inheriting from `base` (a plain,
+// non-ABCMeta mixin from pcollections.abc._view -- _KeysViewBase/
+// _ItemsViewBase/_ValuesViewBase -- see that module's docstring for why
+// these are used instead of collections.abc.KeysView/ItemsView/ValuesView
+// directly as of this ABCMeta fix). Unlike
 // build_abc_subtype() above, this fills in spec->basicsize dynamically from
 // base's own tp_basicsize right before construction -- see the file-level
 // comment on the view-type globals for why: these types add no native
@@ -1939,12 +1969,36 @@ PyMODINIT_FUNC PyInit_dict(void) {
    g_dict_dummy = PyObject_CallObject((PyObject*)&PyBaseObject_Type, NULL);
    if (!g_dict_dummy) return NULL;
 
+   // pdict/tdict are built on top of pcollections.abc's plain (non-ABCMeta)
+   // _PersistentMappingBase/_TransientMappingBase mixins -- not the real,
+   // ABCMeta-based PersistentMapping/TransientMapping -- since CPython 3.14
+   // rejects building a heap type (via PyType_FromSpecWithBases, which is
+   // what build_abc_subtype() does) on top of a base whose metaclass
+   // overrides tp_new, which ABCMeta does. See pcollections.abc._core's
+   // _PersistentBase docstring for the full story. We keep pcoll_abc_module
+   // open past this point (rather than decref'ing it immediately) because
+   // it's needed twice more below: to .register() PDictType/TDictType as
+   // virtual subclasses of the real PersistentMapping/TransientMapping, and
+   // to look up the dict-view family's own plain mixins
+   // (_KeysViewBase/_ItemsViewBase/_ValuesViewBase, see pcollections.abc._view)
+   // for build_view_type().
    pcoll_abc_module = PyImport_ImportModule("pcollections.abc");
    if (!pcoll_abc_module) return NULL;
-   PDictType = build_abc_subtype(&pdict_spec, pcoll_abc_module, "PersistentMapping");
-   TDictType = build_abc_subtype(&tdict_spec, pcoll_abc_module, "TransientMapping");
-   Py_DECREF(pcoll_abc_module);
-   if (!PDictType || !TDictType) return NULL;
+   PDictType = build_abc_subtype(&pdict_spec, pcoll_abc_module, "_PersistentMappingBase");
+   TDictType = build_abc_subtype(&tdict_spec, pcoll_abc_module, "_TransientMappingBase");
+   if (!PDictType || !TDictType) { Py_DECREF(pcoll_abc_module); return NULL; }
+   // .register() PDictType/TDictType as virtual subclasses of the real
+   // PersistentMapping/TransientMapping ABCs, so isinstance()/issubclass()
+   // checks against pcollections.abc.PersistentMapping/TransientMapping --
+   // and, transitively, against collections.abc.Mapping/MutableMapping,
+   // confirmed empirically -- keep succeeding exactly as they did when
+   // PDictType/TDictType were real (not virtual) subclasses of those ABCs.
+   if (register_virtual_subclass(pcoll_abc_module, "PersistentMapping", PDictType) < 0) {
+      Py_DECREF(pcoll_abc_module); return NULL;
+   }
+   if (register_virtual_subclass(pcoll_abc_module, "TransientMapping", TDictType) < 0) {
+      Py_DECREF(pcoll_abc_module); return NULL;
+   }
    // tdict provides no tp_hash of its own at all (unlike pdict) -- patch in
    // TransientMapping's (i.e. MutableMapping's) __hash__ = None
    // unhashability directly, the same safe way build_abc_subtype() patches
@@ -1956,35 +2010,72 @@ PyMODINIT_FUNC PyInit_dict(void) {
 
    {
       PyObject* util_module = PyImport_ImportModule("pcollections.util");
-      if (!util_module) return NULL;
+      if (!util_module) { Py_DECREF(pcoll_abc_module); return NULL; }
       g_seqstr = PyObject_GetAttrString(util_module, "seqstr");
       Py_DECREF(util_module);
-      if (!g_seqstr) return NULL;
+      if (!g_seqstr) { Py_DECREF(pcoll_abc_module); return NULL; }
    }
 
    coll_abc_module = PyImport_ImportModule("collections.abc");
-   if (!coll_abc_module) return NULL;
+   if (!coll_abc_module) { Py_DECREF(pcoll_abc_module); return NULL; }
    g_abc_Mapping = PyObject_GetAttrString(coll_abc_module, "Mapping");
    g_abc_Sized = PyObject_GetAttrString(coll_abc_module, "Sized");
+   // The *real* stdlib KeysView/ItemsView/ValuesView -- kept only so the six
+   // view heap types built below can be .register()'ed with them (for
+   // isinstance()/issubclass() compatibility); they are NOT used as those
+   // types' actual base anymore (see build_view_type()'s comment and
+   // pcollections.abc._view's module docstring).
    KeysView_t = PyObject_GetAttrString(coll_abc_module, "KeysView");
    ItemsView_t = PyObject_GetAttrString(coll_abc_module, "ItemsView");
    ValuesView_t = PyObject_GetAttrString(coll_abc_module, "ValuesView");
    Py_DECREF(coll_abc_module);
    if (!g_abc_Mapping || !g_abc_Sized || !KeysView_t || !ItemsView_t || !ValuesView_t) {
       Py_XDECREF(KeysView_t); Py_XDECREF(ItemsView_t); Py_XDECREF(ValuesView_t);
+      Py_DECREF(pcoll_abc_module);
       return NULL;
    }
 
-   PDictKeysType = build_view_type(&pdict_keys_view_spec, KeysView_t);
-   PDictItemsType = build_view_type(&pdict_items_view_spec, ItemsView_t);
-   PDictValuesType = build_view_type(&pdict_values_view_spec, ValuesView_t);
-   TDictKeysType = build_view_type(&tdict_keys_view_spec, KeysView_t);
-   TDictItemsType = build_view_type(&tdict_items_view_spec, ItemsView_t);
-   TDictValuesType = build_view_type(&tdict_values_view_spec, ValuesView_t);
-   Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
+   {
+      // The plain (non-ABCMeta) mixins that build_view_type() actually
+      // builds the six view heap types on top of -- see _view.py.
+      PyObject* PKeysViewBase = PyObject_GetAttrString(pcoll_abc_module, "_KeysViewBase");
+      PyObject* PItemsViewBase = PyObject_GetAttrString(pcoll_abc_module, "_ItemsViewBase");
+      PyObject* PValuesViewBase = PyObject_GetAttrString(pcoll_abc_module, "_ValuesViewBase");
+      if (!PKeysViewBase || !PItemsViewBase || !PValuesViewBase) {
+         Py_XDECREF(PKeysViewBase); Py_XDECREF(PItemsViewBase); Py_XDECREF(PValuesViewBase);
+         Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
+         Py_DECREF(pcoll_abc_module);
+         return NULL;
+      }
+      PDictKeysType = build_view_type(&pdict_keys_view_spec, PKeysViewBase);
+      PDictItemsType = build_view_type(&pdict_items_view_spec, PItemsViewBase);
+      PDictValuesType = build_view_type(&pdict_values_view_spec, PValuesViewBase);
+      TDictKeysType = build_view_type(&tdict_keys_view_spec, PKeysViewBase);
+      TDictItemsType = build_view_type(&tdict_items_view_spec, PItemsViewBase);
+      TDictValuesType = build_view_type(&tdict_values_view_spec, PValuesViewBase);
+      Py_DECREF(PKeysViewBase); Py_DECREF(PItemsViewBase); Py_DECREF(PValuesViewBase);
+   }
+   Py_DECREF(pcoll_abc_module);
    if (!PDictKeysType || !PDictItemsType || !PDictValuesType ||
-       !TDictKeysType || !TDictItemsType || !TDictValuesType)
+       !TDictKeysType || !TDictItemsType || !TDictValuesType) {
+      Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
       return NULL;
+   }
+   // .register() the six view types with the real stdlib KeysView/ItemsView/
+   // ValuesView (see register_as_virtual_subclass()'s comment) --
+   // transitively also satisfies isinstance/issubclass checks against
+   // Set/Collection/Iterable/Container/Sized for the Keys/Items views,
+   // confirmed empirically.
+   if (register_as_virtual_subclass(KeysView_t, PDictKeysType) < 0 ||
+       register_as_virtual_subclass(KeysView_t, TDictKeysType) < 0 ||
+       register_as_virtual_subclass(ItemsView_t, PDictItemsType) < 0 ||
+       register_as_virtual_subclass(ItemsView_t, TDictItemsType) < 0 ||
+       register_as_virtual_subclass(ValuesView_t, PDictValuesType) < 0 ||
+       register_as_virtual_subclass(ValuesView_t, TDictValuesType) < 0) {
+      Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
+      return NULL;
+   }
+   Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
 
    if (PyType_Ready(&PDictIterType) < 0) return NULL;
    if (PyType_Ready(&TDictIterType) < 0) return NULL;

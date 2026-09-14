@@ -1215,6 +1215,26 @@ static PyTypeObject* build_abc_subtype(PyType_Spec* spec, PyObject* abc_module,
    return result_t;
 }
 
+// Registers `concrete` as a virtual subclass (via .register()) of the type
+// named `attr_name` on `module`. See dict.c's twin of this function for the
+// full rationale (isinstance()/issubclass() compatibility after pset/tset
+// switched from inheriting PersistentSet/TransientSet directly to inheriting
+// their plain, non-ABCMeta _PersistentSetBase/_TransientSetBase mixins --
+// necessary on CPython 3.14, see pcollections.abc._core's _PersistentBase
+// docstring). Returns 0 on success, -1 (with an exception set) on failure.
+static int register_virtual_subclass(PyObject* module, const char* attr_name,
+                                      PyTypeObject* concrete) {
+   PyObject* abc_cls;
+   PyObject* result;
+   abc_cls = PyObject_GetAttrString(module, attr_name);
+   if (!abc_cls) return -1;
+   result = PyObject_CallMethod(abc_cls, "register", "O", (PyObject*)concrete);
+   Py_DECREF(abc_cls);
+   if (!result) return -1;
+   Py_DECREF(result);
+   return 0;
+}
+
 PyMODINIT_FUNC PyInit_set(void) {
    PyObject* m;
    PyObject* pcoll_abc_module;
@@ -1226,12 +1246,21 @@ PyMODINIT_FUNC PyInit_set(void) {
    g_set_dummy = PyObject_CallObject((PyObject*)&PyBaseObject_Type, NULL);
    if (!g_set_dummy) return NULL;
 
+   // pset/tset are built on top of pcollections.abc's plain (non-ABCMeta)
+   // _PersistentSetBase/_TransientSetBase mixins, then .register()'ed as
+   // virtual subclasses of the real PersistentSet/TransientSet -- see
+   // dict.c's PyInit_dict() for the fuller version of this same comment;
+   // the CPython 3.14 rationale is identical here.
    pcoll_abc_module = PyImport_ImportModule("pcollections.abc");
    if (!pcoll_abc_module) return NULL;
-   PSetType = build_abc_subtype(&pset_spec, pcoll_abc_module, "PersistentSet");
-   TSetType = build_abc_subtype(&tset_spec, pcoll_abc_module, "TransientSet");
+   PSetType = build_abc_subtype(&pset_spec, pcoll_abc_module, "_PersistentSetBase");
+   TSetType = build_abc_subtype(&tset_spec, pcoll_abc_module, "_TransientSetBase");
+   if (!PSetType || !TSetType) { Py_DECREF(pcoll_abc_module); return NULL; }
+   if (register_virtual_subclass(pcoll_abc_module, "PersistentSet", PSetType) < 0 ||
+       register_virtual_subclass(pcoll_abc_module, "TransientSet", TSetType) < 0) {
+      Py_DECREF(pcoll_abc_module); return NULL;
+   }
    Py_DECREF(pcoll_abc_module);
-   if (!PSetType || !TSetType) return NULL;
    // tset provides no tp_hash of its own at all (unlike pset) -- patch in
    // TransientSet's own tp_hash directly, the same safe way
    // build_abc_subtype() patches tp_richcompare (a concrete function, not a

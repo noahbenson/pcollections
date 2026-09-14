@@ -35,8 +35,24 @@ one of the four extension modules can't be built/loaded.
 def _load_c_backend():
     """Imports and returns the C-extension implementations of every public
     pcollections type/function, as a dict keyed by public name. Raises
-    ImportError (uncaught, by design -- see the module docstring) if any of
-    the four extension modules isn't importable."""
+    ImportError or TypeError (uncaught, by design -- see the module
+    docstring and the try/except around this function's call site) if any
+    of the four extension modules isn't importable or isn't usable on this
+    interpreter.
+
+    TypeError is included alongside the obvious ImportError because a
+    *present* extension module can still fail to finish initializing on an
+    interpreter whose C API has moved out from under it: e.g. CPython 3.14
+    tightened PyType_FromSpecWithBases/PyType_FromMetaclass to reject a
+    heap type whose base's metaclass overrides tp_new (which
+    collections.abc.ABCMeta -- the metaclass behind pcollections.abc's
+    PersistentMapping/TransientMapping/etc., which _c/dict.c and friends
+    subclass when building pdict/tdict/etc. -- does), and that shows up as
+    `PyInit_dict()` (etc.) failing with exactly that TypeError instead of
+    an ImportError. Since this is exactly the kind of "unusual...Python
+    implementation" case the module docstring already promises a graceful
+    pure-Python fallback for, and not a sign of a corrupted install, it's
+    caught here rather than left to crash the whole `import pcollections`."""
     from ._c import dict as _cdict
     from ._c import list as _clist
     from ._c import set  as _cset
@@ -86,7 +102,7 @@ try:
     #: something ordinary user code should need to branch on, since both
     #: backends are meant to be interface- and behavior-identical.
     using_c_extension = True
-except ImportError:
+except (ImportError, TypeError):
     _backend = _load_python_backend()
     using_c_extension = False
 

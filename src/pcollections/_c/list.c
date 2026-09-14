@@ -1405,19 +1405,51 @@ static PyTypeObject* build_abc_subtype(PyType_Spec* spec, PyObject* abc_module,
    return (PyTypeObject*)result;
 }
 
+// Registers `concrete` as a virtual subclass (via .register()) of the type
+// named `attr_name` on `module`. See dict.c's twin of this function for the
+// full rationale (isinstance()/issubclass() compatibility after plist/tlist
+// switched from inheriting PersistentSequence/TransientSequence directly to
+// inheriting their plain, non-ABCMeta _PersistentSequenceBase/
+// _TransientSequenceBase mixins -- necessary on CPython 3.14, see
+// pcollections.abc._core's _PersistentBase docstring). Returns 0 on success,
+// -1 (with an exception set) on failure.
+static int register_virtual_subclass(PyObject* module, const char* attr_name,
+                                      PyTypeObject* concrete) {
+   PyObject* abc_cls;
+   PyObject* result;
+   abc_cls = PyObject_GetAttrString(module, attr_name);
+   if (!abc_cls) return -1;
+   result = PyObject_CallMethod(abc_cls, "register", "O", (PyObject*)concrete);
+   Py_DECREF(abc_cls);
+   if (!result) return -1;
+   Py_DECREF(result);
+   return 0;
+}
+
 PyMODINIT_FUNC PyInit_list(void) {
    PyObject* m;
    PListObject* empty;
    PyObject* abc_module;
 
    // Import pcollections.abc, then build plist/tlist as heap types
-   // inheriting from PersistentSequence/TransientSequence respectively.
+   // inheriting from the plain (non-ABCMeta) _PersistentSequenceBase/
+   // _TransientSequenceBase mixins (rather than PersistentSequence/
+   // TransientSequence themselves, which are ABCMeta-based and, as of
+   // CPython 3.14, can no longer be used as a heap type's base via the
+   // PyType_FromSpecWithBases/PyType_FromMetaclass C API -- see
+   // pcollections.abc._core's _PersistentBase docstring), then .register()
+   // them as virtual subclasses of the real PersistentSequence/
+   // TransientSequence for isinstance()/issubclass() compatibility.
    abc_module = PyImport_ImportModule("pcollections.abc");
    if (!abc_module) return NULL;
-   PListType = build_abc_subtype(&plist_spec, abc_module, "PersistentSequence");
-   TListType = build_abc_subtype(&tlist_spec, abc_module, "TransientSequence");
+   PListType = build_abc_subtype(&plist_spec, abc_module, "_PersistentSequenceBase");
+   TListType = build_abc_subtype(&tlist_spec, abc_module, "_TransientSequenceBase");
+   if (!PListType || !TListType) { Py_DECREF(abc_module); return NULL; }
+   if (register_virtual_subclass(abc_module, "PersistentSequence", PListType) < 0 ||
+       register_virtual_subclass(abc_module, "TransientSequence", TListType) < 0) {
+      Py_DECREF(abc_module); return NULL;
+   }
    Py_DECREF(abc_module);
-   if (!PListType || !TListType) return NULL;
 
    {
       PyObject* util_module = PyImport_ImportModule("pcollections.util");

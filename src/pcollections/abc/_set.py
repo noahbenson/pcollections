@@ -6,65 +6,27 @@
 
 from collections.abc import (Set, MutableSet)
 
-from ._core import (Persistent, Transient)
+from ._core import (_PersistentBase, Persistent, Transient)
 from ..util import (setcmp, seqstr)
 
 
 #===============================================================================
-# PersistentSet
+# _PersistentSetBase
 
-class PersistentSet(Set, Persistent):
-    """All the operations on a persistent set.
+class _PersistentSetBase(_PersistentBase):
+    """Plain (non-``ABCMeta``) mixin holding ``PersistentSet``'s concrete
+    method bodies, so that ``pcollections._c.set.pset`` can inherit them
+    without inheriting ``ABCMeta`` anywhere in its base chain -- see
+    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
+    3.14 rationale.
 
-    Persistent sets are sets (i.e., objects that inherit from
-    `collections.abc.Set`), but they differ from other sets in that they support
-    efficient updating by means of efficiently producing copies of themselves
-    that incorporate requested changes.
-
-    The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of `PersistentSet`, that class is noted in
-    parentheses.
-     * `__iter__` (`Iterable`)
-     * `__len__` (`Sized`)
-     * `__contains__` (`Container`)
-     * `transient()` (`Persistent`)
-     * `add(index, object)`
-     * `discard()`
-     * `clear()`
-
-    Additionally, `PersistentSequence` includes default implementations of the
-    following methods, which may or may not be optimal for any particular
-    base-class.
-     * `__setattr__` (`object`; raises a `TypeError`)
-     * `__setitem__` (`object`; raises a `TypeError`)
-     * `__str__` (`object`)
-     * `__repr__` (`object`)
-     * `__eq__` (`object`)
-     * `__ne__` (`object`)
-     * `__hash__` (`Hashable`)
-     * `__lt__` (`Set`)
-     * `__le__` (`Set`)
-     * `__gt__` (`Set`)
-     * `__or__` (`Set`)
-     * `__and__` (`Set`)
-     * `__xor__` (`Set`)
-     * `__sub__` (`Set`)
-     * `__ror__` (`Set`)
-     * `__rand__` (`Set`)
-     * `__rxor__` (`Set`)
-     * `__rsub__` (`Set`)
-     * `isdisjoint` (`Set`)
-     * `copy()` (`Persistent`)
-     * `pop()`
-     * `remove(value)`
-     * `addall(values)`
-     * `discardall(values)`
-     * `removeall(values)`
-     * `__reduce__` (for pickling)
+    Unlike the Mapping family (``_map.py``), ``PersistentSet`` never actually
+    relied on any concrete method from ``collections.abc.Set`` -- every method
+    below (comparisons, ``__and__``/``__or__``/``__sub__``/``__xor__`` and
+    their reflected forms, ``isdisjoint``, etc.) was already implemented
+    directly on ``PersistentSet`` itself, so this is a pure relocation of
+    that existing code, not a new port from stdlib.
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
-    # and anything that mixes it in, from acquiring an instance
-    # __dict__/__weakref__ of its own.
     __slots__ = ()
     # Methods which must be implemented in the children.
     def add(self, obj):
@@ -284,28 +246,26 @@ class PersistentSet(Set, Persistent):
 
 
 #===============================================================================
-# TransientSet
+# PersistentSet
 
-class TransientSet(MutableSet, Transient):
-    """All the operations on a transient set.
+class PersistentSet(_PersistentSetBase, Set, Persistent):
+    """All the operations on a persistent set.
 
-    Transient sets are mutable sets (i.e., objects that inherit from
-    `collections.abc.MutableSet`), but they differ from other mutable sets in
-    that they support efficient updating by means of efficiently producing
-    copies of themselves that incorporate requested changes.
+    Persistent sets are sets (i.e., objects that inherit from
+    `collections.abc.Set`), but they differ from other sets in that they support
+    efficient updating by means of efficiently producing copies of themselves
+    that incorporate requested changes.
 
     The following abstract methods must be implemented; if these methods are
-    inherited from a superclass of `TransientSet`, that class is noted in
+    inherited from a superclass of `PersistentSet`, that class is noted in
     parentheses.
+     * `__iter__` (`Iterable`)
      * `__len__` (`Sized`)
      * `__contains__` (`Container`)
-     * `__iter__` (`Iterable`)
-     * `add(object)` (`MutableSet`)
-     * `discard()`  (`MutableSet`)
-     * `persistent()` (`Transient`)
+     * `transient()` (`Persistent`)
+     * `add(index, object)`
+     * `discard()`
      * `clear()`
-     * `__getstate__` (for pickling)
-     * `__setstate__` (for pickling)
 
     Additionally, `PersistentSequence` includes default implementations of the
     following methods, which may or may not be optimal for any particular
@@ -320,8 +280,6 @@ class TransientSet(MutableSet, Transient):
      * `__lt__` (`Set`)
      * `__le__` (`Set`)
      * `__gt__` (`Set`)
-     * `__ge__` (`Set`)
-     * `isdisjoint` (`Set`)
      * `__or__` (`Set`)
      * `__and__` (`Set`)
      * `__xor__` (`Set`)
@@ -330,20 +288,36 @@ class TransientSet(MutableSet, Transient):
      * `__rand__` (`Set`)
      * `__rxor__` (`Set`)
      * `__rsub__` (`Set`)
-     * `__ior__` (`MutableSet`)
-     * `__iand__` (`MutableSet`)
-     * `__ixor__` (`MutableSet`)
-     * `__isub__` (`MutableSet`)
-     * `copy()` (`Transient`)
+     * `isdisjoint` (`Set`)
+     * `copy()` (`Persistent`)
      * `pop()`
      * `remove(value)`
      * `addall(values)`
      * `discardall(values)`
      * `removeall(values)`
+     * `__reduce__` (for pickling)
     """
     # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
+    __slots__ = ()
+
+
+#===============================================================================
+# _TransientSetBase
+
+class _TransientSetBase(Transient):
+    """Plain (non-``ABCMeta``) mixin holding ``TransientSet``'s concrete
+    method bodies, so that ``pcollections._c.set.tset`` can inherit them
+    without inheriting ``ABCMeta`` anywhere in its base chain -- see
+    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
+    3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
+    can subclass it directly.)
+
+    As with ``_PersistentSetBase``, this is a pure relocation of
+    ``TransientSet``'s already-self-contained methods -- nothing here is a new
+    port from stdlib ``collections.abc.Set``/``MutableSet``.
+    """
     __slots__ = ()
     # Methods which must be implemented in the children.
     def add(self, obj):
@@ -422,7 +396,7 @@ class TransientSet(MutableSet, Transient):
         return t
     def symmetric_difference_update(self, other):
         """Update a set with the symmetric difference of itself and another."""
-        self ^= arg
+        self ^= other
     def symmetric_difference(self, other):
         """Return the symmetric difference of two sets as a new set.
 
@@ -564,3 +538,67 @@ class TransientSet(MutableSet, Transient):
         return self.persistent().transient()
     def __reduce__(self):
         return (self.__new__, (type(self), list(self),))
+
+
+#===============================================================================
+# TransientSet
+
+class TransientSet(_TransientSetBase, MutableSet, Transient):
+    """All the operations on a transient set.
+
+    Transient sets are mutable sets (i.e., objects that inherit from
+    `collections.abc.MutableSet`), but they differ from other mutable sets in
+    that they support efficient updating by means of efficiently producing
+    copies of themselves that incorporate requested changes.
+
+    The following abstract methods must be implemented; if these methods are
+    inherited from a superclass of `TransientSet`, that class is noted in
+    parentheses.
+     * `__len__` (`Sized`)
+     * `__contains__` (`Container`)
+     * `__iter__` (`Iterable`)
+     * `add(object)` (`MutableSet`)
+     * `discard()`  (`MutableSet`)
+     * `persistent()` (`Transient`)
+     * `clear()`
+     * `__getstate__` (for pickling)
+     * `__setstate__` (for pickling)
+
+    Additionally, `PersistentSequence` includes default implementations of the
+    following methods, which may or may not be optimal for any particular
+    base-class.
+     * `__setattr__` (`object`; raises a `TypeError`)
+     * `__setitem__` (`object`; raises a `TypeError`)
+     * `__str__` (`object`)
+     * `__repr__` (`object`)
+     * `__eq__` (`object`)
+     * `__ne__` (`object`)
+     * `__hash__` (`Hashable`)
+     * `__lt__` (`Set`)
+     * `__le__` (`Set`)
+     * `__gt__` (`Set`)
+     * `__ge__` (`Set`)
+     * `isdisjoint` (`Set`)
+     * `__or__` (`Set`)
+     * `__and__` (`Set`)
+     * `__xor__` (`Set`)
+     * `__sub__` (`Set`)
+     * `__ror__` (`Set`)
+     * `__rand__` (`Set`)
+     * `__rxor__` (`Set`)
+     * `__rsub__` (`Set`)
+     * `__ior__` (`MutableSet`)
+     * `__iand__` (`MutableSet`)
+     * `__ixor__` (`MutableSet`)
+     * `__isub__` (`MutableSet`)
+     * `copy()` (`Transient`)
+     * `pop()`
+     * `remove(value)`
+     * `addall(values)`
+     * `discardall(values)`
+     * `removeall(values)`
+    """
+    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # and anything that mixes it in, from acquiring an instance
+    # __dict__/__weakref__ of its own.
+    __slots__ = ()

@@ -57,10 +57,16 @@ def _discover():
     backends = {'python': _load_python()}
     try:
         backends['c'] = _load_c()
-    except ImportError:
+    except (ImportError, TypeError):
         # The compiled extension modules aren't available in this
-        # environment (not built, or built for a different Python/platform)
-        # -- the suite simply runs python-only in that case.
+        # environment (not built, or built for a different Python/platform),
+        # or are built but unusable on this interpreter -- e.g. CPython
+        # 3.14 raises TypeError (not ImportError) from PyInit_dict() and
+        # friends, since it now rejects the heap types _c/dict.c (etc.)
+        # build on top of pcollections.abc's ABCMeta-based mixins; see
+        # pcollections/__init__.py's _load_c_backend() docstring for the
+        # full explanation -- either way, the suite simply runs python-only
+        # in that case, matching pcollections/__init__.py's own fallback.
         pass
     return backends
 
