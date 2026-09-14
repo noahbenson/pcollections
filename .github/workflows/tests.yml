@@ -97,6 +97,11 @@ jobs:
       # Log the Python Version
       - name: Display Python version
         run: python --version
+      - name: Diagnose C extension build (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: |
+          python setup.py build_ext --inplace --verbose
       # Run the actual tests.
       - name: Run Tests
         run: |
