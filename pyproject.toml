@@ -17,7 +17,7 @@ description = "A persistent collections library for Python"
 authors = [
     {name="Noah C. Benson", email="nben@uw.edu"}
 ]
-license = {file="LICENSE"}
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.7"
 
@@ -25,7 +25,6 @@ keywords = ["persistent", "immutable", "functional", "lazy"]
 
 classifiers = [
     'Intended Audience :: Developers',
-    'License :: OSI Approved :: MIT License',
     'Programming Language :: Python :: 3',
     'Programming Language :: Python :: 3.7',
     'Programming Language :: Python :: 3.8',
