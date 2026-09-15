@@ -47,8 +47,9 @@ jobs:
         arch:
           - 'x64'
         include:
-          - {"os": "macos-15-intel", "arch": "x64", "version": "3.7"}
-          - {"os": "windows-latest", "arch": "x64", "version": "3.7"}
+          # 3.7 is no longer supported.
+          #- {"os": "macos-15-intel", "arch": "x64", "version": "3.7"}
+          #- {"os": "windows-latest", "arch": "x64", "version": "3.7"}
           # Apple Silicon (arm64): pcollections now ships C extensions, and
           # Apple Silicon's stricter alignment/atomics behavior is exactly
           # the kind of thing that can differ from x64 for lazy.c's
@@ -152,11 +153,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Same version list the main `test` job uses for ubuntu-latest
-        # (that job's '3.7' entries deliberately target macos-13/
-        # windows-latest instead -- ubuntu-latest doesn't offer a 3.7
-        # build via actions/setup-python -- so this list matches that
-        # constraint rather than introducing a new, unrelated CI failure).
         version:
           - '3.8'
           - '3.9'
