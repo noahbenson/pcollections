@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0.3", "wheel"]
+requires = ["setuptools>=61<77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -17,8 +17,7 @@ description = "A persistent collections library for Python"
 authors = [
     {name="Noah C. Benson", email="nben@uw.edu"}
 ]
-license = "MIT"
-license-files = ["LICENSE"]
+license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.7"
 
