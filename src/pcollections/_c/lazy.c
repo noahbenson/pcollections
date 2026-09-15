@@ -1122,7 +1122,24 @@ static PyType_Spec ldict_spec = {
    .name = "pcollections._c.lazy.ldict",
    .basicsize = sizeof(PDictObject),
    .itemsize = 0,
-   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+   // Py_TPFLAGS_BASETYPE: ldict is subclassable in C, matching pdict/tdict's
+   // own Py_TPFLAGS_BASETYPE (see pdict_spec's comment above) -- there was no
+   // deliberate reason to withhold this from ldict/tldict/llist/tllist in
+   // particular (contrast lazy_spec's own flags just above, which *does*
+   // document a real reason for staying non-subclassable: a `lazy` cell's
+   // identity). Construction already threads the subclass's `type` through
+   // to PDictType->tp_new (see ldict_new below), and ldict_gc_traverse/
+   // ldict_gc_clear already forward to PDictType's own slots at runtime
+   // rather than assuming LDictType specifically, so both already work
+   // correctly for a further Python-level subclass. The one caveat -- shared
+   // with pdict/tdict already, not new here -- is that ldict_transient()/
+   // tldict_persistent() (like pdict_transient()/tdict_persistent() in
+   // dict.c) always build a plain tldict/ldict rather than preserving a
+   // subclass's type, since transient()/persistent() are cross-family
+   // conversions, not same-family updates; see this file's ldict_transient()
+   // and dict.c's pdict_wrap()/tdict_wrap() for the established, symmetric
+   // pattern this follows.
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = ldict_slots,
 };
 
@@ -1358,7 +1375,9 @@ static PyType_Spec tldict_spec = {
    .name = "pcollections._c.lazy.tldict",
    .basicsize = sizeof(TDictObject),
    .itemsize = 0,
-   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+   // Py_TPFLAGS_BASETYPE: see ldict_spec's comment above -- same reasoning
+   // applies symmetrically to tldict.
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = tldict_slots,
 };
 
@@ -1642,7 +1661,10 @@ static PyType_Spec llist_spec = {
    .name = "pcollections._c.lazy.llist",
    .basicsize = sizeof(PListObject),
    .itemsize = 0,
-   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+   // Py_TPFLAGS_BASETYPE: see ldict_spec's comment above -- same reasoning
+   // applies symmetrically to llist (and, via plist/tlist's own
+   // Py_TPFLAGS_BASETYPE in list.c, mirrors that pair's own subclassability).
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = llist_slots,
 };
 
@@ -1716,7 +1738,9 @@ static PyType_Spec tllist_spec = {
    .name = "pcollections._c.lazy.tllist",
    .basicsize = sizeof(TListObject),
    .itemsize = 0,
-   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+   // Py_TPFLAGS_BASETYPE: see ldict_spec's comment above -- same reasoning
+   // applies symmetrically to tllist.
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = tllist_slots,
 };
 
