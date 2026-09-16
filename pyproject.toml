@@ -32,6 +32,7 @@ classifiers = [
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
     'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: 3.15',
     'Programming Language :: Python :: Free Threading :: 3 - Stable',
     'Programming Language :: C',
     'Typing :: Typed',
@@ -56,12 +57,12 @@ documentation = "https://nben.net/pcollections/"
 repository = "https://github.com/noahbenson/pcollections"
 changelog = "https://nben.net/pcollections/changelog.html"
 
-# Wheel builds (.github/workflows/deploy.yml, via cibuildwheel): CPython only,
-# 64-bit only, including the free-threaded 3.14 build. A wheel whose C
-# extension failed to compile fails its test command, so it is never
-# published; that platform gets the sdist instead.
+# Wheel builds (.github/workflows/deploy.yml, via cibuildwheel): CPython
+# only, 64-bit only, including the free-threaded 3.14 and 3.15 builds. A
+# wheel whose C extension failed to compile fails its test command, so it is
+# never published; that platform gets the sdist instead.
 [tool.cibuildwheel]
-build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
+build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
 skip = "*_i686 *-win32"
 test-environment = { PCOLLECTIONS_REQUIRE_C = "1" }
 test-extras = ["test"]

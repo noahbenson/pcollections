@@ -63,8 +63,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      # cibuildwheel 4 builds wheels for Python 3.9 and later; version 3.4,
+      # the last to support Python 3.8, builds the 3.8 wheels.
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2
+      - name: Build wheels (Python 3.8)
+        uses: pypa/cibuildwheel@v3.4
+        env:
+          CIBW_BUILD: 'cp38-*'
       - name: Upload the wheels
         uses: actions/upload-artifact@v4
         with:

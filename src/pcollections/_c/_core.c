@@ -68,9 +68,12 @@ static PyMethodDef core_methods[] = {
     "Returns '<lazy>' if obj is a lazy object, otherwise repr(obj)."},
    {"strlazy", (PyCFunction)mod_strlazy, METH_O,
     "Returns '<lazy>' if obj is a lazy object, otherwise str(obj)."},
-   {"holdlazy", (PyCFunction)mod_holdlazy, METH_VARARGS | METH_KEYWORDS,
-    "Returns a persistent version of a lazy collection whose lazy values\n"
-    "remain unevaluated, by calling its __holdlazy__() method if present."},
+   {"holdlazy", (PyCFunction)(void(*)(void))mod_holdlazy,
+    METH_VARARGS | METH_KEYWORDS,
+    "holdlazy(obj, require_lazy=False)\n--\n\n"
+    "Returns a lazy collection as the equivalent plain collection, with its\n"
+    "lazy values uncomputed, by calling obj.__holdlazy__(). Other objects are\n"
+    "returned unchanged, or, if require_lazy is true, raise TypeError."},
    {"_trie_stats", (PyCFunction)mod_trie_stats, METH_O,
     "Diagnostic: (nodes, tracked, violations) for a collection's trie."},
    {NULL, NULL, 0, NULL}
