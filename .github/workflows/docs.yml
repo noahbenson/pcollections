@@ -1,0 +1,55 @@
+################################################################################
+# docs.yml
+# GitHub Actions workflow that builds the documentation and publishes it to
+# GitHub Pages (https://nben.net/pcollections/).
+# by Noah C. Benson
+#
+# In the repository settings, Pages must be set to deploy from GitHub Actions.
+
+name: Docs
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main, dev, 'dev/**' ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build the docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install
+        run: pip install ".[docs]"
+      - name: Check the examples
+        run: python docs/check_examples.py
+      - name: Build
+        # -W turns warnings (such as broken references) into errors.
+        run: sphinx-build -W --keep-going -b html docs docs/_build/html
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  deploy:
+    name: Publish to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: https://nben.net/pcollections/
+    steps:
+      - name: Deploy
+        uses: actions/deploy-pages@v4

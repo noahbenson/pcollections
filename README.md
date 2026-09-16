@@ -6,16 +6,20 @@ A persistent collections library for Python.
 ## About
 
 `pcollections` is a library of persistent (immutable) collections inspired by
-the immutable data structures of [Clojure](clojure.org) but built to resemble
-the native Python collections as closely as possible. The library is implemented
-in Python but employs the [`phamt`](https://github.com/noahbenson/phamt)
-(Persistent Hash Array Mapped Tries) library, which is implemented in C, to
-perform efficient low-level operations.
+the immutable data structures of [Clojure](https://clojure.org) but built to
+resemble the native Python collections as closely as possible. It is
+implemented in C, with a pure-Python fallback, and has no dependencies.
+
+Documentation: <https://nben.net/pcollections/>
+
+```sh
+pip install pcollections
+```
 
 The library implements three persistent types: `plist`, `pset`, and
 `pdict`. These are immutable versions of the builtin `list`, `set`, and `dict`
 types. The persistent object interfaces are as similar as possible to the native
-types, but the method signatures differ in ways necessary to accomodate
+types, but the method signatures differ in ways necessary to accommodate
 efficient immutable ways of doing things. For example, the `pdict` constructor
 is identical to the `dict` constructor and always returns a `pdict` equal to the
 `dict` that would be created with the same arguments. However, instead of
@@ -26,7 +30,7 @@ In addition to the persistent types, there are two lazy types, `llist` and
 `ldict`. These types are enabled by the `lazy` type. A `lazy` object is
 basically a `partial` object that, when called, caches the function's return
 value and returns that value without rerunning the function on subsequent
-calls. The `llist` and `ldict `types are equivalent to the `plist` and `pdict`
+calls. The `llist` and `ldict` types are equivalent to the `plist` and `pdict`
 types with one exception. Elements of an `llist` and values of an `ldict` that
 are of the `lazy` type are dereferenced when requested. This allows a programmer
 to easily create data structures (potentially nested data structures) whose
@@ -62,10 +66,10 @@ these lazy functions to be safe from mutation.
 - `lazy` can be subclassed. A subclass may override `__call__` and call
   `super().__call__()`; lazy collections and `unlazy` call the override.
 
-Finally, the persistent and lazy types have transient correlaries that enable
+Finally, the persistent and lazy types have transient counterparts that enable
 more efficient batch-mutation of the persistent types. The transient types
 `tlist`, `tset`, `tdict`, `tllist`, and `tldict` all have interfaces equivalent
-to their standard mutable correlaries (transient types are mutable).
+to their standard mutable counterparts (transient types are mutable).
 
 ### Threads
 
@@ -83,6 +87,9 @@ iterating over a `tlist` while changing it behaves like iterating over a
 `list`.
 
 ### Behavior shared with the builtins
+
+See [Differences from the builtins](https://nben.net/pcollections/differences.html)
+for the full list.
 
 - Lookups match objects by identity or equality, as `dict`, `set`, and `list`
   do, so `nan in pset([nan])` is true when `nan` is the same object.
@@ -135,7 +142,7 @@ Objects pickled with one backend can be unpickled with the other.
 
 MIT License
 
-Copyright (c) 2022-2023 Noah C. Benson
+Copyright (c) 2022-2026 Noah C. Benson
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
