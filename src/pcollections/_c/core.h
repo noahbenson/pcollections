@@ -37,9 +37,10 @@
 // instance exists. On 3.8, which lacks that API, only one interpreter per
 // process may load the module, and its state is never freed.
 //
-// Trie nodes contain no Python objects of their own, and their reference
-// counts are atomic, so the empty-node singletons below are shared by all
-// interpreters.
+// FAT trie nodes are Python objects (see trie.h), so their types and the
+// canonical empty FAT nodes are part of the state. AMT nodes are plain C
+// memory holding no Python objects, so the canonical empty AMT nodes are
+// shared by all interpreters.
 
 #ifndef PCOLLECTIONS__C_CORE_H
 #define PCOLLECTIONS__C_CORE_H
@@ -137,7 +138,6 @@ typedef struct pcoll_state {
    PyTypeObject* PDictIterType;
    PyTypeObject* TDictIterType;
    struct PDictObject* g_pdict_empty;
-   PyObject* g_dict_dummy;
    PyObject* g_abc_Mapping;
    PyObject* g_abc_Sized;
    // list.c.h
@@ -152,7 +152,6 @@ typedef struct pcoll_state {
    PyTypeObject* PSetIterType;
    PyTypeObject* TSetIterType;
    struct PSetObject* g_pset_empty;
-   PyObject* g_set_dummy;
    // lazy.c.h
    PyTypeObject* LazyType;
    PyTypeObject* LazyErrorType;
@@ -172,6 +171,14 @@ typedef struct pcoll_state {
    PyObject* g_pdict_get;
    PyObject* g_tdict_get;
    PyObject* g_tdict_pop;
+   // trie nodes: one FAT node type per cell size (1, 2, or 3 pointers),
+   // and the canonical empty FAT for each leaf size.
+   PyTypeObject* FatNode1Type;
+   PyTypeObject* FatNode2Type;
+   PyTypeObject* FatNode3Type;
+   struct TrieData* g_fat_empty1;
+   struct TrieData* g_fat_empty2;
+   struct TrieData* g_fat_empty3;
    // shared
    PyObject* g_seqstr;
 } pcoll_state;
@@ -189,7 +196,6 @@ typedef struct pcoll_state {
    X((st)->PDictIterType);\
    X((st)->TDictIterType);\
    X((st)->g_pdict_empty);\
-   X((st)->g_dict_dummy);\
    X((st)->g_abc_Mapping);\
    X((st)->g_abc_Sized);\
    X((st)->PListType);\
@@ -202,7 +208,6 @@ typedef struct pcoll_state {
    X((st)->PSetIterType);\
    X((st)->TSetIterType);\
    X((st)->g_pset_empty);\
-   X((st)->g_set_dummy);\
    X((st)->LazyType);\
    X((st)->LazyErrorType);\
    X((st)->LazyErrorUnwrapperType);\
@@ -221,6 +226,12 @@ typedef struct pcoll_state {
    X((st)->g_pdict_get);\
    X((st)->g_tdict_get);\
    X((st)->g_tdict_pop);\
+   X((st)->FatNode1Type);\
+   X((st)->FatNode2Type);\
+   X((st)->FatNode3Type);\
+   X((st)->g_fat_empty1);\
+   X((st)->g_fat_empty2);\
+   X((st)->g_fat_empty3);\
    X((st)->g_seqstr);
 
 // The registry: one entry per interpreter that has executed the module.
@@ -353,57 +364,6 @@ static inline pcoll_state* pcoll_get_state(void) {
    return pcoll_get_state_slow(id, gen);
 }
 #define ST(name) (pcoll_get_state()->name)
-
-
-//=============================================================================
-// Canonical empty trie nodes.
-// fat_empty()/amt_empty() (declared in fat.h/amt.h) return a new reference to
-// the shared empty node for a given leaf size. The nodes are created by
-// pcoll_create_empty_tries() at module execution, under the registry lock,
-// for every leaf size the module uses; a request for any other size creates
-// its node on demand under the same lock.
-
-static Trie_t g_fat_empty_singletons[256];
-static Trie_t g_amt_empty_singletons[256];
-
-static Trie_t pcoll_make_fat_empty(uint8_t leafsize) {
-   Trie_t t = fatnode_new(0, leafsize, FAT_MAX_DEPTH, false);
-   t->header.bits = 0;
-   trienode_incref(t);  // permanent hold: the singleton is never freed.
-   return t;
-}
-static Trie_t pcoll_make_amt_empty(uint8_t leafsize) {
-   // amtnode_new() (not amtnode_alloc()) so the header is initialized.
-   Trie_t t = amtnode_new(0, leafsize, AMT_MAX_DEPTH, 0, false);
-   t->header.bits = 0;
-   trienode_incref(t);  // permanent hold: the singleton is never freed.
-   return t;
-}
-
-Trie_t fat_empty(uint8_t leafsize) {
-   Trie_t t = g_fat_empty_singletons[leafsize];
-   if (!t) {
-      PCOLL_MUTEX_LOCK(&g_registry_lock);
-      if (!g_fat_empty_singletons[leafsize])
-         g_fat_empty_singletons[leafsize] = pcoll_make_fat_empty(leafsize);
-      t = g_fat_empty_singletons[leafsize];
-      PCOLL_MUTEX_UNLOCK(&g_registry_lock);
-   }
-   trienode_incref(t);
-   return t;
-}
-Trie_t amt_empty(uint8_t leafsize) {
-   Trie_t t = g_amt_empty_singletons[leafsize];
-   if (!t) {
-      PCOLL_MUTEX_LOCK(&g_registry_lock);
-      if (!g_amt_empty_singletons[leafsize])
-         g_amt_empty_singletons[leafsize] = pcoll_make_amt_empty(leafsize);
-      t = g_amt_empty_singletons[leafsize];
-      PCOLL_MUTEX_UNLOCK(&g_registry_lock);
-   }
-   trienode_incref(t);
-   return t;
-}
 
 
 //=============================================================================
@@ -597,6 +557,174 @@ static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen,
    Py_DECREF(args);
    Py_DECREF(kwargs);
    return result;
+}
+
+//=============================================================================
+// FAT node types.
+// FAT nodes are instances of three internal heap types, one per cell size (a
+// branch's cells, and a list twig's leaves, are one pointer; a set twig's
+// leaves are two; a dict twig's leaves are three). The types share the
+// functions below, which find a twig's references using fatleaf_nrefs().
+
+static PyTypeObject* pcoll_fat_nodetype(size_t cellsize) {
+   pcoll_state* st = pcoll_get_state();
+   switch (cellsize / sizeof(void*)) {
+      case 1: return st->FatNode1Type;
+      case 2: return st->FatNode2Type;
+      case 3: return st->FatNode3Type;
+      default:
+         Py_FatalError("pcollections: unsupported FAT cell size");
+         return NULL;
+   }
+}
+
+// Releases the references held by the `bits` cells of `cells`, which belong
+// to a node of the given depth and leaf size.
+static void fatnode_release(uint8_t depth, uint8_t leafsize, triebits_t bits,
+                            const char* cells) {
+   triebits_t bi;
+   while (bits) {
+      bi = ctz_triebits(bits);
+      bits &= bits - 1;
+      if (depth == FAT_MAX_DEPTH) {
+         PyObject* const* refs = (PyObject* const*)(cells + bi * leafsize);
+         int i, n = fatleaf_nrefs(leafsize);
+         for (i = 0; i < n; ++i)
+            Py_XDECREF(refs[i]);
+      } else {
+         Py_DECREF(((PyObject* const*)cells)[bi]);
+      }
+   }
+}
+
+static int fatnode_traverse(PyObject* self, visitproc visit, void* arg) {
+   Trie_t t = (Trie_t)self;
+   triebits_t bi;
+   PCOLL_VISIT_TYPE(self);
+   if (fatnode_is_twig(t)) {
+      uint8_t ls = t->header.leafsize;
+      int i, n = fatleaf_nrefs(ls);
+      for (bi = trienode_first_bitindex(t); bi < FAT_CELLS;
+           bi = trienode_next_bitindex(t, bi)) {
+         PyObject** refs = (PyObject**)trienode_leaf(t, bi);
+         for (i = 0; i < n; ++i)
+            Py_VISIT(refs[i]);
+      }
+   } else {
+      for (bi = trienode_first_bitindex(t); bi < FAT_CELLS;
+           bi = trienode_next_bitindex(t, bi))
+         Py_VISIT((PyObject*)trienode_subt(t, bi));
+   }
+   return 0;
+}
+
+// Empties the node (breaking reference cycles), then releases what it held.
+static int fatnode_clear(PyObject* self) {
+   Trie_t t = (Trie_t)self;
+   size_t nbytes = (size_t)FAT_CELLS * fatnode_cellsize(t);
+   char saved[FAT_CELLS * 3 * sizeof(void*)];
+   triebits_t bits = t->header.bits;
+   if (!bits) return 0;
+   memcpy(saved, t->cells, nbytes);
+   t->header.bits = 0;
+   memset(t->cells, 0, nbytes);
+   fatnode_release(t->header.depth, t->header.leafsize, bits, saved);
+   return 0;
+}
+
+static void fatnode_dealloc(PyObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
+   Trie_t t = (Trie_t)self;
+   PyObject_GC_UnTrack(self);
+   // Releasing a node can release its children in turn; the trashcan keeps
+   // deeply nested structures from exhausting the C stack.
+   Py_TRASHCAN_BEGIN(self, fatnode_dealloc)
+   fatnode_release(t->header.depth, t->header.leafsize, t->header.bits,
+                   t->cells);
+   PyObject_GC_Del(self);
+   Py_DECREF(tp);
+   Py_TRASHCAN_END
+}
+
+static PyType_Slot fatnode_slots[] = {
+   {Py_tp_dealloc, (void*)fatnode_dealloc},
+   {Py_tp_traverse, (void*)fatnode_traverse},
+   {Py_tp_clear, (void*)fatnode_clear},
+   {0, NULL}
+};
+#define PCOLL_FATNODE_SPEC(n)                                              \
+   {                                                                       \
+      .name = "pcollections._c._core.FATNode" #n,                          \
+      .basicsize = (int)(sizeof(struct TrieData)                           \
+                         + (size_t)FAT_CELLS * (n) * sizeof(void*)),       \
+      .itemsize = 0,                                                       \
+      .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC                     \
+               | PCOLL_TPFLAGS_INTERNAL,                                   \
+      .slots = fatnode_slots,                                              \
+   }
+static PyType_Spec fatnode1_spec = PCOLL_FATNODE_SPEC(1);
+static PyType_Spec fatnode2_spec = PCOLL_FATNODE_SPEC(2);
+static PyType_Spec fatnode3_spec = PCOLL_FATNODE_SPEC(3);
+
+
+//=============================================================================
+// Canonical empty trie nodes.
+// fat_empty()/amt_empty() (declared in fat.h/amt.h) return a new reference to
+// the canonical empty node for a leaf size. The empty FAT nodes belong to the
+// interpreter's state (see pcoll_exec_trie_types()); they are tracked by the
+// collector so that the references they hold to their types are visible.
+// The empty AMT nodes are process-wide, created on first use under the
+// registry lock, and never freed.
+
+static Trie_t g_amt_empty_singletons[256];
+
+Trie_t fat_empty(uint8_t leafsize) {
+   pcoll_state* st = pcoll_get_state();
+   Trie_t t;
+   switch (leafsize / sizeof(void*)) {
+      case 1: t = st->g_fat_empty1; break;
+      case 2: t = st->g_fat_empty2; break;
+      case 3: t = st->g_fat_empty3; break;
+      default:
+         Py_FatalError("pcollections: unsupported FAT leaf size");
+         return NULL;
+   }
+   trienode_incref(t);
+   return t;
+}
+
+Trie_t amt_empty(uint8_t leafsize) {
+   Trie_t t = g_amt_empty_singletons[leafsize];
+   if (!t) {
+      PCOLL_MUTEX_LOCK(&g_registry_lock);
+      if (!g_amt_empty_singletons[leafsize]) {
+         Trie_t e = amtnode_new(0, leafsize, AMT_MAX_DEPTH, 0, false);
+         trienode_incref(e);  // permanent hold: never freed.
+         g_amt_empty_singletons[leafsize] = e;
+      }
+      t = g_amt_empty_singletons[leafsize];
+      PCOLL_MUTEX_UNLOCK(&g_registry_lock);
+   }
+   trienode_incref(t);
+   return t;
+}
+
+// Creates this interpreter's FAT node types and empty FAT nodes.
+static int pcoll_exec_trie_types(PyObject* m, pcoll_state* st) {
+   if (!(st->FatNode1Type = pcoll_new_internal_type(m, &fatnode1_spec)) ||
+       !(st->FatNode2Type = pcoll_new_internal_type(m, &fatnode2_spec)) ||
+       !(st->FatNode3Type = pcoll_new_internal_type(m, &fatnode3_spec)))
+      return -1;
+   st->g_fat_empty1 = fatnode_new(0, (uint8_t)sizeof(void*),
+                                  FAT_MAX_DEPTH, false);
+   st->g_fat_empty2 = fatnode_new(0, (uint8_t)(2 * sizeof(void*)),
+                                  FAT_MAX_DEPTH, false);
+   st->g_fat_empty3 = fatnode_new(0, (uint8_t)(3 * sizeof(void*)),
+                                  FAT_MAX_DEPTH, false);
+   PyObject_GC_Track((PyObject*)st->g_fat_empty1);
+   PyObject_GC_Track((PyObject*)st->g_fat_empty2);
+   PyObject_GC_Track((PyObject*)st->g_fat_empty3);
+   return 0;
 }
 
 #endif // PCOLLECTIONS__C_CORE_H

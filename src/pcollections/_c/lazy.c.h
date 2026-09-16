@@ -1561,18 +1561,6 @@ static PyObject* mod_holdlazy(PyObject* self, PyObject* args, PyObject* kwds) {
    return obj;
 }
 
-static PyMethodDef lazy_module_methods[] = {
-   {"unlazy", (PyCFunction)mod_unlazy, METH_O,
-    "Returns the cached value of a lazy object, or the object itself if it is not lazy."},
-   {"reprlazy", (PyCFunction)mod_reprlazy, METH_O,
-    "Returns '<lazy>' if obj is a lazy object, otherwise repr(obj)."},
-   {"strlazy", (PyCFunction)mod_strlazy, METH_O,
-    "Returns '<lazy>' if obj is a lazy object, otherwise str(obj)."},
-   {"holdlazy", (PyCFunction)mod_holdlazy, METH_VARARGS | METH_KEYWORDS,
-    "Returns a persistent version of a lazy collection whose lazy values\n"
-    "remain unevaluated, by calling its __holdlazy__() method if present."},
-   {NULL, NULL, 0, NULL}
-};
 
 //=============================================================================
 // Module execution.

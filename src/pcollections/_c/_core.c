@@ -16,6 +16,68 @@
 
 
 //=============================================================================
+// Diagnostics.
+
+// Walks a FAT tree, counting nodes and tracked nodes, and counting
+// violations of the tracking rule (a node that needs tracking but isn't).
+static void trie_stats_walk(Trie_t t, Py_ssize_t* nodes, Py_ssize_t* tracked,
+                            Py_ssize_t* bad) {
+   triebits_t bi;
+   ++*nodes;
+   if (PCOLL_GC_IS_TRACKED(t)) ++*tracked;
+   else if (fatnode_wants_tracking(t)) ++*bad;
+   if (Py_REFCNT((PyObject*)t) < 1) ++*bad;
+   if (!fatnode_is_twig(t))
+      for (bi = trienode_first_bitindex(t); bi < FAT_CELLS;
+           bi = trienode_next_bitindex(t, bi))
+         trie_stats_walk(trienode_subt(t, bi), nodes, tracked, bad);
+}
+
+// _trie_stats(collection) -> (nodes, tracked, violations) for the FAT tree
+// behind a pdict, tdict, pset, tset, plist, or tlist (or subclass). Used by
+// the test suite.
+static PyObject* mod_trie_stats(PyObject* self, PyObject* obj) {
+   pcoll_state* st = pcoll_get_state();
+   Trie_t root;
+   Py_ssize_t nodes = 0, tracked = 0, bad = 0;
+   (void)self;
+   if (PyObject_TypeCheck(obj, st->PDictType))
+      root = ((PDictObject*)obj)->els;
+   else if (PyObject_TypeCheck(obj, st->TDictType))
+      root = ((TDictObject*)obj)->els;
+   else if (PyObject_TypeCheck(obj, st->PSetType))
+      root = ((PSetObject*)obj)->els;
+   else if (PyObject_TypeCheck(obj, st->TSetType))
+      root = ((TSetObject*)obj)->els;
+   else if (PyObject_TypeCheck(obj, st->PListType))
+      root = ((PListObject*)obj)->root;
+   else if (PyObject_TypeCheck(obj, st->TListType))
+      root = ((TListObject*)obj)->root;
+   else {
+      PyErr_SetString(PyExc_TypeError, "expected a pcollections collection");
+      return NULL;
+   }
+   trie_stats_walk(root, &nodes, &tracked, &bad);
+   return Py_BuildValue("(nnn)", nodes, tracked, bad);
+}
+
+static PyMethodDef core_methods[] = {
+   {"unlazy", (PyCFunction)mod_unlazy, METH_O,
+    "Returns the cached value of a lazy object, or the object itself if it is not lazy."},
+   {"reprlazy", (PyCFunction)mod_reprlazy, METH_O,
+    "Returns '<lazy>' if obj is a lazy object, otherwise repr(obj)."},
+   {"strlazy", (PyCFunction)mod_strlazy, METH_O,
+    "Returns '<lazy>' if obj is a lazy object, otherwise str(obj)."},
+   {"holdlazy", (PyCFunction)mod_holdlazy, METH_VARARGS | METH_KEYWORDS,
+    "Returns a persistent version of a lazy collection whose lazy values\n"
+    "remain unevaluated, by calling its __holdlazy__() method if present."},
+   {"_trie_stats", (PyCFunction)mod_trie_stats, METH_O,
+    "Diagnostic: (nodes, tracked, violations) for a collection's trie."},
+   {NULL, NULL, 0, NULL}
+};
+
+
+//=============================================================================
 // Module state lifecycle.
 
 #if PY_VERSION_HEX >= 0x03090000
@@ -87,13 +149,11 @@ static int core_exec(PyObject* m) {
    g_state_38_owner = m;
 #endif
 
-   // Create the shared empty tries for every leaf size the parts use, so
-   // later lookups never need the lock. (Each call returns a reference,
-   // which is released immediately; the singleton keeps its own.)
-   fatnode_decref(fat_empty(ELSLEAFSIZE), NULL);
+   if (pcoll_exec_trie_types(m, st) < 0) return -1;
+   // Create the shared empty AMTs for the leaf sizes the parts use, so later
+   // lookups never need the lock. (Each call returns a reference, which is
+   // released immediately; the singleton keeps its own.)
    amtnode_decref(amt_empty(IDXLEAFSIZE), NULL);
-   fatnode_decref(fat_empty(PYLEAFSIZE), NULL);
-   fatnode_decref(fat_empty(SETELSLEAFSIZE), NULL);
    amtnode_decref(amt_empty(SETIDXLEAFSIZE), NULL);
 
    util = PyImport_ImportModule("pcollections.util");
@@ -126,7 +186,7 @@ static PyModuleDef core_module = {
    .m_name = "pcollections._c._core",
    .m_doc = "C implementations of the pcollections types.",
    .m_size = PCOLL_MODULE_STATE_SIZE,
-   .m_methods = lazy_module_methods,
+   .m_methods = core_methods,
    .m_slots = core_slots,
    .m_traverse = core_traverse,
    .m_clear = core_clear,

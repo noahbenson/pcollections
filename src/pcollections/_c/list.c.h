@@ -70,28 +70,6 @@
 #define LIST_START_MID ((trieint_t)1 << (TRIEINT_WIDTH - 1))
 
 
-//=============================================================================
-// A small recursive GC traversal helper shared by both types: visits every
-// PyObject* leaf reachable from `node`. Recursion depth is bounded by
-// FAT_MAX_DEPTH (a small constant, e.g. 13 for a 64-bit trieint_t), so this
-// is always safe on the C stack.
-static int fat_gc_traverse(Trie_t node, visitproc visit, void* arg) {
-   triebits_t bi;
-   if (fatnode_is_twig(node)) {
-      for (bi = trienode_first_bitindex(node); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(node, bi)) {
-         PyObject* obj = *(PyObject**)trienode_leaf(node, bi);
-         Py_VISIT(obj);
-      }
-   } else {
-      for (bi = trienode_first_bitindex(node); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(node, bi)) {
-         int r = fat_gc_traverse(trienode_subt(node, bi), visit, arg);
-         if (r) return r;
-      }
-   }
-   return 0;
-}
 
 
 //=============================================================================
@@ -190,7 +168,7 @@ static PyObject* plist_type_empty(PyTypeObject* type) {
 
 static int plist_traverse(PListObject* self, visitproc visit, void* arg) {
    PCOLL_VISIT_TYPE(self);
-   if (self->root) return fat_gc_traverse(self->root, visit, arg);
+   Py_VISIT((PyObject*)self->root);
    return 0;
 }
 static int plist_clear(PListObject* self) {
@@ -652,7 +630,7 @@ static PyObject* tlist_wrap(Trie_t root, trieint_t start, Py_ssize_t length,
 static int tlist_traverse(TListObject* self, visitproc visit, void* arg) {
    PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->orig);
-   if (self->root) return fat_gc_traverse(self->root, visit, arg);
+   Py_VISIT((PyObject*)self->root);
    return 0;
 }
 static int tlist_clear(TListObject* self) {

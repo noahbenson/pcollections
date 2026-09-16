@@ -27,9 +27,9 @@
 # most of their layout and code, as much functionality as possible is placed
 # in the trienode_* functions." In C, what's left genuinely different
 # between them is entirely about *memory layout* performance: FAT uses a
-# fixed 29-way branching factor (chosen so one node fits in 256 bytes / 4
-# cache lines, see _c/trie.h's FAT_CELLS comment) with every one of its 29
-# cells physically always allocated regardless of occupancy, and maintains a
+# fixed branching factor (FAT_CELLS in _c/trie.h, chosen so one node fits in
+# 256 bytes / 4 cache lines) with every one of its cells physically always
+# allocated regardless of occupancy, and maintains a
 # "dense tree" invariant (every depth from a node down to its leaves is
 # explicitly materialized, even a branch with only 1 occupied cell) rather
 # than AMT's "minimal tree" invariant (single-child branches are collapsed

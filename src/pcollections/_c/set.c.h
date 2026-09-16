@@ -110,27 +110,6 @@ static void set_make_tombstone(SetEntry* out) {
 }
 
 
-//=============================================================================
-// A small recursive GC traversal helper: visits every PyObject* (the key of
-// every entry) reachable from an `els` FAT tree.
-static int set_gc_traverse(Trie_t node, visitproc visit, void* arg) {
-   triebits_t bi;
-   if (fatnode_is_twig(node)) {
-      for (bi = trienode_first_bitindex(node); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(node, bi)) {
-         SetEntry* e = (SetEntry*)trienode_leaf(node, fatnode_bit2cellindex(node, bi));
-         Py_VISIT(e->key);
-      }
-   } else {
-      for (bi = trienode_first_bitindex(node); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(node, bi)) {
-         int r = set_gc_traverse(trienode_subt(node, fatnode_bit2cellindex(node, bi)),
-                                  visit, arg);
-         if (r) return r;
-      }
-   }
-   return 0;
-}
 
 
 //=============================================================================
@@ -201,7 +180,8 @@ typedef struct PSetObject {
 
 static int pset_traverse(PSetObject* self, visitproc visit, void* arg) {
    PCOLL_VISIT_TYPE(self);
-   return self->els ? set_gc_traverse(self->els, visit, arg) : 0;
+   Py_VISIT((PyObject*)self->els);
+   return 0;
 }
 static int pset_clear(PSetObject* self) {
    Trie_t els = self->els, idx = self->idx;
@@ -583,7 +563,8 @@ typedef struct {
 static int tset_traverse(TSetObject* self, visitproc visit, void* arg) {
    PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->orig);
-   return self->els ? set_gc_traverse(self->els, visit, arg) : 0;
+   Py_VISIT((PyObject*)self->els);
+   return 0;
 }
 static int tset_clear(TSetObject* self) {
    Trie_t els = self->els, idx = self->idx;

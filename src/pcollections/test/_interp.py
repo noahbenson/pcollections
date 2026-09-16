@@ -71,9 +71,6 @@ for k in range(0, 2000, 3):
     del t[k]
 t['x'] = pc.plist(range(100))
 d2 = t.persistent()
-# (t and d2 now share trie nodes; drop t before the collector can run, to
-# stay clear of the known shared-node GC accounting bug.)
-del t
 assert len(d2) == 2000 - len(range(0, 2000, 3)) + 1
 assert d2['x'][99] == 99 and d[0] == '0'
 s = pc.pset(range(500)).discard(3).add(-1)
@@ -81,7 +78,7 @@ assert 3 not in s and -1 in s
 ld = pc.ldict(a=pc.lazy(lambda: 41 + 1))
 assert ld['a'] == 42
 assert pickle.loads(pickle.dumps(d2)) == d2
-del d, d2, s, ld
+del d, t, d2, s, ld
 gc.collect()
 '''
 

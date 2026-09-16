@@ -22,8 +22,6 @@ import textwrap
 
 from ._backends import make_tests, known_failure
 
-import sysconfig
-_FREE_THREADED = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
 
 
 _PKG_PARENT = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -105,12 +103,7 @@ class _RegressionTests:
     # reports every item in the shared nodes, the collector over-counts
     # internal references and can decide a live, externally referenced
     # object is garbage.
-    @known_failure('c')
     def test_gc_shared_nodes_keep_items_alive(self):
-        if _FREE_THREADED and self.backend_name == 'c':
-            # Whether the bug shows up depends on the free-threaded
-            # collector's version; skip rather than guess.
-            self.skipTest("unreliable on free-threaded builds")
         self.run_scenario("""
             def trial(make, selfref, k):
                 gc.collect()

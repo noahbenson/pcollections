@@ -174,29 +174,6 @@ static void dict_make_tombstone(DictEntry* out) {
 }
 
 
-//=============================================================================
-// A small recursive GC traversal helper: visits every PyObject* (both the
-// key and the value of every entry) reachable from an `els` FAT tree. `idx`
-// never needs a traverse -- its leaves are plain integers, not references.
-static int dict_gc_traverse(Trie_t node, visitproc visit, void* arg) {
-   triebits_t bi;
-   if (fatnode_is_twig(node)) {
-      for (bi = trienode_first_bitindex(node); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(node, bi)) {
-         DictEntry* e = (DictEntry*)trienode_leaf(node, fatnode_bit2cellindex(node, bi));
-         Py_VISIT(e->key);
-         Py_VISIT(e->val);
-      }
-   } else {
-      for (bi = trienode_first_bitindex(node); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(node, bi)) {
-         int r = dict_gc_traverse(trienode_subt(node, fatnode_bit2cellindex(node, bi)),
-                                   visit, arg);
-         if (r) return r;
-      }
-   }
-   return 0;
-}
 
 
 //=============================================================================
@@ -309,7 +286,10 @@ static PyObject* pdict_values(PDictObject* self, PyObject* Py_UNUSED(ignored));
 
 static int pdict_traverse(PDictObject* self, visitproc visit, void* arg) {
    PCOLL_VISIT_TYPE(self);
-   return self->els ? dict_gc_traverse(self->els, visit, arg) : 0;
+   // The trie reports its own contents (see fat.h); the idx AMT holds no
+   // Python references.
+   Py_VISIT((PyObject*)self->els);
+   return 0;
 }
 static int pdict_clear(PDictObject* self) {
    Trie_t els = self->els, idx = self->idx;
@@ -809,7 +789,10 @@ typedef struct {
 static int tdict_traverse(TDictObject* self, visitproc visit, void* arg) {
    PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->orig);
-   return self->els ? dict_gc_traverse(self->els, visit, arg) : 0;
+   // The trie reports its own contents (see fat.h); the idx AMT holds no
+   // Python references.
+   Py_VISIT((PyObject*)self->els);
+   return 0;
 }
 static int tdict_clear(TDictObject* self) {
    Trie_t els = self->els, idx = self->idx;
