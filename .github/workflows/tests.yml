@@ -1,90 +1,212 @@
 ################################################################################
 # tests.yml
-# GitHub Actions Workflow for running the tests for the pcollections library.
+# GitHub Actions workflow that runs the pcollections tests.
 # by Noah C. Benson
 
 name: CI
 
-# We run on either pushes or pulls into main or dev branches
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, 'dev/**' ]
     paths-ignore:
       - '**/README.md'
       - '**/.gitignore'
-      - '/.github/workflows/deploy.yml'
+      - 'docs/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/docs.yml'
   pull_request:
-    branches: [ main, dev ]
+    branches: [ main, dev, 'dev/**' ]
     paths-ignore:
       - '**/README.md'
       - '**/.gitignore'
-      - '/.github/workflows/deploy.yml'
-  # We sometimes want to run this manually.
+      - 'docs/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
-  # We also sometimes want to run this from another workflow.
+  # deploy.yml runs this workflow before building a release.
   workflow_call:
 
-# Our only job in this case is to test the code.
 jobs:
+  # The C backend on every supported OS, architecture, and Python version.
+  # The pure-Python backend is tested in the same run (the test suite runs
+  # every test against every available backend).
   test:
-    name: ${{matrix.version}}/${{matrix.os}}/${{matrix.arch}} - ${{github.event_name}}
+    name: ${{ matrix.version }}/${{ matrix.os }}/${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        version:
-          - '3.8'
-          - '3.9'
-          - '3.10'
-          - '3.11'
-          - '3.12'
-          - '3.13'
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-13
-        arch:
-          - 'x64'
+        version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14',
+                  '3.15', '3.13t', '3.14t', '3.15t']
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        arch: ['x64']
         include:
-          - {"os": "macos-13", "arch": "x64", "version": "3.7"}
-          - {"os": "windows-latest", "arch": "x64", "version": "3.7"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.8"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.9"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.10"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.11"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.12"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.13"}
-    # The job environment.
+          - {os: macos-latest, arch: arm64, version: '3.8'}
+          - {os: macos-latest, arch: arm64, version: '3.9'}
+          - {os: macos-latest, arch: arm64, version: '3.10'}
+          - {os: macos-latest, arch: arm64, version: '3.11'}
+          - {os: macos-latest, arch: arm64, version: '3.12'}
+          - {os: macos-latest, arch: arm64, version: '3.13'}
+          - {os: macos-latest, arch: arm64, version: '3.14'}
+          - {os: macos-latest, arch: arm64, version: '3.15'}
+          - {os: macos-latest, arch: arm64, version: '3.14t'}
+          - {os: macos-latest, arch: arm64, version: '3.15t'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.8'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.9'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.10'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.11'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.12'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.13'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.14'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.15'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.14t'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.15t'}
     env:
-      OS: ${{ matrix.os }}
-      ARCH: ${{ matrix.arch }}
-      PYTHON: ${{ matrix.version }}
-    # The steps in the job.
+      # Importing pcollections fails if the C backend didn't build.
+      PCOLLECTIONS_REQUIRE_C: '1'
+      PYTHONFAULTHANDLER: '1'
     steps:
-      # Check out the repository (goes to $GITHUB_WORKSPACE)
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: '2'
-      # Setup the Python Environment.
-      - name: Setup Python Environment
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.version }}
+          # Until Python 3.15.0 is released.
+          allow-prereleases: true
           architecture: ${{ matrix.arch }}
-      - name: Upgrade Setuptools
-        run: |
-          python -m pip install --upgrade setuptools
-      # Log the Python Version
       - name: Display Python version
-        run: python --version
-      # Run the actual tests.
-      - name: Run Tests
+        run: python -VV
+      - name: Install
         run: |
-          pip install -e .
-          #pip install coverage
+          python -m pip install --upgrade pip
+          # --prefer-binary: the newest test dependencies may have no wheel
+          # for some builds (such as 3.13t), and can't be built from source.
+          pip install --prefer-binary -e ".[test]"
+      - name: Check the backend
+        shell: python
+        run: |
+          import sys, sysconfig, pcollections
+          print("C backend:", pcollections.using_c_extension)
+          if sysconfig.get_config_var("Py_GIL_DISABLED"):
+              # Importing the C backend must not re-enable the GIL.
+              print("GIL enabled:", sys._is_gil_enabled())
+              assert not sys._is_gil_enabled()
+      - name: Run tests
+        run: |
           cd ~
-          #coverage run -m pcollections.test
           python -m pcollections.test
-#      - name: Process Code Coverage
-#        uses: codecov/codecov-action@v1
+
+  # The pure-Python backend on its own, with the C extension not built.
+  test-python-only:
+    name: ${{ matrix.version }}/python-only
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14',
+                  '3.15', '3.14t', '3.15t']
+    env:
+      PCOLLECTIONS_NO_C_EXTENSIONS: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.version }}
+          # Until Python 3.15.0 is released.
+          allow-prereleases: true
+      - name: Install (without the C extension)
+        run: pip install --prefer-binary -e ".[test]"
+      - name: Check the backend
+        run: |
+          python -c "import pcollections, sys; sys.exit(0 if not pcollections.using_c_extension else 1)"
+      - name: Run tests
+        run: |
+          cd ~
+          python -m pcollections.test
+
+  # The C extension built with AddressSanitizer and UndefinedBehaviorSanitizer.
+  # PYTHONMALLOC=malloc routes Python's allocations through malloc so that
+  # ASan sees them too.
+  test-sanitizers:
+    name: sanitizers (ASan+UBSan)
+    runs-on: ubuntu-latest
+    env:
+      CFLAGS: '-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined'
+      LDFLAGS: '-fsanitize=address,undefined'
+      # The randomized stress tests run fewer steps under the sanitizers.
+      PCOLLECTIONS_STRESS_STEPS: '20000'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install with sanitizers
+        run: pip install -e .
+      - name: Run tests
+        run: |
+          # The instrumented extension loads only if the ASan runtime is
+          # loaded first.
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so)"
+          export ASAN_OPTIONS=detect_leaks=0
+          export UBSAN_OPTIONS=print_stacktrace=1
+          export PYTHONMALLOC=malloc
+          export PCOLLECTIONS_REQUIRE_C=1
+          cd ~
+          python -m pcollections.test
+
+  # A debug build of CPython, whose consistency checks catch reference
+  # counting mistakes that a release build tolerates. uv provides current
+  # debug builds (Ubuntu's packages lag behind).
+  test-debug-python:
+    name: debug CPython
+    runs-on: ubuntu-latest
+    env:
+      PCOLLECTIONS_REQUIRE_C: '1'
+      PCOLLECTIONS_STRESS_STEPS: '20000'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install debug CPython
+        run: uv python install 3.14+debug
+      - name: Install
+        run: |
+          uv venv --seed --python 3.14+debug ~/dbgenv
+          ~/dbgenv/bin/python -VV
+          ~/dbgenv/bin/python -c "import sys; assert hasattr(sys, 'gettotalrefcount')"
+          ~/dbgenv/bin/python -m pip install .
+      - name: Run tests
+        run: |
+          cd ~
+          ~/dbgenv/bin/python -X dev -m pcollections.test
+
+  # The type stubs (src/pcollections/__init__.pyi): stubtest compares them
+  # with the installed package, and mypy checks typecheck/usage.py against
+  # them.
+  typecheck:
+    name: type stubs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install
+        run: pip install . mypy
+      - name: Compare the stubs with the package
+        run: |
+          printf '[mypy]\nignore_missing_imports = True\n[mypy-pcollections.*]\nignore_errors = True\n' > /tmp/stubtest.ini
+          python -m mypy.stubtest pcollections --ignore-missing-stub \
+            --mypy-config-file /tmp/stubtest.ini \
+            --allowlist typecheck/stubtest-allowlist.txt
+      - name: Check typed usage
+        run: |
+          MYPYPATH=src mypy --strict typecheck/usage.py

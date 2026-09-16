@@ -1,27 +1,41 @@
+[build-system]
+# Python 3.8 is supported by setuptools only up to 75.3; newer Pythons use a
+# setuptools that understands SPDX license expressions (see setup.py).
+requires = [
+    "setuptools>=77.0.3; python_version>='3.9'",
+    "setuptools>=61,<75.4; python_version<'3.9'",
+]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pcollections"
-version = "0.4.1"
+# setup.py supplies the version (read from src/pcollections/__init__.py) and
+# the license metadata (whose format depends on the setuptools version), and
+# configures the src/ layout and the optional C extension.
+dynamic = ["version", "license"]
 description = "A persistent collections library for Python"
 authors = [
     {name="Noah C. Benson", email="nben@uw.edu"}
 ]
-license = {file="LICENSE"}
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 
 keywords = ["persistent", "immutable", "functional", "lazy"]
 
 classifiers = [
     'Intended Audience :: Developers',
-    'License :: OSI Approved :: MIT License',
     'Programming Language :: Python :: 3',
-    'Programming Language :: Python :: 3.7',
     'Programming Language :: Python :: 3.8',
     'Programming Language :: Python :: 3.9',
     'Programming Language :: Python :: 3.10',
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: 3.15',
+    'Programming Language :: Python :: Free Threading :: 3 - Stable',
+    'Programming Language :: C',
+    'Typing :: Typed',
     'Topic :: Software Development',
     'Topic :: Software Development :: Libraries',
     'Topic :: Software Development :: Libraries :: Python Modules',
@@ -31,11 +45,33 @@ classifiers = [
     'Operating System :: MacOS'
 ]
 
-dependencies = [
-    "phamt >= 0.1.8"
-]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["hypothesis"]
+docs = ["sphinx>=7", "furo", "myst-parser"]
 
 [project.urls]
 homepage = "https://github.com/noahbenson/pcollections"
-documentation = "https://github.com/noahbenson/pcollections"
+documentation = "https://nben.net/pcollections/"
 repository = "https://github.com/noahbenson/pcollections"
+changelog = "https://nben.net/pcollections/changelog.html"
+
+# Wheel builds (.github/workflows/deploy.yml, via cibuildwheel): CPython
+# only, 64-bit only, including the free-threaded 3.14 and 3.15 builds.
+# .github/workflows/deploy.yml checks the full set of wheels
+# (tools/check_dists.py) before publishing.
+[tool.cibuildwheel]
+build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
+skip = "*_i686 *-win32"
+# A wheel whose C extension doesn't compile fails to build.
+environment = { PCOLLECTIONS_REQUIRE_C = "1" }
+# Each wheel's tests import the installed wheel from outside the source tree
+# and fail unless its C extension loads. The randomized stress tests run
+# fewer steps here; the CI test jobs run them in full.
+test-environment = { PCOLLECTIONS_REQUIRE_C = "1", PCOLLECTIONS_STRESS_STEPS = "10000" }
+test-extras = ["test"]
+test-command = [
+  "python -c \"import pcollections, pcollections._c._core as c; assert pcollections.using_c_extension; print('C backend:', c.__file__)\"",
+  "python -m pcollections.test",
+]

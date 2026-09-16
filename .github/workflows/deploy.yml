@@ -1,47 +1,173 @@
 ################################################################################
 # deploy.yml
-# GitHub Actions Workflow for deploying pcollections to PyPI.
+# GitHub Actions workflow that publishes pcollections to PyPI.
 # by Noah C. Benson
+#
+# Publishing uses PyPI's trusted publishing, so no API token is stored in the
+# repository. On PyPI, the pcollections project must list this repository,
+# this workflow (deploy.yml), and the environment `pypi` as a trusted
+# publisher.
+#
+# Nothing is published unless the verify job has checked every distribution:
+# the full set of wheels, each with its C extension (tools/check_dists.py),
+# and a wheel and the sdist installed and loading the C backend.
 
 name: Deploy to PyPI
 
-# We only run this manually.
 on:
   workflow_dispatch:
 
-# This just deploys the source distribution after running tests on ubuntu.
 jobs:
-  deploy-source:
-    name: Source
+  # The full test matrix must pass first.
+  test-matrix:
+    name: Full test matrix
+    uses: ./.github/workflows/tests.yml
+
+  # The source distribution. Platforms without a wheel install from it,
+  # compiling the C extension (or using the pure-Python backend if that
+  # fails, unless PCOLLECTIONS_REQUIRE_C is set).
+  build-sdist:
+    name: Source distribution
+    needs: test-matrix
     runs-on: ubuntu-latest
-    env:
-      TWINE_USERNAME: __token__
-      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      TWINE_DEST: pypi
     steps:
-      # Check out the repository (goes to $GITHUB_WORKSPACE)
       - name: Checkout
-        uses: actions/checkout@v3
-      # Setup the Python Environment.
-      - name: Setup Python Environment
-        uses: actions/setup-python@v4
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: 3
-          architecture: x64
-      # We need to install twine also for uploading to PyPI.
-      - name: Install Twine
+          python-version: '3.x'
+      - name: Build the sdist
+        run: |
+          pip install --upgrade build
+          python -m build --sdist
+      - name: Upload the sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  # Binary wheels, one job per runner. The build selection and the tests are
+  # in pyproject.toml ([tool.cibuildwheel]): a wheel whose C extension
+  # doesn't compile fails to build, and each wheel's tests fail unless the
+  # installed wheel loads its C extension.
+  build-wheels:
+    name: Wheels / ${{ matrix.os }}
+    needs: test-matrix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-latest
+          - macos-15-intel
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      # cibuildwheel 4 builds wheels for Python 3.9 and later; version 3.4,
+      # the last to support Python 3.8, builds the 3.8 wheels.
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.2
+      - name: Build wheels (Python 3.8)
+        uses: pypa/cibuildwheel@v3.4
+        env:
+          CIBW_BUILD: 'cp38-*'
+      - name: Upload the wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  # Checks every distribution before anything is published, and passes the
+  # checked files on to the publish job.
+  verify:
+    name: Verify the distributions
+    needs: [build-sdist, build-wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download the distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: List the distributions
+        run: ls -la dist
+      # The expected wheels (every Python on every platform), each with one
+      # C extension built for its Python and platform, and a complete sdist.
+      - name: Check the wheels and the sdist
+        run: python tools/check_dists.py dist
+      - name: Check the package metadata
         run: |
           pip install --upgrade twine
-          pip install --upgrade build
-      # Make sure the tests pass before we upload anything.
-      - name: Run Tests
+          twine check --strict dist/*
+      # Installs the wheel this runner uses (manylinux, x86_64, CPython
+      # 3.12) from the downloaded files only, and checks, from outside the
+      # source tree, that the installed package is the one loaded and that
+      # it uses its C extension.
+      - name: Install and test a wheel
+        env:
+          PCOLLECTIONS_REQUIRE_C: '1'
+          PCOLLECTIONS_STRESS_STEPS: '10000'
         run: |
-          pip install -e .
+          VERSION=$(python -c 'import sys; sys.path.insert(0, "tools"); import check_dists; print(check_dists.source_version())')
+          python -m venv ~/wheelenv
+          ~/wheelenv/bin/pip install --no-index --only-binary :all: --find-links dist "pcollections==$VERSION"
           cd ~
-          python -m unittest pcollections.test
-      # Go ahead and build and deploy.
-      - name: Build and Upload Source Distribution
+          ~/wheelenv/bin/python - "$VERSION" <<'EOF'
+          import os, sys, sysconfig
+          import pcollections, pcollections._c._core as core
+          site = sysconfig.get_paths()['platlib']
+          print('pcollections', pcollections.__version__, 'from', pcollections.__file__)
+          print('C extension:', core.__file__)
+          assert pcollections.__version__ == sys.argv[1]
+          assert pcollections.using_c_extension, pcollections.backend_error
+          assert pcollections.__file__.startswith(site)
+          assert core.__file__.startswith(site) and core.__file__.endswith('.so')
+          EOF
+          ~/wheelenv/bin/python -m pcollections.test
+      # Builds and installs the sdist, requiring the C extension to compile.
+      - name: Install from the sdist
+        env:
+          PCOLLECTIONS_REQUIRE_C: '1'
         run: |
-          [ -d ./dist ] && rm ./dist/*
-          python -m build
-          twine upload -r $TWINE_DEST dist/pcollections-*.tar.gz
+          python -m venv ~/sdistenv
+          ~/sdistenv/bin/pip install --no-binary pcollections dist/*.tar.gz
+          cd ~
+          ~/sdistenv/bin/python -c "import pcollections; assert pcollections.using_c_extension; print('C backend from the sdist')"
+      - name: Upload the verified distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-dist
+          path: dist/*
+
+  # Uploads the verified sdist and wheels to PyPI.
+  publish:
+    name: Publish to PyPI
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pcollections/
+    permissions:
+      # Required for trusted publishing.
+      id-token: write
+    steps:
+      - name: Download the verified distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-dist
+          path: dist
+      - name: List the distributions
+        run: ls -la dist
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
