@@ -10,8 +10,20 @@ from ._core import (_PersistentBase, Persistent, Transient)
 from ..util import (setcmp, seqstr, frozenset_hash)
 
 
+def _as_set(obj):
+    """`obj` if it is a `Set`, and otherwise a `set` of its elements (the
+    named set methods accept any iterable, as `set`'s do)."""
+    return obj if isinstance(obj, Set) else set(obj)
+
+def _isdisjoint(s, other):
+    other = _as_set(other)
+    (small, large) = (s, other) if len(s) <= len(other) else (other, s)
+    return not any(el in large for el in small)
+
+
 #===============================================================================
 # _PersistentSetBase
+
 
 class _PersistentSetBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentSet``'s concrete
@@ -131,9 +143,7 @@ class _PersistentSetBase(_PersistentBase):
         return type(self)(t)
     def isdisjoint(self, other):
         """Returns `True` if two sets have a null intersection."""
-        if not isinstance(other, Set):
-            other = set(other)
-        return setcmp(self, other) is None
+        return _isdisjoint(self, other)
     def issubset(self, other):
         """Report whether another set contains this set."""
         if not isinstance(other, (set, frozenset)):
@@ -163,7 +173,7 @@ class _PersistentSetBase(_PersistentBase):
         """
         t = self.transient()
         for arg in args:
-            t &= arg
+            t &= _as_set(arg)
         if len(t) == len(self):
             return self
         return type(self)(t)
@@ -172,11 +182,11 @@ class _PersistentSetBase(_PersistentBase):
 
         (I.e., all elements that are in exactly one of the sets.)
         """
+        if not args:
+            return self
         t = self.transient()
         for arg in args:
-            t ^= arg
-        if len(t) == len(self):
-            return self
+            t ^= _as_set(arg)
         return type(self)(t)
     def union(self, *args):
         """Returns the union of the persistent set and all arguments."""
@@ -366,7 +376,7 @@ class _TransientSetBase(Transient):
         return setcmp(self, other) in (1, 0)
     def isdisjoint(self, other):
         """Returns `True` if two sets have a null intersection."""
-        return setcmp(self, other) is None
+        return _isdisjoint(self, other)
     def issubset(self, other):
         """Report whether another set contains this set."""
         if not isinstance(other, (set, frozenset)):
@@ -393,7 +403,7 @@ class _TransientSetBase(Transient):
     def intersection_update(self, *args):
         """Update a set with the intersection of itself and another."""
         for arg in args:
-            self &= arg
+            self &= _as_set(arg)
     def intersection(self, *args):
         """Return the intersection of two sets as a new transient set.
 
@@ -404,7 +414,7 @@ class _TransientSetBase(Transient):
         return t
     def symmetric_difference_update(self, other):
         """Update a set with the symmetric difference of itself and another."""
-        self ^= other
+        self ^= _as_set(other)
     def symmetric_difference(self, other):
         """Return the symmetric difference of two sets as a new set.
 

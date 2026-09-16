@@ -422,6 +422,38 @@ class _ApiTests:
         self.assertEqual(s.union([4]), {1, 2, 3, 4})
         self.assertEqual(s.difference('a'), s)
 
+    def test_set_methods_accept_iterables(self):
+        # The named set methods take any iterable, as set's do.
+        makers = [lambda: [3, 1, 9], lambda: (x for x in [3, 9]),
+                  lambda: 'ab', lambda: {3: 0}, lambda: {1, 2, 3},
+                  lambda: [4, 5, 6], lambda: []]
+        names = ['union', 'intersection', 'difference',
+                 'symmetric_difference', 'isdisjoint', 'issubset',
+                 'issuperset', 'update', 'intersection_update',
+                 'difference_update', 'symmetric_difference_update']
+        for cls in (self.pset, self.tset):
+            for start in ([1, 2, 3], []):
+                for name in names:
+                    if not hasattr(cls, name):
+                        continue
+                    for make in makers:
+                        (s, ref) = (cls(start), set(start))
+                        out = getattr(s, name)(make())
+                        expect = getattr(ref, name)(make())
+                        if name.endswith('update'):
+                            (out, expect) = (s, ref)
+                        if isinstance(expect, bool):
+                            self.assertIs(out, expect, (cls, start, name))
+                        else:
+                            self.assertEqual(set(out), expect,
+                                             (cls, start, name))
+        # A same-sized symmetric difference is a different set.
+        self.assertEqual(self.pset([1, 2, 3]).symmetric_difference([3, 9]),
+                         {1, 2, 9})
+        # Empty sets are disjoint from everything.
+        self.assertTrue(self.pset().isdisjoint(self.pset([1])))
+        self.assertTrue(self.tset([1]).isdisjoint(self.tset()))
+
     def test_not_implemented(self):
         # Returning NotImplemented lets the other operand take over.
         class Other:
