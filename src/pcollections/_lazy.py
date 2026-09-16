@@ -77,7 +77,7 @@ class lazy:
     """
     __slots__ = ('_func', '_args', '_kwargs', '_value', '_state', '_owner',
                  '_lock', '_error', '_error_tb', '_origin_code',
-                 '_origin_line', '_origin_stack')
+                 '_origin_line', '_origin_stack', '__weakref__')
     trace = _lazybase.TRACE_DEFAULT
     def __new__(cls, *args, **kwargs):
         if not args:
@@ -270,11 +270,6 @@ class llist(plist):
         """Like `self[index]`, but returns a `lazy` element itself rather than
         its value."""
         return plist.__getitem__(self, index)
-    def clear(self):
-        return llist.empty
-    def transient(self):
-        """Returns a `tllist` copy of the list in constant time."""
-        return tllist._new(THAMT(self._phamt), self._start, self)
 llist.empty = llist._new(PHAMT.empty, 0)
 
 class tllist(tlist):
@@ -298,9 +293,6 @@ class tllist(tlist):
         return (type(self), (list(self),))
     def pop(self, index=-1):
         return unlazy(tlist.pop(self, index))
-    def persistent(self):
-        """Returns an `llist` copy of the list."""
-        return self._persistent_as(llist)
     def is_lazy(self, index):
         """Returns `True` if the element at `index` is a `lazy` object."""
         return isinstance(tlist.__getitem__(self, index), lazy)
@@ -385,12 +377,6 @@ class ldict(pdict):
         """Like `get`, but returns a `lazy` value itself rather than its
         value."""
         return pdict.get(self, key, default)
-    def clear(self):
-        return ldict.empty
-    def transient(self):
-        """Returns a `tldict` copy of the dict in constant time."""
-        return tldict._new(TFAT(self._els), TAMT(self._idx), self._top,
-                           self._count, self._ndeleted, self)
 ldict.empty = ldict._new(FAT.empty, AMT.empty, 0, 0, 0)
 
 class tldict_items(tdict_items):
@@ -415,9 +401,6 @@ class tldict(tdict):
         return f"{{<{_seqstr_lazy(self.held_tdict(), 60)}>}}"
     def __repr__(self):
         return f"{{<{_seqstr_lazy(self.held_tdict())}>}}"
-    def persistent(self):
-        """Returns an `ldict` copy of the dict."""
-        return self._persistent_as(ldict)
     def is_lazy(self, key):
         """Returns `True` if `key` is mapped to a `lazy` object."""
         return isinstance(tdict.__getitem__(self, key), lazy)
@@ -452,3 +435,9 @@ class tldict(tdict):
         return tldict_items(self)
     def values(self):
         return tldict_values(self)
+
+
+llist.__transient_type__ = tllist
+tllist.__persistent_type__ = llist
+ldict.__transient_type__ = tldict
+tldict.__persistent_type__ = ldict

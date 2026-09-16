@@ -326,6 +326,8 @@ typedef struct pcoll_state {
    struct TrieData* g_fat_empty3;
    // shared
    PyObject* g_seqstr;
+   // Not an object: whether util.frozenset_hash matches (set.c.h).
+   int frozenset_hash_ok;
 } pcoll_state;
 
 // Whether `obj` is a lazy collection (lazy.c.h).
@@ -675,6 +677,76 @@ static int pcoll_type_setattr(PyTypeObject* type, const char* name,
    PyType_Modified(type);
    return 0;
 }
+
+
+//=============================================================================
+// Partner and empty types.
+// A persistent type names its transient partner in the class attribute
+// __transient_type__, and a transient type names its persistent partner in
+// __persistent_type__; subclasses may override either (see abc/_core.py).
+
+// Returns a new reference to type(self).<attr>, which must be a subtype of
+// `required`.
+static PyTypeObject* pcoll_partner_type(PyObject* self, const char* attr,
+                                        PyTypeObject* required) {
+   PyObject* t = PyObject_GetAttrString((PyObject*)Py_TYPE(self), attr);
+   if (!t) return NULL;
+   if (!PyType_Check(t) || !PyType_IsSubtype((PyTypeObject*)t, required)) {
+      PyErr_Format(PyExc_TypeError, "%.200s.%s must be a subclass of %.200s",
+                   Py_TYPE(self)->tp_name, attr, required->tp_name);
+      Py_DECREF(t);
+      return NULL;
+   }
+   return (PyTypeObject*)t;
+}
+
+// Returns a new reference to the empty instance of persistent type `type`:
+// type.empty if it is an instance of exactly `type`, and otherwise a new
+// empty instance made by `make`, which is then cached as type.empty unless
+// the type defines its own `empty`.
+static PyObject* pcoll_type_empty(PyTypeObject* type,
+                                  PyObject* (*make)(PyTypeObject*)) {
+   PyObject* e = PyObject_GetAttrString((PyObject*)type, "empty");
+   int own;
+   if (e && Py_TYPE(e) == type) return e;
+   if (!e) {
+      if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
+      PyErr_Clear();
+   }
+   Py_XDECREF(e);
+   e = make(type);
+   if (!e) return NULL;
+   own = PyDict_GetItemString(type->tp_dict, "empty") != NULL;
+   if (!own && PyObject_SetAttrString((PyObject*)type, "empty", e) < 0)
+      PyErr_Clear();
+   return e;
+}
+
+// The unqualified name of a type (tp_name after its last dot).
+static const char* pcoll_short_name(PyTypeObject* type) {
+   const char* dot = strrchr(type->tp_name, '.');
+   return dot ? dot + 1 : type->tp_name;
+}
+
+// __class_getitem__, for `pdict[str, int]` and the like.
+#if PY_VERSION_HEX >= 0x03090000
+#  define PCOLL_CLASS_GETITEM_METHODDEF \
+   {"__class_getitem__", (PyCFunction)Py_GenericAlias, METH_O | METH_CLASS, \
+    "See PEP 585."},
+#else
+#  define PCOLL_CLASS_GETITEM_METHODDEF
+#endif
+
+// Weak reference support: each collection struct has a `weaklist` field.
+// The offset is set on the type right after it is created (and before any
+// subtype is), which works on every supported version.
+static void pcoll_set_weaklistoffset(PyTypeObject* type, Py_ssize_t offset) {
+   type->tp_weaklistoffset = offset;
+}
+#define PCOLL_CLEAR_WEAKREFS(self)                                        \
+   do {                                                                   \
+      if ((self)->weaklist) PyObject_ClearWeakRefs((PyObject*)(self));    \
+   } while (0)
 
 
 //=============================================================================

@@ -7,7 +7,7 @@
 from collections.abc import (Set, MutableSet)
 
 from ._core import (_PersistentBase, Persistent, Transient)
-from ..util import (setcmp, seqstr)
+from ..util import (setcmp, seqstr, frozenset_hash)
 
 
 #===============================================================================
@@ -51,81 +51,85 @@ class _PersistentSetBase(_PersistentBase):
     def __repr__(self):
         return f"{{|{seqstr(self)}|}}"
     def __eq__(self, other):
-        if isinstance(other, Set):
-            return setcmp(self, other) == 0
-        else:
-            return False
+        if not isinstance(other, Set):
+            return NotImplemented
+        return setcmp(self, other) == 0
     def __ne__(self, other):
-        if isinstance(other, Set):
-            return setcmp(self, other) != 0
-        else:
-            return True
+        if not isinstance(other, Set):
+            return NotImplemented
+        return setcmp(self, other) != 0
     def __hash__(self):
-        return hash(frozenset(self)) + 1
+        # Equal to the hash of an equal frozenset.
+        return frozenset_hash(self)
     def __lt__(self, other):
+        if not isinstance(other, Set):
+            return NotImplemented
         return setcmp(self, other) == -1
     def __le__(self, other):
-        c = setcmp(self, other)
-        return c == -1 or c == 0
+        if not isinstance(other, Set):
+            return NotImplemented
+        return setcmp(self, other) in (-1, 0)
     def __gt__(self, other):
+        if not isinstance(other, Set):
+            return NotImplemented
         return setcmp(self, other) == 1
     def __ge__(self, other):
-        c = setcmp(self, other)
-        return c == 1 or c == 0
+        if not isinstance(other, Set):
+            return NotImplemented
+        return setcmp(self, other) in (1, 0)
+    def drop(self, obj, error=False):
+        """Returns a copy of the persistent set without the given object.
+
+        If the object is not a member, `drop` returns the set itself, or, if
+        `error` is true, raises `KeyError`.
+        """
+        return self.remove(obj) if error else self.discard(obj)
     def __and__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for &:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.transient()
         t &= other
         return type(self)(t)
     def __or__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for |:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.transient()
         t |= other
         return type(self)(t)
     def __sub__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for -:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.transient()
         t -= other
         return type(self)(t)
     def __xor__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for ^:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.transient()
         t ^= other
         return type(self)(t)
     def __rand__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for &:"
-                            f" '{type(other)}' and '{type(set)}'")
+            return NotImplemented
         t = self.transient()
         t &= other
         return type(self)(t)
     def __ror__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for |:"
-                            f" '{type(other)}' and '{type(set)}'")
+            return NotImplemented
         t = self.transient()
         t |= other
         return type(self)(t)
     def __rsub__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for -:"
-                            f" '{type(other)}' and '{type(set)}'")
+            return NotImplemented
         t = self.clear().transient()
         t.addall(other)
         t -= self
         return type(self)(t)
     def __rxor__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for ^:"
-                            f" '{type(other)}' and '{type(set)}'")
+            return NotImplemented
         t = self.transient()
         t ^= other
         return type(self)(t)
@@ -194,7 +198,7 @@ class _PersistentSetBase(_PersistentBase):
         Raises `KeyError` if the set is empty.
         """
         if len(self) == 0:
-            raise KeyError(f"pop from empty {type(self)}")
+            raise KeyError("pop from an empty set")
         el = next(iter(self))
         newset = self.discard(el)
         return (el, newset)
@@ -294,6 +298,7 @@ class PersistentSet(_PersistentSetBase, Set, Persistent):
      * `copy()` (`Persistent`)
      * `pop()`
      * `remove(value)`
+     * `drop(value, error=False)`
      * `addall(values)`
      * `discardall(values)`
      * `removeall(values)`
@@ -343,21 +348,31 @@ class _TransientSetBase(Transient):
         #return f"{{<{s[1:-1]}>}}"
         return f"{{<{seqstr(self)}>}}"
     def __eq__(self, other):
+        if not isinstance(other, Set):
+            return NotImplemented
         return setcmp(self, other) == 0
     def __ne__(self, other):
+        if not isinstance(other, Set):
+            return NotImplemented
         return setcmp(self, other) != 0
-    def __hash__(self):
-        return hash(frozenset(self)) + 1
+    # Transient sets are mutable, so they are not hashable.
+    __hash__ = None
     def __lt__(self, other):
+        if not isinstance(other, Set):
+            return NotImplemented
         return setcmp(self, other) == -1
     def __le__(self, other):
-        c = setcmp(self, other)
-        return c == -1 or c == 0
+        if not isinstance(other, Set):
+            return NotImplemented
+        return setcmp(self, other) in (-1, 0)
     def __gt__(self, other):
+        if not isinstance(other, Set):
+            return NotImplemented
         return setcmp(self, other) == 1
     def __ge__(self, other):
-        c = setcmp(self, other)
-        return c == 1 or c == 0
+        if not isinstance(other, Set):
+            return NotImplemented
+        return setcmp(self, other) in (1, 0)
     def isdisjoint(self, other):
         """Returns `True` if two sets have a null intersection."""
         return setcmp(self, other) is None
@@ -417,29 +432,25 @@ class _TransientSetBase(Transient):
         return t
     def __and__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for &:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.copy()
         t &= other
         return t
     def __or__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for |:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.copy()
         t |= other
         return t
     def __sub__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for -:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.copy()
         t -= other
         return t
     def __xor__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for ^:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         t = self.copy()
         t ^= other
         return t
@@ -449,8 +460,7 @@ class _TransientSetBase(Transient):
         return self.__or__(other)
     def __rsub__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for -:"
-                            f" '{type(other)}' and '{type(set)}'")
+            return NotImplemented
         t = self.copy()
         t.clear()
         t.addall(other)
@@ -460,28 +470,24 @@ class _TransientSetBase(Transient):
         return self.__xor__(other)
     def __iand__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for &=:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         rm = [el for el in self if el not in other]
         for el in rm:
             self.remove(el)
         return self
     def __ior__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for |=:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         self.addall(other)
         return self
     def __isub__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for -=:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         self.discardall(other)
         return self
     def __ixor__(self, other):
         if not isinstance(other, Set):
-            raise TypeError(f"unsupported operand type for ^=:"
-                            f" '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         rm = []
         for el in self:
             if el in other:
@@ -500,7 +506,7 @@ class _TransientSetBase(Transient):
         Raises `KeyError` if the set is empty.
         """
         if len(self) == 0:
-            raise KeyError(f"pop from empty {type(self)}")
+            raise KeyError("pop from an empty set")
         el = next(iter(self))
         self.discard(el)
         return el
@@ -577,7 +583,6 @@ class TransientSet(_TransientSetBase, MutableSet, Transient):
      * `__repr__` (`object`)
      * `__eq__` (`object`)
      * `__ne__` (`object`)
-     * `__hash__` (`Hashable`)
      * `__lt__` (`Set`)
      * `__le__` (`Set`)
      * `__gt__` (`Set`)

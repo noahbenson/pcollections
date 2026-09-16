@@ -7,4 +7,5 @@
 """Utility functions for persistent and transient collections.
 """
 
-from ._core import (setcmp, seqcmp, seqstr)
+from ._core import (setcmp, seqcmp, seqeq, seqorder, seqstr,
+                    frozenset_hash)

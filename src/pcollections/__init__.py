@@ -19,7 +19,14 @@ persistent collections of their own backend (``ldict`` subclasses ``pdict``,
 and so on), so mixing backends would give two unrelated ``pdict`` types in one
 process.
 
-``using_c_extension`` records which backend is in use.
+``using_c_extension`` records which backend is in use. If the C backend
+cannot be loaded, a ``RuntimeWarning`` says so and ``backend_error`` holds the
+reason. Two environment variables, read at import, control the choice:
+
+- ``PCOLLECTIONS_NO_C_EXTENSIONS=1`` uses the pure-Python backend (without a
+  warning);
+- ``PCOLLECTIONS_REQUIRE_C=1`` raises ``ImportError`` instead of falling back
+  to the pure-Python backend.
 """
 
 _PUBLIC_NAMES = (
@@ -63,13 +70,41 @@ def _load_python_backend():
     }
 
 
-try:
-    _backend = _load_c_backend()
-    #: True if the C backend is in use; False for the pure-Python backend.
-    using_c_extension = True
-except (ImportError, TypeError):
+def _env_flag(name):
+    import os
+    value = os.environ.get(name, '').strip().lower()
+    return value not in ('', '0', 'false', 'no', 'off')
+
+
+#: Why the C backend could not be loaded (an exception), or None.
+backend_error = None
+if _env_flag('PCOLLECTIONS_NO_C_EXTENSIONS'):
+    if _env_flag('PCOLLECTIONS_REQUIRE_C'):
+        raise ImportError("pcollections: PCOLLECTIONS_REQUIRE_C and "
+                          "PCOLLECTIONS_NO_C_EXTENSIONS are both set")
     _backend = _load_python_backend()
     using_c_extension = False
+else:
+    try:
+        _backend = _load_c_backend()
+        #: True if the C backend is in use; False for the pure-Python backend.
+        using_c_extension = True
+    except (ImportError, TypeError) as _e:
+        backend_error = _e
+        if _env_flag('PCOLLECTIONS_REQUIRE_C'):
+            raise ImportError(
+                "pcollections: the C backend could not be loaded, and "
+                "PCOLLECTIONS_REQUIRE_C is set") from _e
+        import warnings as _warnings
+        _warnings.warn(
+            f"pcollections: the C backend could not be loaded ({_e!r}), so "
+            f"the much slower pure-Python backend is in use (see "
+            f"pcollections.backend_error). Set PCOLLECTIONS_NO_C_EXTENSIONS=1 "
+            f"to choose the pure-Python backend without this warning.",
+            RuntimeWarning, stacklevel=2)
+        del _warnings, _e
+        _backend = _load_python_backend()
+        using_c_extension = False
 
 globals().update(_backend)
 if not using_c_extension:
@@ -80,7 +115,7 @@ if not using_c_extension:
         if isinstance(_obj, type):
             _obj.__module__ = __name__
     del _obj
-del _backend, _load_c_backend, _load_python_backend
+del _backend, _load_c_backend, _load_python_backend, _env_flag
 
 # We don't include the abc types in the __all__; they are probably not as
 # frequently used and don't really need to be here. One can always `import

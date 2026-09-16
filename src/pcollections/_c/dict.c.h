@@ -289,6 +289,7 @@ typedef struct PDictObject {
    Py_ssize_t count;      // number of live entries (== len()).
    Py_ssize_t ndeleted;   // holes burned by deletions since last compaction.
    Py_hash_t hashcode;    // -1 == not yet computed.
+   PyObject* weaklist;
 } PDictObject;
 
 // The types, the empty pdict, and the cached imports this part uses live in
@@ -323,6 +324,7 @@ static void pdict_dealloc(PDictObject* self) {
    // PDictType/TDictType themselves are eternal singletons.
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    pdict_clear(self);
    tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
@@ -349,15 +351,15 @@ static Py_ssize_t pdict_length(PDictObject* self) {
 // as a PDictObject -- true for any subclass that adds no new slots, which is
 // the only kind pdict's own Py_TPFLAGS_BASETYPE-enabled subclassing
 // supports; see the note on pdict_spec's flags below).
+static PyObject* pdict_type_empty(PyTypeObject* type);
 static PyObject* pdict_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
                                     Py_ssize_t top, Py_ssize_t count,
                                     Py_ssize_t ndeleted) {
    PDictObject* self;
-   if (count == 0 && type == ST(PDictType)) {
+   if (count == 0) {
       fatnode_decref(els, dictentry_decref);
       amtnode_decref(idx, noop_decref);
-      Py_INCREF(ST(g_pdict_empty));
-      return (PyObject*)ST(g_pdict_empty);
+      return pdict_type_empty(type);
    }
    // Use type->tp_alloc (not PyObject_GC_New) so that a subclass which adds
    // trailing fields (e.g. a plain `class ldict(pdict): pass` picks up
@@ -381,24 +383,23 @@ static PyObject* pdict_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
    self->hashcode = -1;
    return (PyObject*)self;
 }
-static PyObject* pdict_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
-                             Py_ssize_t count, Py_ssize_t ndeleted) {
-   return pdict_wrap_astype(ST(PDictType), els, idx, top, count, ndeleted);
-}
 
-// Returns the canonical empty instance of `type` (a new reference), mirroring
-// the reference's `cls.empty` attribute lookup in pdict.__new__. For plain
-// PDictType this is just the g_pdict_empty singleton built once at
-// module execution time; for any other (necessarily subclass) type, the class is
-// expected to have its own `.empty` class attribute set up the same way
-// PDictType/PListType set theirs -- lazy.c.h does this for ldict at its own
-// init time.
+// A new empty instance of `type`.
+static PyObject* pdict_make_empty(PyTypeObject* type) {
+   PDictObject* self = (PDictObject*)type->tp_alloc(type, 0);
+   if (!self) return NULL;
+   self->els = fat_empty(ELSLEAFSIZE);
+   self->idx = amt_empty(IDXLEAFSIZE);
+   self->hashcode = -1;
+   return (PyObject*)self;
+}
+// The empty instance of `type` (see pcoll_type_empty in core.h).
 static PyObject* pdict_type_empty(PyTypeObject* type) {
    if (type == ST(PDictType)) {
       Py_INCREF(ST(g_pdict_empty));
       return (PyObject*)ST(g_pdict_empty);
    }
-   return PyObject_GetAttrString((PyObject*)type, "empty");
+   return pcoll_type_empty(type, pdict_make_empty);
 }
 
 // Rebuilds a fresh, fully transient (els, idx) pair containing exactly the
@@ -652,7 +653,7 @@ static PyObject* pdict_set(PDictObject* self, PyObject* args) {
                               new_count, new_ndeleted);
 }
 
-static PyObject* pdict_drop(PDictObject* self, PyObject* key) {
+static PyObject* pdict_drop_key(PDictObject* self, PyObject* key, int error) {
    trieint_t hkey;
    trieint_t found_index, prev;
    int found;
@@ -663,6 +664,10 @@ static PyObject* pdict_drop(PDictObject* self, PyObject* key) {
                            NULL, &prev, NULL, NULL);
    if (found < 0) return NULL;
    if (!found) {
+      if (error) {
+         PyErr_SetObject(PyExc_KeyError, key);
+         return NULL;
+      }
       Py_INCREF(self);
       return (PyObject*)self;
    }
@@ -721,10 +726,18 @@ have_new_els:
                               new_count, new_ndeleted);
 }
 
+static PyObject* pdict_drop(PDictObject* self, PyObject* args, PyObject* kwds) {
+   static char* kwlist[] = {"key", "error", NULL};
+   PyObject* key;
+   int error = 0;
+   if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|p:drop", kwlist,
+                                    &key, &error))
+      return NULL;
+   return pdict_drop_key(self, key, error);
+}
+
 static PyObject* pdict_clear_method(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   (void)self;
-   Py_INCREF(ST(g_pdict_empty));
-   return (PyObject*)ST(g_pdict_empty);
+   return pdict_type_empty(Py_TYPE(self));
 }
 
 static PyObject* pdict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored));
@@ -732,8 +745,9 @@ static PyObject* pdict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored)
 static PyMethodDef pdict_methods[] = {
    {"set", (PyCFunction)pdict_set, METH_VARARGS,
     "Returns a copy of the pdict that maps the given key to the given value."},
-   {"drop", (PyCFunction)pdict_drop, METH_O,
-    "Returns a copy of the pdict that does not include the given key."},
+   {"drop", (PyCFunction)(void(*)(void))pdict_drop, METH_VARARGS | METH_KEYWORDS,
+    "Returns a copy of the pdict without the given key; if the key is absent,\n"
+    "returns the pdict itself, or raises KeyError if error is true."},
    {"clear", (PyCFunction)pdict_clear_method, METH_NOARGS,
     "Returns the empty pdict."},
    {"transient", (PyCFunction)pdict_transient, METH_NOARGS,
@@ -743,6 +757,7 @@ static PyMethodDef pdict_methods[] = {
    {"keys", (PyCFunction)pdict_keys, METH_NOARGS, "Returns a view of the keys."},
    {"items", (PyCFunction)pdict_items, METH_NOARGS, "Returns a view of the items."},
    {"values", (PyCFunction)pdict_values, METH_NOARGS, "Returns a view of the values."},
+   PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 static PyObject* pdict_iter(PDictObject* self);
@@ -795,6 +810,7 @@ typedef struct {
                             // matching field on TListObject in list.c.h for
                             // the exact caching/invalidation convention.
    pcoll_tguard guard;      // see core.h.
+   PyObject* weaklist;
 } TDictObject;
 
 static int tdict_traverse(TDictObject* self, visitproc visit, void* arg) {
@@ -819,6 +835,7 @@ static void tdict_dealloc(TDictObject* self) {
    // tp_alloc performs for a heap type, via tp->tp_free + Py_DECREF(tp).
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    tdict_clear(self);
    tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
@@ -1221,22 +1238,40 @@ static PyObject* tdict_clear_method(TDictObject* self, PyObject* Py_UNUSED(ignor
    return tdict_clear_locked(self);
 }
 
-static PyObject* pdict_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
-                             Py_ssize_t count, Py_ssize_t ndeleted);
 
-static PyObject* tdict_persistent_impl(TDictObject* self) {
+// Returns a new instance of `ptype` (a persistent partner type) holding the
+// transient's contents; the cached original is used when it has that type.
+static PyObject* tdict_persistent_as(TDictObject* self, PyTypeObject* ptype) {
    Trie_t els, idx;
    if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
-   if (self->count == 0) {
-      Py_INCREF(ST(g_pdict_empty));
-      return (PyObject*)ST(g_pdict_empty);
-   }
-   if (self->orig) {
+   if (self->orig && Py_TYPE(self->orig) == ptype) {
       Py_INCREF(self->orig);
       return self->orig;
    }
+   if (self->count == 0) return pdict_type_empty(ptype);
    if (tdict_share(self, &els, &idx) < 0) return NULL;
-   return pdict_wrap(els, idx, self->top, self->count, self->ndeleted);
+   return pdict_wrap_astype(ptype, els, idx, self->top, self->count,
+                            self->ndeleted);
+}
+// The persistent partner type of the tdict `self` (a new reference).
+static PyTypeObject* tdict_partner(PyObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
+   PyTypeObject* result = NULL;
+   if (tp == ST(TDictType)) result = ST(PDictType);
+   else if (ST(TLDictType) && tp == ST(TLDictType)) result = ST(LDictType);
+   if (result) {
+      Py_INCREF(result);
+      return result;
+   }
+   return pcoll_partner_type(self, "__persistent_type__", ST(PDictType));
+}
+static PyObject* tdict_persistent_impl(TDictObject* self) {
+   PyTypeObject* ptype = tdict_partner((PyObject*)self);
+   PyObject* result;
+   if (!ptype) return NULL;
+   result = tdict_persistent_as(self, ptype);
+   Py_DECREF(ptype);
+   return result;
 }
 PCOLL_LOCKED0(PyObject*, tdict_persistent_locked, tdict_persistent_impl,
               TDictObject*)
@@ -1248,16 +1283,26 @@ static PyObject* tdict_keys(TDictObject* self, PyObject* Py_UNUSED(ignored));
 static PyObject* tdict_items(TDictObject* self, PyObject* Py_UNUSED(ignored));
 static PyObject* tdict_values(TDictObject* self, PyObject* Py_UNUSED(ignored));
 static PyObject* pdict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   PyTypeObject* tp = Py_TYPE(self);
+   PyTypeObject* ttype = NULL;
+   PyObject* result;
+   if (tp == ST(PDictType)) ttype = ST(TDictType);
+   else if (ST(LDictType) && tp == ST(LDictType)) ttype = ST(TLDictType);
+   if (ttype) {
+      Py_INCREF(ttype);
+   } else {
+      ttype = pcoll_partner_type((PyObject*)self, "__transient_type__",
+                                 ST(TDictType));
+      if (!ttype) return NULL;
+   }
    trienode_incref(self->els);
    trienode_incref(self->idx);
-   // tdict_wrap() takes ownership of (does not itself incref) the `orig`
-   // reference it's handed -- self must be incref'd here, exactly as
-   // plist_transient() does in list.c.h, or the returned tdict ends up holding
-   // an unowned pointer to self, and later decref's it once too many times
-   // when the tdict is deallocated (a use-after-free/double-free on `self`).
+   // The transient keeps a reference to self as its cached original.
    Py_INCREF(self);
-   return tdict_wrap(self->els, self->idx, self->top, self->count,
-                      self->ndeleted, (PyObject*)self);
+   result = tdict_wrap_astype(ttype, self->els, self->idx, self->top,
+                              self->count, self->ndeleted, (PyObject*)self);
+   Py_DECREF(ttype);
+   return result;
 }
 
 // Matches _dict.py's tdict.empty being a *classmethod* (unlike pdict.empty,
@@ -1283,6 +1328,7 @@ static PyMethodDef tdict_methods[] = {
    {"keys", (PyCFunction)tdict_keys, METH_NOARGS, "Returns a view of the keys."},
    {"items", (PyCFunction)tdict_items, METH_NOARGS, "Returns a view of the items."},
    {"values", (PyCFunction)tdict_values, METH_NOARGS, "Returns a view of the values."},
+   PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 
@@ -1842,6 +1888,13 @@ static int pcoll_exec_dict(PyObject* m, pcoll_state* st) {
    st->TDictType = build_abc_subtype(m, &tdict_spec, pcoll_abc,
                                      "_TransientMappingBase", 1);
    if (!st->TDictType) goto done;
+   pcoll_set_weaklistoffset(st->PDictType, offsetof(PDictObject, weaklist));
+   pcoll_set_weaklistoffset(st->TDictType, offsetof(TDictObject, weaklist));
+   if (pcoll_type_setattr(st->PDictType, "__transient_type__",
+                          (PyObject*)st->TDictType) < 0 ||
+       pcoll_type_setattr(st->TDictType, "__persistent_type__",
+                          (PyObject*)st->PDictType) < 0)
+      goto done;
    if (register_virtual_subclass(pcoll_abc, "PersistentMapping", st->PDictType) < 0 ||
        register_virtual_subclass(pcoll_abc, "TransientMapping", st->TDictType) < 0)
       goto done;

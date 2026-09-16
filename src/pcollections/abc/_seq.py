@@ -5,11 +5,56 @@
 # types.
 # By Noah C. Benson
 
-from numbers         import (Integral)
+import operator
 from collections.abc import (Sequence, MutableSequence)
 
 from ._core import (_PersistentBase, Persistent, Transient)
-from ..util import (seqstr, seqcmp)
+from ..util import (seqstr, seqeq, seqorder)
+
+
+def _seq_types():
+    return (list, PersistentSequence, TransientSequence)
+
+def _held(seq):
+    """The sequence with any lazy elements uncomputed (see `holdlazy`)."""
+    method = getattr(type(seq), '__holdlazy__', None)
+    return seq if method is None else method(seq)
+
+def _index(index):
+    try:
+        return operator.index(index)
+    except TypeError:
+        raise TypeError(f"sequence indices must be integers or slices, "
+                        f"not {type(index).__name__}") from None
+
+def _seq_eq(seq, other):
+    if other is seq:
+        return True
+    if not isinstance(other, _seq_types()):
+        return NotImplemented
+    return seqeq(seq, other)
+
+def _seq_order(seq, other, op):
+    if not isinstance(other, _seq_types()):
+        return NotImplemented
+    return seqorder(seq, other, op)
+
+def _seq_count(seq, value):
+    n = 0
+    for el in seq:
+        if el is value or el == value:
+            n += 1
+    return n
+
+def _seq_index(seq, value, start, stop):
+    n = len(seq)
+    (start, stop, _) = slice(start, stop).indices(n)
+    for (ii, el) in enumerate(seq):
+        if ii >= stop:
+            break
+        if ii >= start and (el is value or el == value):
+            return ii
+    raise ValueError(f"{value!r} is not in {type(seq).__name__}")
 
 
 #==============================================================================
@@ -56,31 +101,36 @@ class _PersistentSequenceBase(_PersistentBase):
         raise NotImplementedError()
     # Methods with default implementations that may not or may not have very
     # good performance in specific instance classes.
-    def drop(self, index=-1):
-        """Returns a copy of the persistent sequence with the value at the given
-        index dropped.
+    def drop(self, index=-1, error=False):
+        """Returns a copy of the persistent sequence with the element at the
+        given index removed.
 
-        If the index is too large or too small for the size of the sequence,
-        then the sequence is returned as-is. Non-integer indices will still
-        result in raised exceptions."""
+        If the index is out of range, `drop` returns the sequence itself, or,
+        if `error` is true, raises `IndexError`."""
+        index = _index(index)
         n = len(self)
         if index < -n or index >= n:
+            if error:
+                raise IndexError(f"{type(self).__name__} index out of range")
             return self
-        else:
-            return self.delete(index)
+        return self.delete(index)
     def pop(self, index=-1):
-        """Returns tuple of the value at the given index and a copy of the
+        """Returns a tuple of the value at the given index and a copy of the
         persistent sequence with the item at that index removed (default index:
         last)."""
         el = self[index]
         return (el, self.delete(index))
     def remove(self, value):
-        """Returns a new list with the first occurence of value removed.
+        """Returns a copy of the sequence with the first occurence of value
+        removed.
 
         Raises ValueError if the value is not present.
         """
-        ii = self.index(value)
-        return self.delete(ii)
+        for (ii, el) in enumerate(self):
+            if el is value or el == value:
+                return self.delete(ii)
+        name = type(self).__name__
+        raise ValueError(f"{name}.remove(x): x not in {name}")
     def sort(self, key=None, reverse=False):
         """Returns a sorted copy of the given persistent sequence."""
         t = self.clear().transient()
@@ -88,7 +138,7 @@ class _PersistentSequenceBase(_PersistentBase):
             t.append(k)
         return type(self)(t)
     def reverse(self):
-        """Returns a plist that is a reversed copy."""
+        """Returns a reversed copy of the persistent sequence."""
         t = self.clear().transient()
         for el in self.__reversed__():
             t.append(el)
@@ -97,42 +147,25 @@ class _PersistentSequenceBase(_PersistentBase):
         # We have a max length of 60 characters, not counting the delimiters.
         return f"[|{seqstr(self, maxlen=60)}|]"
     def __repr__(self):
-        #s = repr(list(self))
-        #return f"[|{s[1:-1]}|]"
         return f"[|{seqstr(self)}|]"
-    _eq_types = ()
     def __eq__(self, other):
-        if other is self:
-            return True
-        elif not isinstance(other, PersistentSequence._eq_types):
-            return False
-        else:
-            return seqcmp(self, other) == 0
+        return _seq_eq(self, other)
+    def __ne__(self, other):
+        r = _seq_eq(self, other)
+        return r if r is NotImplemented else not r
     def __lt__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'<' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) < 0
+        return _seq_order(self, other, operator.lt)
     def __le__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'<=' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) <= 0
+        return _seq_order(self, other, operator.le)
     def __gt__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'>' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) > 0
+        return _seq_order(self, other, operator.gt)
     def __ge__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'>=' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) >= 0
+        return _seq_order(self, other, operator.ge)
     def __hash__(self):
         return hash(tuple(self)) + 1
     def __contains__(self, value):
         for el in self:
-            if el == value:
+            if el is value or el == value:
                 return True
         return False
     def __reversed__(self):
@@ -140,86 +173,54 @@ class _PersistentSequenceBase(_PersistentBase):
         return map(self.__getitem__, range(n - 1, -1, -1))
     def count(self, value):
         """Returns the number of occurences of value."""
-        n = 0
-        for el in self:
-            if el == value: n += 1
-        return n
+        return _seq_count(self, value)
     def extend(self, iterable):
-        """Return a new persistent sequence with the iterables appended."""
+        """Returns a copy of the persistent sequence with the iterable's
+        elements appended."""
         t = self.transient()
         for el in iterable:
             t.append(el)
         return type(self)(t)
     def index(self, value, start=0, stop=None):
-        """Returns first index of value.
+        """Returns the first index of value.
 
         Raises ValueError if value is not present.
         """
-        if stop is None:
-            stop = len(self)
-        if start == 0:
-            for (ii,val) in enumerate(self):
-                if ii >= stop:
-                    break
-                elif val == value:
-                    return ii
-        else:
-            for (ii,val) in enumerate(self):
-                if ii >= stop:
-                    break
-                elif ii < start:
-                    pass
-                elif val == value:
-                    return ii
-        raise ValueError(f"{value} is not in {type(self)}")
-    # We include a hash function; though this should be overwritten to cache the
-    # hash-code due to it's slowness.
+        return _seq_index(self, value, start, stop)
     def __add__(self, obj):
-        if not isinstance(obj, (list, PersistentSequence)):
-            msg = (f"unsuppoorted operand type for +:"
-                   f" '{type(obj)}' and '{type(self)}'")
-            raise TypeError(msg)
-        elif len(obj) == 0:
-            return self
-        elif len(self) == 0 and isinstance(obj, PersistentSequence):
-            return obj
-        else:
-            return self.extend(obj)
-    def __radd__(self, obj):
-        if isinstance(obj, PersistentSequence):
+        if not isinstance(obj, _seq_types()):
             return NotImplemented
-        elif not isinstance(obj, list):
-            msg = (f"unsuppoorted operand type for +:"
-                   f" '{type(self)}' and '{type(obj)}'")
-            raise TypeError(msg)
-        elif len(obj) == 0:
+        if len(obj) == 0:
             return self
-        elif len(self) == 0 and isinstance(obj, PersistentSequence):
+        if len(self) == 0 and type(obj) is type(self):
             return obj
-        else:
-            t = self.transient()
-            for el in reversed(obj):
-                t.prepend(el)
-            return type(self)(t)
+        return self.extend(obj)
+    def __radd__(self, obj):
+        if not isinstance(obj, _seq_types()):
+            return NotImplemented
+        if len(obj) == 0:
+            return self
+        t = self.transient()
+        for el in reversed(obj):
+            t.prepend(el)
+        return type(self)(t)
     def __mul__(self, value):
-        if not isinstance(value, Integral):
-            msg = f"can't multiply sequence by non-int of type '{type(value)}'"
-            raise ValueError(msg)
-        reps = int(value)
-        if reps < 0:
-            reps = 0
-        if reps == 0:
+        try:
+            reps = operator.index(value)
+        except TypeError:
+            return NotImplemented
+        if reps <= 0:
             return self.clear()
         elif reps == 1:
             return self
         t = self.transient()
+        items = list(_held(self))
         for r in range(reps - 1):
-            for el in self:
+            for el in items:
                 t.append(el)
         return type(self)(t)
     def __rmul__(self, value):
         return self.__mul__(value)
-    # For pickling:
     def __reduce__(self):
         # Pickle by class: the class pickles by its qualified name, so a
         # pickle made with one backend loads with the other.
@@ -309,6 +310,12 @@ class _TransientSequenceBase(Transient):
         """Remove and return item at index (default last).
 
         Raises IndexError if list is empty or index is out of range."""
+        index = _index(index)
+        n = len(self)
+        if n == 0:
+            raise IndexError(f"pop from empty {type(self).__name__}")
+        if index < -n or index >= n:
+            raise IndexError("pop index out of range")
         el = self[index]
         del self[index]
         return el
@@ -317,8 +324,12 @@ class _TransientSequenceBase(Transient):
 
         Raises ValueError if the value is not present.
         """
-        ii = self.index(value)
-        del self[ii]
+        for (ii, el) in enumerate(self):
+            if el is value or el == value:
+                del self[ii]
+                return
+        name = type(self).__name__
+        raise ValueError(f"{name}.remove(x): x not in {name}")
     def sort(self, key=None, reverse=False):
         """Sort the tlist in ascending order and return None.
 
@@ -334,12 +345,11 @@ class _TransientSequenceBase(Transient):
             self[ii] = el
     def count(self, value):
         """Returns the number of occurences of value."""
-        n = 0
-        for obj in self:
-            if obj == value: n += 1
-        return n
+        return _seq_count(self, value)
     def extend(self, iterable):
         """Extends tlist by appending elements from the iterable."""
+        if iterable is self:
+            iterable = list(_held(self))
         for val in iterable:
             self.append(val)
     def index(self, value, start=0, stop=None):
@@ -347,16 +357,7 @@ class _TransientSequenceBase(Transient):
 
         Raises ValueError if value is not present.
         """
-        if stop is None:
-            stop = len(self)
-        for (ii,el) in enumerate(self):
-            if ii < start:
-                continue
-            elif ii >= stop:
-                break
-            elif value == el:
-                return ii
-        raise ValueError(f'{value} is not in {type(self)}')
+        return _seq_index(self, value, start, stop)
     def reverse(self):
         """Reverses *IN PLACE*."""
         n = len(self)
@@ -370,96 +371,69 @@ class _TransientSequenceBase(Transient):
         return f"[<{seqstr(self, maxlen=60)}>]"
     def __repr__(self):
         return f"[<{seqstr(self)}>]"
-    _eq_types = ()
+    # Transient sequences are mutable, so they are not hashable.
+    __hash__ = None
     def __eq__(self, other):
-        if other is self:
-            return True
-        elif not isinstance(other, TransientSequence._eq_types):
-            return False
-        elif len(self) != len(other):
-            return False
-        else:
-            return seqcmp(self, other) == 0
+        return _seq_eq(self, other)
+    def __ne__(self, other):
+        r = _seq_eq(self, other)
+        return r if r is NotImplemented else not r
     def __lt__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'<' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) < 0
+        return _seq_order(self, other, operator.lt)
     def __le__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'<=' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) <= 0
+        return _seq_order(self, other, operator.le)
     def __gt__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'>' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) > 0
+        return _seq_order(self, other, operator.gt)
     def __ge__(self, other):
-        if not isinstance(other, (list, PersistentSequence, TransientSequence)):
-            raise TypeError(f"'>=' not supported between instances of"
-                            f" '{type(self)}' and '{type(other)}'")
-        return seqcmp(self, other) >= 0
+        return _seq_order(self, other, operator.ge)
     def __contains__(self, value):
         for el in self:
-            if el == value:
+            if el is value or el == value:
                 return True
         return False
     def __reversed__(self):
         n = len(self)
         return map(self.__getitem__, range(n - 1, -1, -1))
     def __iadd__(self, obj):
-        if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
-            msg = (f"unsuppoorted operand type for +=:"
-                   f" '{type(obj)}' and '{type(self)}'")
-            raise TypeError(msg)
-        elif len(obj) == 0:
-            pass
-        elif obj is self:
-            self.extend(self.persistent())
-        else:
-            self.extend(obj)
+        # Like list, += accepts any iterable.
+        try:
+            obj = list(obj)
+        except TypeError:
+            return NotImplemented
+        self.extend(obj)
         return self
     def __add__(self, obj):
-        if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
+        if not isinstance(obj, _seq_types()):
             return NotImplemented
         t = self.copy()
-        t += obj
+        t.extend(obj)
         return t
     def __radd__(self, obj):
-        if not isinstance(obj, (list, PersistentSequence, TransientSequence)):
-            msg = (f"unsuppoorted operand type for +:"
-                   f" '{type(self)}' and '{type(obj)}'")
-            raise TypeError(msg)
-        elif len(obj) == 0:
-            return self.copy()
-        else:
-            t = self.copy()
-            for el in reversed(obj):
-                t.prepend(el)
-            return t
+        if not isinstance(obj, _seq_types()):
+            return NotImplemented
+        t = self.copy()
+        for el in reversed(obj):
+            t.prepend(el)
+        return t
     def __imul__(self, value):
-        if not isinstance(value, Integral):
-            msg = f"can't multiply sequence by non-int of type '{type(value)}'"
-            raise ValueError(msg)
-        reps = int(value)
-        if reps < 0:
-            reps = 0
-        if reps == 0:
+        try:
+            reps = operator.index(value)
+        except TypeError:
+            return NotImplemented
+        if reps <= 0:
             self.clear()
         elif reps > 1:
-            # Snapshot the current elements before appending: appending
-            # directly while iterating over `self` (a live, mutating
-            # transient sequence) would violate the no-mutation-during-
-            # iteration assumption transient types rely on, and would also
-            # just be wrong (each pass would see the elements appended by
-            # the previous pass too).
-            orig = list(self)
+            # Take the elements first: the loop changes the sequence.
+            items = list(_held(self))
             for r in range(reps - 1):
-                for el in orig:
+                for el in items:
                     self.append(el)
         return self
     def __mul__(self, value):
+        try:
+            operator.index(value)
+        except TypeError:
+            return NotImplemented
         t = self.copy()
         t *= value
         return t
@@ -532,10 +506,3 @@ class TransientSequence(_TransientSequenceBase, Transient, MutableSequence):
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()
-
-
-# Setup the _eq_types, which decides what types can be considered equal.
-_PersistentSequenceBase._eq_types = (list, PersistentSequence, TransientSequence)
-_TransientSequenceBase._eq_types = (list, PersistentSequence, TransientSequence)
-PersistentSequence._eq_types = (list, PersistentSequence, TransientSequence)
-TransientSequence._eq_types = (list, PersistentSequence, TransientSequence)

@@ -31,6 +31,7 @@ from .abc import (
     PersistentMapping,
     TransientMapping
 )
+from .abc._core import _type_empty, _partner_type
 from ._guard import (
     TransientIter,
     new_busy_flag,
@@ -93,7 +94,7 @@ class pdict_items(ItemsView, PDictView):
         d = Ellipsis if v0 is None else None
         v = self._mapping.get(k0, d)
         (k,v) = self._from_kv((k0,v))
-        return v0 == v
+        return v0 is v or v0 == v
 class pdict_values(ValuesView, PDictView):
     __slots__ = ()
     def _from_kv(self, kv):
@@ -103,7 +104,7 @@ class pdict_values(ValuesView, PDictView):
             if is_tombstone(kv):
                 continue
             v0 = self._from_kv(kv)
-            if v0 == v:
+            if v0 is v or v0 == v:
                 return True
         return False
 class pdict(PersistentMapping):
@@ -128,14 +129,18 @@ class pdict(PersistentMapping):
         object.__setattr__(new_pdict, '_ndeleted', ndeleted)
         object.__setattr__(new_pdict, '_hashcode', None)
         return new_pdict
-    __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_hashcode")
+    __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_hashcode",
+                 "__weakref__")
+    @classmethod
+    def _empty(cls):
+        return _type_empty(cls, lambda: cls._new(FAT.empty, AMT.empty, 0, 0, 0))
     def __new__(cls, *args, **kw):
         n = len(args)
         if n == 1:
             arg = args[0]
         elif n == 0:
             if len(kw) == 0:
-                return cls.empty
+                return cls._empty()
             else:
                 arg = kw
                 kw = {}
@@ -147,12 +152,12 @@ class pdict(PersistentMapping):
             # If arg is a tdict and no keyword arguments have been given, this
             # is a special case.
             if isinstance(arg, Sized) and len(arg) == 0:
-                return cls.empty
+                return cls._empty()
             elif (isinstance(arg, tdict)
                   and not getattr(type(arg), '_holds_lazy', False)):
                 (els, idx, top, count, ndeleted, _) = arg._snapshot()
                 if count == 0:
-                    return cls.empty
+                    return cls._empty()
                 return cls._new(els, idx, top, count, ndeleted)
             elif type(arg) is cls:
                 # Also, if it's already the right type, we can just return it
@@ -192,7 +197,7 @@ class pdict(PersistentMapping):
         ii = self._idx.get(h, None)
         while ii is not None:
             ((kk,vv),ii) = self._els[ii]
-            if k == kk:
+            if kk is k or k == kk:
                 return True
         return False
     def __iter__(self):
@@ -208,7 +213,7 @@ class pdict(PersistentMapping):
         ii = self._idx.get(h, None)
         while ii is not None:
             (kv,ii) = self._els[ii]
-            if key == kv[0]:
+            if kv[0] is key or key == kv[0]:
                 return kv[1]
         raise KeyError(key)
     def get(self, key, default=None):
@@ -216,13 +221,14 @@ class pdict(PersistentMapping):
         ii = self._idx.get(h, None)
         while ii is not None:
             (kv,ii) = self._els[ii]
-            if key == kv[0]:
+            if kv[0] is key or key == kv[0]:
                 return kv[1]
         return default
     def transient(self):
         """Returns a transient copy of the dict in constant time."""
-        return tdict._new(TFAT(self._els), TAMT(self._idx), self._top,
-                          self._count, self._ndeleted, self)
+        cls = _partner_type(self, '__transient_type__', tdict)
+        return cls._new(TFAT(self._els), TAMT(self._idx), self._top,
+                        self._count, self._ndeleted, self)
     def set(self, key, val):
         """Returns a copy of the pdict that maps the given key to the given
         value."""
@@ -251,7 +257,7 @@ class pdict(PersistentMapping):
             while ii is not None:
                 (kv,ii_next) = self._els[ii]
                 (k,v) = kv
-                if key == k:
+                if k is key or key == k:
                     # It is in the dict; either it's exactly in the dict or we
                     # replace it.
                     if val is v:
@@ -270,10 +276,11 @@ class pdict(PersistentMapping):
             new_idx = self._idx
         return self._new(new_els, new_idx, self._top + 1, self._count + 1,
                          self._ndeleted)
-    def drop(self, key):
+    def drop(self, key, error=False):
         """Returns a copy of the pdict that does not include the given key.
 
-        If the key is not in the dict, returns the dict unchanged.
+        If the key is not in the dict, returns the dict itself, or, if `error`
+        is true, raises `KeyError`.
         """
         # Get the hash and initial index (if there is one).
         h = hash(key)
@@ -284,7 +291,7 @@ class pdict(PersistentMapping):
         while ii is not None:
             (kv,ii_next) = self._els[ii]
             (k,v) = kv
-            if key == k:
+            if k is key or key == k:
                 # We remove this entry! Unlink it from its collision chain
                 # (exactly as a real removal would) but overwrite its els
                 # slot with a tombstone rather than actually removing it --
@@ -307,17 +314,20 @@ class pdict(PersistentMapping):
             ii_prev = ii
             kv_prev = kv
             ii = ii_next
-        # If we reach this point, then obj isn't in the set, so we just return
-        # self unchanged.
+        # The key isn't here.
+        if error:
+            raise KeyError(key)
         return self
     def clear(self):
         """Returns the empty pdict."""
-        return type(self).empty
+        return type(self)._empty()
     @classmethod
     def _maybe_compacted(cls, els, idx, top, count, ndeleted):
         """Builds a new pdict from the given (already-tombstoned) els/idx,
         compacting first if `ndeleted` has crossed should_compact()'s
         threshold. Shared by drop()/pop()."""
+        if count == 0:
+            return cls._empty()
         if should_compact(count, ndeleted):
             els, idx, top = _compact_els(els)
             ndeleted = 0
@@ -372,7 +382,8 @@ class tdict_items(ItemsView, tdict_view):
         if not isinstance(kv, tuple) or len(kv) != 2:
             return False
         d = Ellipsis if kv[1] is None else None
-        return self._tdict.get(kv[0], d) == kv[1]
+        v = self._tdict.get(kv[0], d)
+        return v is kv[1] or v == kv[1]
 class tdict_values(ValuesView, tdict_view):
     __slots__ = ('_tdict',)
     def _from_kv(self, arg):
@@ -417,7 +428,7 @@ class tdict(TransientMapping):
         """Returns an empty tdict."""
         return cls._new(TFAT(FAT.empty), TAMT(AMT.empty), 0, 0, 0)
     __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_version",
-                 "_kversion", "_busy", "_orig")
+                 "_kversion", "_busy", "_orig", "__weakref__")
     def __new__(cls, *args, **kw):
         n = len(args)
         if n == 1:
@@ -611,15 +622,16 @@ class tdict(TransientMapping):
             end_update(self)
     def _persistent_as(self, cls):
         (els, idx, top, count, ndeleted, orig) = self._snapshot()
-        if count == 0:
-            return cls.empty
-        elif orig is not None:
+        if type(orig) is cls:
             return orig
+        elif count == 0:
+            return cls._empty()
         else:
             return cls._new(els, idx, top, count, ndeleted)
     def persistent(self):
         """Efficiently returns a persistent (pdict) copy of the tdict."""
-        return self._persistent_as(pdict)
+        return self._persistent_as(
+            _partner_type(self, '__persistent_type__', pdict))
     def keys(self):
         return tdict_keys(self)
     def items(self):
@@ -647,3 +659,7 @@ def _compact_els(els):
         (k, v) = kv
         t[k] = v
     return (t._els.persistent(), t._idx.persistent(), t._top)
+
+
+pdict.__transient_type__ = tdict
+tdict.__persistent_type__ = pdict

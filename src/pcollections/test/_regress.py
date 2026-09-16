@@ -328,7 +328,6 @@ class _RegressionTests:
     # The pure-Python plist/tlist compared elements with `<` to test
     # equality, so plist([None]) == plist([None]) raised TypeError. The C
     # tlist inherits the same comparison.
-    @known_failure('c', 'python')
     def test_sequence_equality_of_unorderable_elements(self):
         self.run_scenario("""
             for make in (plist, tlist):

@@ -7,6 +7,31 @@
 from collections.abc import Hashable
 
 
+def _partner_type(obj, attr, required):
+    """Returns `type(obj).<attr>` (`__transient_type__` or
+    `__persistent_type__`), which must be a subclass of `required`."""
+    cls = getattr(type(obj), attr)
+    if not (isinstance(cls, type) and issubclass(cls, required)):
+        raise TypeError(f"{type(obj).__name__}.{attr} must be a subclass of "
+                        f"{required.__name__}")
+    return cls
+
+def _type_empty(cls, make):
+    """Returns the empty instance of persistent type `cls`: `cls.empty` if it
+    is an instance of exactly `cls`, and otherwise `make()`, which is cached
+    as `cls.empty` unless `cls` defines its own `empty`."""
+    e = getattr(cls, 'empty', None)
+    if type(e) is cls:
+        return e
+    e = make()
+    if 'empty' not in cls.__dict__:
+        try:
+            type.__setattr__(cls, 'empty', e)
+        except (TypeError, AttributeError):
+            pass
+    return e
+
+
 class _PersistentBase:
     """Plain (non-``ABCMeta``) mixin holding ``Persistent``'s concrete method
     bodies, with no abstract base of its own.
@@ -93,6 +118,19 @@ class Persistent(_PersistentBase, Hashable):
 
     The class includes one abstract method, ``transient()``, which can be
     overloaded if the object has a transient companion type.
+
+    Subclasses: methods that return a changed copy return an instance of the
+    same class. A persistent class names its transient partner in the class
+    attribute ``__transient_type__`` (used by ``transient()``), and a
+    transient class names its persistent partner in ``__persistent_type__``
+    (used by ``persistent()``). A subclass that wants ``transient()`` and
+    ``persistent()`` to round-trip to itself defines both, for example::
+
+        class MyDict(pdict):
+            pass
+        class MyTDict(tdict):
+            __persistent_type__ = MyDict
+        MyDict.__transient_type__ = MyTDict
 
     (The concrete methods above are actually implemented on ``_PersistentBase``,
     a plain mixin with no ``ABCMeta`` in its inheritance chain -- see that

@@ -10,6 +10,12 @@ from ._core import (_PersistentBase, Persistent, Transient)
 from ..util import (seqstr)
 
 
+def _held(mapping):
+    """The mapping with any lazy values uncomputed (see `holdlazy`)."""
+    method = getattr(type(mapping), '__holdlazy__', None)
+    return mapping if method is None else method(mapping)
+
+
 #===============================================================================
 # _PersistentMappingBase
 
@@ -29,17 +35,6 @@ class _PersistentMappingBase(_PersistentBase):
     dicts) rather than a new algorithm.
     """
     __slots__ = ()
-    # Mirrors collections.abc.Mapping.__abc_tpflags__/__reversed__: Mapping
-    # explicitly sets `__reversed__ = None` (rather than just not defining
-    # it) so that the `reversed()` builtin fails fast and clearly on a plain
-    # Mapping, rather than falling through to the len+getitem sequence
-    # protocol. Ported here as a plain class attribute -- not something
-    # PersistentMapping ever defined itself, but something it always
-    # inherited from Mapping -- so pdict/tdict's public interface (and
-    # reversed(pdict(...))'s behavior) stays identical to before this fix;
-    # see test/_parity.py's test_public_api_matches, which checks for
-    # exactly this kind of gap.
-    __reversed__ = None
     # Methods which must be implemented in the children.
     def set(self, key, val):
         """Returns a copy of the pdict that maps the given key to the given
@@ -49,8 +44,8 @@ class _PersistentMappingBase(_PersistentBase):
         """Returns a copy of the persistent mapping that does not include the
         given key.
 
-        If the key is not in the dict, `drop` returns the original persistent
-        mapping.
+        If the key is not in the mapping, `drop` returns the mapping itself,
+        or, if `error` is true, raises `KeyError`.
         """
         raise NotImplementedError()
     def clear(self):
@@ -73,7 +68,25 @@ class _PersistentMappingBase(_PersistentBase):
             return NotImplemented
         return dict(self.items()) == dict(other.items())
     def __hash__(self):
-        return hash(frozenset(map(lambda u: u[1][0], self._els))) + 2
+        return hash(frozenset(self.items())) + 2
+    def __reversed__(self):
+        return reversed(list(self))
+    def __or__(self, other):
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        return self.update(other)
+    def __ror__(self, other):
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        t = self.clear().transient()
+        t.update(other)
+        t.update(_held(self))
+        return type(self)(t)
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        """Returns a new mapping with keys from `iterable`, each mapped to
+        `value`."""
+        return cls((k, value) for k in iterable)
     def __contains__(self, k):
         try:
             self[k]
@@ -86,14 +99,11 @@ class _PersistentMappingBase(_PersistentBase):
         except KeyError:
             return default
     def delete(self, key):
-        """Returns a copy of the mersistent mapping the excludes the given key.
+        """Returns a copy of the persistent mapping that excludes the given key.
 
         If the key is not found in the mapping, a `KeyError` is raised.
         """
-        if key in self:
-            return self.drop(key)
-        else:
-            raise KeyError(key)
+        return self.drop(key, error=True)
     def setall(self, keys, vals):
         """Returns a copy of the persistent mapping that includes all the object
         in the given iterables of keys and values.
@@ -110,7 +120,8 @@ class _PersistentMappingBase(_PersistentBase):
         """
         t = self.transient()
         for k in keys:
-            t.drop(k)
+            if k in t:
+                del t[k]
         return type(self)(t)
     def deleteall(self, keys):
         """Returns a copy of the persistent mapping that excludes all the keys
@@ -199,7 +210,7 @@ class PersistentMapping(_PersistentMappingBase, Mapping, Persistent):
      * `__getitem__` (`Mapping`)
      * `transient()` (`Persistent`)
      * `set(key, value)`
-     * `drop(key)`
+     * `drop(key, error=False)`
      * `clear()`
 
     Additionally, `PersistentMapping` includes default implementations of the
@@ -221,13 +232,12 @@ class PersistentMapping(_PersistentMappingBase, Mapping, Persistent):
      * `popitem()` (`MutableMapping`)
      * `pop(key)` (`MutableMapping`)
      * `copy()` (`Persistent`)
-     * `delete(key)`
-     * `remove(value)`
-     * `setall(values)`
-     * `dropall(key)`
-     * `deleteall(key)`
-     * `discardall(values)`
-     * `removeall(values)`
+     * `__or__`/`__ror__` (a copy updated with another mapping)
+     * `fromkeys(iterable, value=None)` (a classmethod)
+     * `delete(key)` (like `drop(key, error=True)`)
+     * `setall(keys, values)`
+     * `dropall(keys)` (ignores missing keys)
+     * `deleteall(keys)` (raises `KeyError` for a missing key)
      * `update(map, **kw)`
      * `__reduce__` (for pickling)
      * `__json__` (for `json_fix` module)
@@ -256,9 +266,8 @@ class _TransientMappingBase(Transient):
     used to inherit instead (via ``MutableMapping``).
     """
     __slots__ = ()
-    # See _PersistentMappingBase.__reversed__'s comment: ported from
-    # collections.abc.Mapping (inherited via MutableMapping before this fix).
-    __reversed__ = None
+    # tdict is mutable, so it is not hashable.
+    __hash__ = None
     # Methods which must be implemented in the children.
     def clear(self):
         """Returns the empty persistent mapping of the same type."""
@@ -281,6 +290,30 @@ class _TransientMappingBase(Transient):
             return True
         except KeyError:
             return False
+    def __reversed__(self):
+        return reversed(list(self))
+    def __or__(self, other):
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        t = self.copy()
+        t.update(other)
+        return t
+    def __ror__(self, other):
+        if not isinstance(other, Mapping):
+            return NotImplemented
+        t = self.copy()
+        t.clear()
+        t.update(other)
+        t.update(_held(self))
+        return t
+    def __ior__(self, other):
+        self.update(other)
+        return self
+    @classmethod
+    def fromkeys(cls, iterable, value=None):
+        """Returns a new mapping with keys from `iterable`, each mapped to
+        `value`."""
+        return cls((k, value) for k in iterable)
     def get(self, key, default=None):
         try:
             return self[key]
@@ -390,6 +423,8 @@ class TransientMapping(_TransientMappingBase, MutableMapping, Transient):
      * `popitem()` (`MutableMapping`)
      * `pop()` (`MutableMapping`)
      * `update(map, **kw)` (`MutableMapping`)
+     * `__or__`, `__ror__`, `__ior__`
+     * `fromkeys(iterable, value=None)` (a classmethod)
      * `copy()` (`Transient`)
      * `__reduce__` (for pickling)
      * `__json__` (for the `json_fix` module)

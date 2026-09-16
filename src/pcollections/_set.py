@@ -17,6 +17,7 @@ from ._compact import (
 )
 
 from .abc  import (PersistentSet, TransientSet)
+from .abc._core import _type_empty, _partner_type
 from ._guard import (TransientIter, new_busy_flag, begin_update, end_update,
                      changed_during_lookup)
 from .util import (setcmp)
@@ -48,7 +49,11 @@ class pset(PersistentSet):
         object.__setattr__(new_pset, '_ndeleted', ndeleted)
         object.__setattr__(new_pset, '_hashcode', None)
         return new_pset
-    __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_hashcode")
+    __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_hashcode",
+                 "__weakref__")
+    @classmethod
+    def _empty(cls):
+        return _type_empty(cls, lambda: cls._new(FAT.empty, AMT.empty, 0, 0, 0))
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("pset() takes no keyword arguments")
@@ -56,20 +61,24 @@ class pset(PersistentSet):
         if n == 1:
             arg = args[0]
         elif n == 0:
-            return pset.empty
+            return cls._empty()
         else:
             raise TypeError(f"pset expects at most 1 argument, got {n}")
-        # If arg is a tset, this is a special case.
+        # An object of exactly this type is returned as-is.
+        if type(arg) is cls:
+            return arg
+        # A tset or pset shares its storage.
         if isinstance(arg, tset):
             (els, idx, top, count, ndeleted, _) = arg._snapshot()
-            if count == 0:
-                return cls.empty
-            return cls._new(els, idx, top, count, ndeleted)
-        # If it's a pset, we can just return it as-is.
-        if isinstance(arg, pset):
-            return arg
-        # For anything else, however, we just route this through tset.
-        return tset(arg).persistent()
+        elif isinstance(arg, pset):
+            (els, idx, top, count, ndeleted) = (
+                arg._els, arg._idx, arg._top, arg._count, arg._ndeleted)
+        else:
+            # For anything else, we route this through tset.
+            return tset(arg)._persistent_as(cls)
+        if count == 0:
+            return cls._empty()
+        return cls._new(els, idx, top, count, ndeleted)
     def __len__(self):
         return self._count
     def __contains__(self, el):
@@ -77,7 +86,7 @@ class pset(PersistentSet):
         ii = self._idx.get(h, None)
         while ii is not None:
             (x,ii) = self._els[ii]
-            if el == x:
+            if x is el or el == x:
                 return True
         return False
     def __iter__(self):
@@ -98,8 +107,9 @@ class pset(PersistentSet):
         return self._hashcode
     def transient(self):
         """Returns a transient copy of the set in constant time."""
-        return tset._new(TFAT(self._els), TAMT(self._idx), self._top,
-                         self._count, self._ndeleted, self)
+        cls = _partner_type(self, '__transient_type__', tset)
+        return cls._new(TFAT(self._els), TAMT(self._idx), self._top,
+                        self._count, self._ndeleted, self)
     def add(self, obj):
         """Returns a copy of the pset that includes the given object."""
         # Get the hash and initial index (if there is one).
@@ -116,7 +126,7 @@ class pset(PersistentSet):
             x_prev = None
             while ii is not None:
                 (x,ii_next) = self._els[ii]
-                if obj == x:
+                if x is obj or obj == x:
                     return self
                 ii_prev = ii
                 x_prev = x
@@ -130,6 +140,8 @@ class pset(PersistentSet):
                          self._ndeleted)
     @classmethod
     def _maybe_compacted(cls, els, idx, top, count, ndeleted):
+        if count == 0:
+            return cls._empty()
         if should_compact(count, ndeleted):
             els, idx, top = _compact_els(els)
             ndeleted = 0
@@ -147,7 +159,7 @@ class pset(PersistentSet):
         x_prev = None
         while ii is not None:
             (x,ii_next) = self._els[ii]
-            if obj == x:
+            if x is obj or obj == x:
                 # We remove this object! Unlink it from its collision chain
                 # but overwrite its els slot with a tombstone rather than
                 # actually removing it -- see pcollections/_compact.py, and
@@ -175,7 +187,7 @@ class pset(PersistentSet):
         return self
     def clear(self):
         """Returns the empty pset."""
-        return pset.empty
+        return type(self)._empty()
 # Make the empty pset.
 pset.empty = pset._new(FAT.empty, AMT.empty, 0, 0, 0)
 
@@ -215,7 +227,7 @@ class tset(TransientSet):
         """Returns an empty tset."""
         return cls._new(TFAT(FAT.empty), TAMT(AMT.empty), 0, 0, 0)
     __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_version",
-                 "_kversion", "_busy", "_orig")
+                 "_kversion", "_busy", "_orig", "__weakref__")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("tset() takes no keyword arguments")
@@ -229,8 +241,9 @@ class tset(TransientSet):
         arg = args[0]
         # If arg is a pset, this is a special case.
         if isinstance(arg, pset):
+            orig = arg if (cls is tset and type(arg) is pset) else None
             return cls._new(TFAT(arg._els), TAMT(arg._idx), arg._top,
-                            arg._count, arg._ndeleted)
+                            arg._count, arg._ndeleted, orig)
         # For anything else, however, we just build up.
         t = cls.empty()
         t.addall(arg)
@@ -359,21 +372,28 @@ class tset(TransientSet):
                     self._top, self._count, self._ndeleted, self._orig)
         finally:
             end_update(self)
+    def _persistent_as(self, cls):
+        (els, idx, top, count, ndeleted, orig) = self._snapshot()
+        if type(orig) is cls:
+            return orig
+        elif count == 0:
+            return cls._empty()
+        else:
+            return cls._new(els, idx, top, count, ndeleted)
     def persistent(self):
         """Efficiently returns a persistent set that is a copy of the tset."""
-        (els, idx, top, count, ndeleted, orig) = self._snapshot()
-        if count == 0:
-            return pset.empty
-        elif orig is not None:
-            return orig
-        else:
-            return pset._new(els, idx, top, count, ndeleted)
+        return self._persistent_as(
+            _partner_type(self, '__persistent_type__', pset))
 
 
 #===============================================================================
 # Compaction.
 # Mirrors _dict.py's _compact_els() -- see that function's comment -- just
 # replaying live elements through tset.add() instead of tdict.__setitem__.
+
+pset.__transient_type__ = tset
+tset.__persistent_type__ = pset
+
 
 def _identity(x):
     return x

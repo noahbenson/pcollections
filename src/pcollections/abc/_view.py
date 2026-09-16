@@ -167,6 +167,8 @@ class _KeysViewBase(_MappingViewBase, _SetViewMixin):
         return key in self._mapping
     def __iter__(self):
         yield from self._mapping
+    def __reversed__(self):
+        return reversed(list(self._mapping))
 
 
 class _ItemsViewBase(_MappingViewBase, _SetViewMixin):
@@ -184,6 +186,8 @@ class _ItemsViewBase(_MappingViewBase, _SetViewMixin):
     def __iter__(self):
         for key in self._mapping:
             yield (key, self._mapping[key])
+    def __reversed__(self):
+        return reversed(list(self))
 
 
 class _ValuesViewBase(_MappingViewBase):
@@ -200,3 +204,23 @@ class _ValuesViewBase(_MappingViewBase):
     def __iter__(self):
         for key in self._mapping:
             yield self._mapping[key]
+    def __reversed__(self):
+        return reversed(list(self))
+
+
+#===============================================================================
+# Views of lazy mappings (used by the C backend's ldict and tldict)
+
+import collections.abc as _cabc
+
+class ldict_items(_cabc.ItemsView):
+    """The items of a lazy mapping; reading a value computes it."""
+    __slots__ = ()
+    def __reversed__(self):
+        return reversed(list(self))
+
+class ldict_values(_cabc.ValuesView):
+    """The values of a lazy mapping; reading a value computes it."""
+    __slots__ = ()
+    def __reversed__(self):
+        return reversed(list(self))

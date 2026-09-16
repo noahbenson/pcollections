@@ -49,6 +49,7 @@ typedef struct {
    PyObject* origin_code;  // the code object that created the lazy value,
    int origin_line;        //    and the line; NULL/0 if unknown or ready.
    PyObject* origin_stack; // the formatted creation stack, or NULL.
+   PyObject* weaklist;
    pcoll_atomic_flag_t state;
    pcoll_atomic_u64_t owner; // the thread computing the value, or 0.
    pcoll_mutex_t mutex;
@@ -80,6 +81,7 @@ static int lazy_clear(LazyObject* self) {
 static void lazy_dealloc(LazyObject* self) {
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    PCOLL_MUTEX_DESTROY(&self->mutex);
    lazy_clear(self);
    tp->tp_free((PyObject*)self);
@@ -580,7 +582,7 @@ static PyObject* ldict_get(PyObject* self, PyObject* args) {
 static PyObject* ldict_getlazy(PyObject* self, PyObject* args) {
    return pdict_get((PDictObject*)self, args);
 }
-// items()/values(): collections.abc's generic views read through
+// items()/values(): views (pcollections.abc._view) that read through
 // self[key], which computes the values.
 static PyObject* ldict_items(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    return PyObject_CallFunctionObjArgs(ST(g_ItemsView), self, NULL);
@@ -601,18 +603,6 @@ static PyObject* ldict_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) {
 }
 static PyObject* ldict_held_pdict(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    return pdictlike_share(ST(PDictType), (PDictObject*)self);
-}
-static PyObject* ldict_clear(PyObject* self, PyObject* Py_UNUSED(ignored)) {
-   (void)self;
-   Py_INCREF(ST(g_ldict_empty));
-   return (PyObject*)ST(g_ldict_empty);
-}
-static PyObject* ldict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   trienode_incref(self->els);
-   trienode_incref(self->idx);
-   Py_INCREF(self);
-   return tdict_wrap_astype(ST(TLDictType), self->els, self->idx, self->top,
-                            self->count, self->ndeleted, (PyObject*)self);
 }
 // The lazy collections' specs need their own GC slots; ldict's are pdict's.
 static int ldict_gc_traverse(PyObject* self, visitproc visit, void* arg) {
@@ -664,10 +654,6 @@ static PyMethodDef ldict_methods[] = {
    {"__holdlazy__", (PyCFunction)ldict_held_pdict, METH_NOARGS, NULL},
    {"getlazy", (PyCFunction)ldict_getlazy, METH_VARARGS,
     "Like get(), but returns a lazy value itself rather than its value."},
-   {"clear", (PyCFunction)ldict_clear, METH_NOARGS,
-    "Returns the empty ldict."},
-   {"transient", (PyCFunction)ldict_transient, METH_NOARGS,
-    "Returns a tldict copy of the dict in constant time."},
    {NULL, NULL, 0, NULL}
 };
 static PyType_Slot ldict_slots[] = {
@@ -736,38 +722,6 @@ PCOLL_LOCKED0(PyObject*, tldict_held_tdict_locked, tldict_held_tdict_impl,
 static PyObject* tldict_held_tdict(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    return tldict_held_tdict_locked((TDictObject*)self);
 }
-static PyObject* tldict_persistent_impl(TDictObject* self) {
-   PDictObject* p;
-   Trie_t els, idx;
-   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
-   if (self->count == 0) {
-      Py_INCREF(ST(g_ldict_empty));
-      return (PyObject*)ST(g_ldict_empty);
-   }
-   if (self->orig) {
-      Py_INCREF(self->orig);
-      return self->orig;
-   }
-   if (tdict_share(self, &els, &idx) < 0) return NULL;
-   p = (PDictObject*)ST(LDictType)->tp_alloc(ST(LDictType), 0);
-   if (!p) {
-      fatnode_decref(els, dictentry_decref);
-      amtnode_decref(idx, noop_decref);
-      return NULL;
-   }
-   p->els = els;
-   p->idx = idx;
-   p->top = self->top;
-   p->count = self->count;
-   p->ndeleted = self->ndeleted;
-   p->hashcode = -1;
-   return (PyObject*)p;
-}
-PCOLL_LOCKED0(PyObject*, tldict_persistent_locked, tldict_persistent_impl,
-              TDictObject*)
-static PyObject* tldict_persistent(PyObject* self, PyObject* Py_UNUSED(ignored)) {
-   return tldict_persistent_locked((TDictObject*)self);
-}
 static PyObject* tldict_repr(PyObject* self) {
    return lazy_seq_str(tldict_held_tdict(self, NULL), "{<", ">}", 0);
 }
@@ -801,8 +755,6 @@ static PyMethodDef tldict_methods[] = {
    {"held_tdict", (PyCFunction)tldict_held_tdict, METH_NOARGS,
     "Returns a tdict of the dict's items with lazy values left uncomputed."},
    {"__holdlazy__", (PyCFunction)tldict_held_tdict, METH_NOARGS, NULL},
-   {"persistent", (PyCFunction)tldict_persistent, METH_NOARGS,
-    "Returns an ldict copy of the dict."},
    {NULL, NULL, 0, NULL}
 };
 static PyType_Slot tldict_slots[] = {
@@ -938,17 +890,6 @@ static PyObject* llist_held_plist(PyObject* self, PyObject* Py_UNUSED(ignored)) 
 static PyObject* llist_getlazy(PyObject* self, PyObject* index) {
    return ST(PListType)->tp_as_mapping->mp_subscript(self, index);
 }
-static PyObject* llist_clear(PyObject* self, PyObject* Py_UNUSED(ignored)) {
-   (void)self;
-   Py_INCREF(ST(g_llist_empty));
-   return (PyObject*)ST(g_llist_empty);
-}
-static PyObject* llist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)) {
-   trienode_incref(self->root);
-   Py_INCREF(self);
-   return tlist_wrap_astype(ST(TLListType), self->root, self->start,
-                            self->length, (PyObject*)self);
-}
 static int llist_gc_traverse(PyObject* self, visitproc visit, void* arg) {
    return plist_traverse((PListObject*)self, visit, arg);
 }
@@ -989,10 +930,6 @@ static PyMethodDef llist_methods[] = {
    {"__holdlazy__", (PyCFunction)llist_held_plist, METH_NOARGS, NULL},
    {"getlazy", (PyCFunction)llist_getlazy, METH_O,
     "Like self[index], but returns a lazy element itself rather than its value."},
-   {"clear", (PyCFunction)llist_clear, METH_NOARGS,
-    "Returns the empty llist."},
-   {"transient", (PyCFunction)llist_transient, METH_NOARGS,
-    "Returns a tllist copy of the list in constant time."},
    {NULL, NULL, 0, NULL}
 };
 static PyType_Slot llist_slots[] = {
@@ -1061,36 +998,6 @@ PCOLL_LOCKED0(PyObject*, tllist_held_tlist_locked, tllist_held_tlist_impl,
 static PyObject* tllist_held_tlist(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    return tllist_held_tlist_locked((TListObject*)self);
 }
-static PyObject* tllist_persistent_impl(TListObject* self) {
-   PListObject* p;
-   Trie_t root;
-   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
-   if (self->length == 0) {
-      Py_INCREF(ST(g_llist_empty));
-      return (PyObject*)ST(g_llist_empty);
-   }
-   if (self->orig) {
-      Py_INCREF(self->orig);
-      return self->orig;
-   }
-   root = tlist_share(self);
-   if (!root) return NULL;
-   p = (PListObject*)ST(LListType)->tp_alloc(ST(LListType), 0);
-   if (!p) {
-      fatnode_decref(root, pyobj_decref);
-      return NULL;
-   }
-   p->root = root;
-   p->start = self->start;
-   p->length = self->length;
-   p->hashcode = -1;
-   return (PyObject*)p;
-}
-PCOLL_LOCKED0(PyObject*, tllist_persistent_locked, tllist_persistent_impl,
-              TListObject*)
-static PyObject* tllist_persistent(PyObject* self, PyObject* Py_UNUSED(ignored)) {
-   return tllist_persistent_locked((TListObject*)self);
-}
 static PyObject* tllist_repr(PyObject* self) {
    return lazy_seq_str(tllist_held_tlist(self, NULL), "[<", ">]", 0);
 }
@@ -1117,8 +1024,6 @@ static PyMethodDef tllist_methods[] = {
    {"held_tlist", (PyCFunction)tllist_held_tlist, METH_NOARGS,
     "Returns a tlist of the list's elements with lazy elements left uncomputed."},
    {"__holdlazy__", (PyCFunction)tllist_held_tlist, METH_NOARGS, NULL},
-   {"persistent", (PyCFunction)tllist_persistent, METH_NOARGS,
-    "Returns an llist copy of the list."},
    {NULL, NULL, 0, NULL}
 };
 static PyType_Slot tllist_slots[] = {
@@ -1214,16 +1119,17 @@ static int pcoll_exec_lazy(PyObject* m, pcoll_state* st) {
 
    st->LazyType = pcoll_new_type(m, &lazy_spec, NULL);
    if (!st->LazyType) goto done;
+   pcoll_set_weaklistoffset(st->LazyType, offsetof(LazyObject, weaklist));
    if (PyObject_SetAttr((PyObject*)st->LazyType, st->g_str_trace, trace) < 0)
       goto done;
    st->UnlazyIterType = pcoll_new_internal_type(m, &unlazyiter_spec);
    if (!st->UnlazyIterType) goto done;
 
-   coll_abc = PyImport_ImportModule("collections.abc");
+   coll_abc = PyImport_ImportModule("pcollections.abc._view");
    if (!coll_abc) goto done;
-   st->g_ItemsView = PyObject_GetAttrString(coll_abc, "ItemsView");
+   st->g_ItemsView = PyObject_GetAttrString(coll_abc, "ldict_items");
    if (!st->g_ItemsView) goto done;
-   st->g_ValuesView = PyObject_GetAttrString(coll_abc, "ValuesView");
+   st->g_ValuesView = PyObject_GetAttrString(coll_abc, "ldict_values");
    if (!st->g_ValuesView) goto done;
    st->g_tdict_pop = PyObject_GetAttrString((PyObject*)st->TDictType, "pop");
    if (!st->g_tdict_pop) goto done;
@@ -1237,6 +1143,15 @@ static int pcoll_exec_lazy(PyObject* m, pcoll_state* st) {
        !(st->TLListType = build_c_subtype(m, &tllist_spec, st->TListType)))
       goto done;
 
+   if (pcoll_type_setattr(st->LDictType, "__transient_type__",
+                          (PyObject*)st->TLDictType) < 0 ||
+       pcoll_type_setattr(st->TLDictType, "__persistent_type__",
+                          (PyObject*)st->LDictType) < 0 ||
+       pcoll_type_setattr(st->LListType, "__transient_type__",
+                          (PyObject*)st->TLListType) < 0 ||
+       pcoll_type_setattr(st->TLListType, "__persistent_type__",
+                          (PyObject*)st->LListType) < 0)
+      goto done;
    empty = pdictlike_share(st->LDictType, st->g_pdict_empty);
    if (!empty) goto done;
    st->g_ldict_empty = (PDictObject*)empty;

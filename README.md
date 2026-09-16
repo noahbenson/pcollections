@@ -82,6 +82,54 @@ the keys of a `tdict` or `tset` while iterating over it raises `RuntimeError`;
 iterating over a `tlist` while changing it behaves like iterating over a
 `list`.
 
+### Behavior shared with the builtins
+
+- Lookups match objects by identity or equality, as `dict`, `set`, and `list`
+  do, so `nan in pset([nan])` is true when `nan` is the same object.
+- `hash(pset(x)) == hash(frozenset(x))`, so a `pset` and an equal `frozenset`
+  are interchangeable as dictionary keys. Transient types are unhashable.
+- `pdict` and `tdict` support `|` (and `tdict` supports `|=`), `fromkeys`,
+  and `reversed`. `tlist` supports slice assignment and deletion.
+- Persistent types have `drop(key, error=False)`, which returns the
+  collection unchanged when the key (or index) isn't present, or raises
+  `KeyError` (or `IndexError`) when `error` is true. `delete(key)` always
+  raises.
+- All types can be weakly referenced and subscripted for type hints
+  (`pdict[str, int]`).
+
+### Subclassing
+
+All of the types can be subclassed, and methods that return a new collection
+return an instance of the subclass. A persistent class names its transient
+partner in the class attribute `__transient_type__` (used by `transient()`),
+and a transient class names its persistent partner in `__persistent_type__`
+(used by `persistent()`):
+
+```python
+class MyDict(pdict):
+    __slots__ = ()
+class MyTDict(tdict):
+    __slots__ = ()
+MyDict.__transient_type__ = MyTDict
+MyTDict.__persistent_type__ = MyDict
+```
+
+### Backends
+
+`pcollections` is implemented in C, with a pure-Python fallback. If the C
+extension can't be loaded, `pcollections` uses the (much slower) Python
+backend and issues a `RuntimeWarning`; `pcollections.using_c_extension` says
+which backend is in use, and `pcollections.backend_error` holds the exception
+that prevented loading the C extension. Two environment variables control
+this:
+
+- `PCOLLECTIONS_NO_C_EXTENSIONS=1` selects the Python backend without a
+  warning.
+- `PCOLLECTIONS_REQUIRE_C=1` makes importing `pcollections` fail when the C
+  backend isn't available.
+
+Objects pickled with one backend can be unpickled with the other.
+
 
 ## License
 

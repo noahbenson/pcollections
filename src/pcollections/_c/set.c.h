@@ -204,6 +204,7 @@ typedef struct PSetObject {
    Py_ssize_t count;      // number of live entries (== len()).
    Py_ssize_t ndeleted;   // holes burned by deletions since last compaction.
    Py_hash_t hashcode;    // -1 == not yet computed.
+   PyObject* weaklist;
 } PSetObject;
 
 // The types and the empty pset live in the module state (core.h).
@@ -224,28 +225,44 @@ static void pset_dealloc(PSetObject* self) {
    // Heap-type instances own a reference to their type.
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    pset_clear(self);
-   PyObject_GC_Del(self);
+   tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
 }
 static Py_ssize_t pset_length(PSetObject* self) {
    return self->count;
 }
 
-// Takes ownership of the one reference to `els`/`idx` that callers already
-// hold, wrapping them in a new pset -- EXCEPT that a 0-element result
-// always collapses to the canonical empty pset singleton instead (mirrors
-// pdict_wrap()'s identical convention in dict.c.h).
-static PyObject* pset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
-                            Py_ssize_t count, Py_ssize_t ndeleted) {
+// A new empty instance of `type`.
+static PyObject* pset_make_empty(PyTypeObject* type) {
+   PSetObject* self = (PSetObject*)type->tp_alloc(type, 0);
+   if (!self) return NULL;
+   self->els = fat_empty(SETELSLEAFSIZE);
+   self->idx = amt_empty(SETIDXLEAFSIZE);
+   self->hashcode = -1;
+   return (PyObject*)self;
+}
+// The empty instance of `type` (see pcoll_type_empty in core.h).
+static PyObject* pset_type_empty(PyTypeObject* type) {
+   if (type == ST(PSetType)) {
+      Py_INCREF(ST(g_pset_empty));
+      return (PyObject*)ST(g_pset_empty);
+   }
+   return pcoll_type_empty(type, pset_make_empty);
+}
+// Wraps `els`/`idx` (whose references are consumed) in a new instance of
+// `type`, or returns the empty instance for an empty set.
+static PyObject* pset_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
+                                  Py_ssize_t top, Py_ssize_t count,
+                                  Py_ssize_t ndeleted) {
    PSetObject* self;
    if (count == 0) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
-      Py_INCREF(ST(g_pset_empty));
-      return (PyObject*)ST(g_pset_empty);
+      return pset_type_empty(type);
    }
-   self = PyObject_GC_New(PSetObject, ST(PSetType));
+   self = (PSetObject*)type->tp_alloc(type, 0);
    if (!self) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
@@ -257,7 +274,6 @@ static PyObject* pset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
    self->count = count;
    self->ndeleted = ndeleted;
    self->hashcode = -1;
-   PyObject_GC_Track(self);
    return (PyObject*)self;
 }
 
@@ -316,7 +332,7 @@ static int set_should_compact(Py_ssize_t count, Py_ssize_t ndeleted) {
    return ndeleted * SET_COMPACT_FRAC_DEN > count * SET_COMPACT_FRAC_NUM;
 }
 
-static PyObject* pset_new_dispatch(PyObject* arg);
+static PyObject* pset_new_dispatch(PyTypeObject* type, PyObject* arg);
 
 static PyObject* pset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    Py_ssize_t n = PyTuple_GET_SIZE(args);
@@ -326,10 +342,9 @@ static PyObject* pset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       return NULL;
    }
    if (n == 0) {
-      Py_INCREF(ST(g_pset_empty));
-      return (PyObject*)ST(g_pset_empty);
+      return pset_type_empty(type);
    } else if (n == 1) {
-      return pset_new_dispatch(PyTuple_GET_ITEM(args, 0));
+      return pset_new_dispatch(type, PyTuple_GET_ITEM(args, 0));
    } else {
       PyErr_Format(PyExc_TypeError,
                     "pset expects at most 1 argument, got %zd", n);
@@ -337,35 +352,40 @@ static PyObject* pset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    }
 }
 
+// The frozenset hash (Objects/setobject.c), so that a pset hashes like an
+// equal frozenset. If this interpreter's frozenset hash differs (checked at
+// import by pcollections.util), a frozenset is built instead.
+static Py_uhash_t pset_shuffle_bits(Py_uhash_t h) {
+   return ((h ^ (Py_uhash_t)89869747UL) ^ (h << 16)) * (Py_uhash_t)3644798167UL;
+}
 static Py_hash_t pset_hash(PSetObject* self) {
-   PyObject* fs;
-   PyObject* h;
    Py_hash_t result;
    TriePath iter;
    int ok;
    result = PCOLL_HASH_LOAD(self->hashcode);
    if (result != -1) return result;
-   fs = PySet_New(NULL);
-   if (!fs) return -1;
-   for (ok = fat_firstpath(self->els, &iter); ok; ok = fat_nextpath(&iter)) {
-      SetEntry* e = (SetEntry*)triepath_val(&iter);
-      int r;
-      if (setentry_is_tombstone(e)) continue;
-      r = PySet_Add(fs, e->key);
-      if (r < 0) { Py_DECREF(fs); return -1; }
+   if (ST(frozenset_hash_ok)) {
+      Py_uhash_t h = 0;
+      for (ok = fat_firstpath(self->els, &iter); ok; ok = fat_nextpath(&iter)) {
+         SetEntry* e = (SetEntry*)triepath_val(&iter);
+         Py_hash_t eh;
+         if (setentry_is_tombstone(e)) continue;
+         eh = PyObject_Hash(e->key);
+         if (eh == -1 && PyErr_Occurred()) return -1;
+         h ^= pset_shuffle_bits((Py_uhash_t)eh);
+      }
+      h ^= ((Py_uhash_t)self->count + 1) * (Py_uhash_t)1927868237UL;
+      h ^= (h >> 11) ^ (h >> 25);
+      h = h * 69069U + (Py_uhash_t)907133923UL;
+      if (h == (Py_uhash_t)-1) h = (Py_uhash_t)590923713UL;
+      result = (Py_hash_t)h;
+   } else {
+      PyObject* fs = PyFrozenSet_New((PyObject*)self);
+      if (!fs) return -1;
+      result = PyObject_Hash(fs);
+      Py_DECREF(fs);
+      if (result == -1) return -1;
    }
-   h = PyFrozenSet_New(fs);
-   Py_DECREF(fs);
-   if (!h) return -1;
-   result = PyObject_Hash(h);
-   Py_DECREF(h);
-   if (result == -1) return -1;
-   // Matches PersistentSet.__hash__'s `hash(frozenset(self)) + 1` exactly
-   // (dict.c.h's analogous pdict_hash uses +2, matching PersistentMapping's
-   // own convention -- these offsets exist upstream so that, e.g., an empty
-   // pset and an empty pdict don't collide with frozenset() itself).
-   result += 1;
-   if (result == -1) result = -2;
    PCOLL_HASH_STORE(self->hashcode, result);
    return result;
 }
@@ -431,7 +451,8 @@ static PyObject* pset_add(PSetObject* self, PyObject* obj) {
       amtnode_decref(new_idx, noop_decref);
       new_els = c_els; new_idx = c_idx; new_top = c_top; new_ndeleted = 0;
    }
-   return pset_wrap(new_els, new_idx, new_top, new_count, new_ndeleted);
+   return pset_wrap_astype(Py_TYPE(self), new_els, new_idx, new_top,
+                           new_count, new_ndeleted);
 }
 
 static PyObject* pset_discard(PSetObject* self, PyObject* obj) {
@@ -494,15 +515,14 @@ have_new_els:
       amt_freeze(c_idx);
       fatnode_decref(new_els, setentry_decref);
       amtnode_decref(new_idx, noop_decref);
-      return pset_wrap(c_els, c_idx, c_top, new_count, 0);
+      return pset_wrap_astype(Py_TYPE(self), c_els, c_idx, c_top, new_count, 0);
    }
-   return pset_wrap(new_els, new_idx, self->top, new_count, new_ndeleted);
+   return pset_wrap_astype(Py_TYPE(self), new_els, new_idx, self->top,
+                           new_count, new_ndeleted);
 }
 
 static PyObject* pset_clear_method(PSetObject* self, PyObject* Py_UNUSED(ignored)) {
-   (void)self;
-   Py_INCREF(ST(g_pset_empty));
-   return (PyObject*)ST(g_pset_empty);
+   return pset_type_empty(Py_TYPE(self));
 }
 
 static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored));
@@ -538,6 +558,7 @@ static PyMethodDef pset_methods[] = {
     "Returns the empty pset."},
    {"transient", (PyCFunction)pset_transient, METH_NOARGS,
     "Efficiently copies the pset into a tset and returns the tset."},
+   PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 
@@ -562,7 +583,7 @@ static PyType_Spec pset_spec = {
    .name = "pcollections.pset",
    .basicsize = sizeof(PSetObject),
    .itemsize = 0,
-   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = pset_slots,
 };
 
@@ -581,6 +602,7 @@ typedef struct {
                             // TDictObject's matching field in dict.c.h for the
                             // exact caching/invalidation convention.
    pcoll_tguard guard;      // see core.h.
+   PyObject* weaklist;
 } TSetObject;
 
 static int tset_traverse(TSetObject* self, visitproc visit, void* arg) {
@@ -601,19 +623,21 @@ static int tset_clear(TSetObject* self) {
 static void tset_dealloc(TSetObject* self) {
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    tset_clear(self);
-   PyObject_GC_Del(self);
+   tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
 }
 static Py_ssize_t tset_length_impl(TSetObject* self) {
    return self->count;
 }
 PCOLL_LOCKED0(Py_ssize_t, tset_length, tset_length_impl, TSetObject*)
-static PyObject* tset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
-                            Py_ssize_t count, Py_ssize_t ndeleted,
-                            PyObject* orig) {
-   TSetObject* self = PyObject_GC_New(TSetObject, ST(TSetType));
-   if (self) memset(&self->guard, 0, sizeof(self->guard));
+// Wraps `els`/`idx` and `orig` (whose references are consumed) in a new
+// instance of `type`.
+static PyObject* tset_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
+                                  Py_ssize_t top, Py_ssize_t count,
+                                  Py_ssize_t ndeleted, PyObject* orig) {
+   TSetObject* self = (TSetObject*)type->tp_alloc(type, 0);
    if (!self) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
@@ -623,7 +647,6 @@ static PyObject* tset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
    self->els = els; self->idx = idx;
    self->top = top; self->count = count; self->ndeleted = ndeleted;
    self->orig = orig;
-   PyObject_GC_Track(self);
    return (PyObject*)self;
 }
 static void tset_invalidate_orig(TSetObject* self) {
@@ -632,8 +655,9 @@ static void tset_invalidate_orig(TSetObject* self) {
    Py_XDECREF(orig);
 }
 
-static PyObject* tset_empty(void) {
-   return tset_wrap(fat_empty(SETELSLEAFSIZE), amt_empty(SETIDXLEAFSIZE), 0, 0, 0, NULL);
+static PyObject* tset_empty_astype(PyTypeObject* type) {
+   return tset_wrap_astype(type, fat_empty(SETELSLEAFSIZE),
+                           amt_empty(SETIDXLEAFSIZE), 0, 0, 0, NULL);
 }
 
 // Maybe-compact a tset in place after a mutation -- mirrors dict.c.h's
@@ -750,8 +774,8 @@ PCOLL_LOCKED1(int, tset_contains, tset_contains_impl, TSetObject*, PyObject*)
 // Builds a fresh, freshly-populated tset out of a general Python iterable of
 // elements. Mirrors tset.__new__'s general-argument fallback in _set.py
 // (`t = cls.empty(); t.addall(arg); return t`).
-static PyObject* tset_build_from_arg(PyObject* arg) {
-   PyObject* obj = tset_empty();
+static PyObject* tset_build_from_arg(PyTypeObject* type, PyObject* arg) {
+   PyObject* obj = tset_empty_astype(type);
    PyObject* iterator;
    PyObject* item;
    if (!obj) return NULL;
@@ -781,35 +805,23 @@ static int tset_share(TSetObject* self, Trie_t* els, Trie_t* idx) {
    return 0;
 }
 
-// Forward-declared: implemented after PSetType/pset_transient exist (the
-// `type(arg) is pset` case below routes through pset_transient()).
-static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored));
-
 static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    Py_ssize_t n = PyTuple_GET_SIZE(args);
    PyObject* arg;
-   (void)type;
    if (kwds && PyDict_Size(kwds) > 0) {
       PyErr_SetString(PyExc_TypeError, "tset() takes no keyword arguments");
       return NULL;
    }
-   if (n == 0) return tset_empty();
+   if (n == 0) return tset_empty_astype(type);
    if (n != 1) {
       PyErr_Format(PyExc_TypeError,
                     "tset expects at most 1 argument, got %zd", n);
       return NULL;
    }
    arg = PyTuple_GET_ITEM(args, 0);
-   if (Py_TYPE(arg) == ST(TSetType)) {
-      // tset(some_tset): share a frozen snapshot of that tset's current
-      // (els, idx) -- not the tset's own live, still-mutable trees -- as
-      // the starting point for a brand-new, independent transient session.
-      // Also propagates `orig`, exactly mirroring dict.c.h's tdict_new().
-      // (Note: the reference _set.py's tset.__new__ doesn't special-case a
-      // tset argument at all -- it just falls through to addall(), an O(n)
-      // rebuild -- but dict.c.h's tdict.__new__ DOES have this fast path,
-      // matching _dict.py's own tdict.__new__ exactly. Adding it here too
-      // keeps pset/tset "mostly identical to the dict types" as asked.)
+   if (PyObject_TypeCheck(arg, ST(TSetType))) {
+      // Share a frozen snapshot of the other tset. Its cached original is a
+      // pset, so it is kept only when making a plain tset.
       TSetObject* t = (TSetObject*)arg;
       Trie_t els, idx;
       PyObject* orig = NULL;
@@ -818,34 +830,55 @@ static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       PCOLL_BEGIN_LOCK(arg);
       rc = tset_share(t, &els, &idx);
       if (rc == 0) {
-         orig = t->orig;
+         orig = (type == ST(TSetType)) ? t->orig : NULL;
          Py_XINCREF(orig);
          top = t->top; count = t->count; ndeleted = t->ndeleted;
       }
       PCOLL_END_LOCK();
       if (rc < 0) return NULL;
-      return tset_wrap(els, idx, top, count, ndeleted, orig);
+      return tset_wrap_astype(type, els, idx, top, count, ndeleted, orig);
    }
-   if (Py_TYPE(arg) == ST(PSetType)) {
-      // tset(some_pset): exactly pset.transient()'s own O(1) sharing logic.
-      return pset_transient((PSetObject*)arg, NULL);
+   if (PyObject_TypeCheck(arg, ST(PSetType))) {
+      PSetObject* p = (PSetObject*)arg;
+      PyObject* orig = (type == ST(TSetType) && Py_TYPE(arg) == ST(PSetType))
+         ? arg : NULL;
+      trienode_incref(p->els);
+      trienode_incref(p->idx);
+      Py_XINCREF(orig);
+      return tset_wrap_astype(type, p->els, p->idx, p->top, p->count,
+                              p->ndeleted, orig);
    }
-   return tset_build_from_arg(arg);
+   return tset_build_from_arg(type, arg);
 }
 
-static PyObject* tset_persistent_impl(TSetObject* self) {
+// Returns a new instance of `ptype` (a persistent partner type) holding the
+// transient's contents; the cached original is used when it has that type.
+static PyObject* tset_persistent_as(TSetObject* self, PyTypeObject* ptype) {
    Trie_t els, idx;
    if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
-   if (self->count == 0) {
-      Py_INCREF(ST(g_pset_empty));
-      return (PyObject*)ST(g_pset_empty);
-   }
-   if (self->orig) {
+   if (self->orig && Py_TYPE(self->orig) == ptype) {
       Py_INCREF(self->orig);
       return self->orig;
    }
+   if (self->count == 0) return pset_type_empty(ptype);
    if (tset_share(self, &els, &idx) < 0) return NULL;
-   return pset_wrap(els, idx, self->top, self->count, self->ndeleted);
+   return pset_wrap_astype(ptype, els, idx, self->top, self->count,
+                           self->ndeleted);
+}
+static PyObject* tset_persistent_impl(TSetObject* self) {
+   PyTypeObject* ptype;
+   PyObject* result;
+   if (Py_TYPE(self) == ST(TSetType)) {
+      ptype = ST(PSetType);
+      Py_INCREF(ptype);
+   } else {
+      ptype = pcoll_partner_type((PyObject*)self, "__persistent_type__",
+                                 ST(PSetType));
+      if (!ptype) return NULL;
+   }
+   result = tset_persistent_as(self, ptype);
+   Py_DECREF(ptype);
+   return result;
 }
 PCOLL_LOCKED0(PyObject*, tset_persistent_locked, tset_persistent_impl,
               TSetObject*)
@@ -854,16 +887,24 @@ static PyObject* tset_persistent(TSetObject* self, PyObject* Py_UNUSED(ignored))
 }
 
 static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored)) {
+   PyTypeObject* ttype;
+   PyObject* result;
+   if (Py_TYPE(self) == ST(PSetType)) {
+      ttype = ST(TSetType);
+      Py_INCREF(ttype);
+   } else {
+      ttype = pcoll_partner_type((PyObject*)self, "__transient_type__",
+                                 ST(TSetType));
+      if (!ttype) return NULL;
+   }
    trienode_incref(self->els);
    trienode_incref(self->idx);
-   // tset_wrap()'s `orig` parameter takes ownership of (does not itself
-   // incref) the reference it's handed -- self must be incref'd here,
-   // exactly as pdict_transient() does in dict.c.h, or the returned tset ends
-   // up holding an unowned pointer to self (a use-after-free/double-free on
-   // `self` once the tset is later deallocated).
+   // The transient keeps a reference to self as its cached original.
    Py_INCREF(self);
-   return tset_wrap(self->els, self->idx, self->top, self->count,
-                     self->ndeleted, (PyObject*)self);
+   result = tset_wrap_astype(ttype, self->els, self->idx, self->top,
+                             self->count, self->ndeleted, (PyObject*)self);
+   Py_DECREF(ttype);
+   return result;
 }
 
 static PyObject* tset_clear_impl(TSetObject* self) {
@@ -915,8 +956,7 @@ static PyObject* tset_str(TSetObject* self) {
 // written to take `cls` anyway for parity with tdict/tlist's classmethod
 // signature. Previously unexposed to Python at all.
 static PyObject* tset_empty_classmethod(PyObject* cls, PyObject* Py_UNUSED(ignored)) {
-   (void)cls;
-   return tset_empty();
+   return tset_empty_astype((PyTypeObject*)cls);
 }
 
 static PyMethodDef tset_methods[] = {
@@ -930,6 +970,7 @@ static PyMethodDef tset_methods[] = {
     "Clears all elements from the tset."},
    {"persistent", (PyCFunction)tset_persistent, METH_NOARGS,
     "Efficiently copies the tset into a pset and returns the pset."},
+   PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 
@@ -954,35 +995,44 @@ static PyType_Spec tset_spec = {
    .name = "pcollections.tset",
    .basicsize = sizeof(TSetObject),
    .itemsize = 0,
-   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = tset_slots,
 };
 
-// pset_new_dispatch()'s general-argument routing is defined down here, now
-// that tset_new()/tset_persistent() both exist -- mirrors dict.c.h's
-// pdict_new_dispatch() exactly.
-static PyObject* pset_new_dispatch(PyObject* arg) {
+// pset(arg), for `type` pset or a subtype. An object of exactly the requested
+// type is returned as-is; a tset or pset is shared; anything else is
+// iterated.
+static PyObject* pset_new_dispatch(PyTypeObject* type, PyObject* arg) {
    PyObject* t;
    PyObject* result;
-   if (Py_TYPE(arg) == ST(TSetType)) {
-      // pset(some_tset): efficiently take a persistent snapshot -- reuses
-      // tset_persistent() directly (rather than duplicating its `orig`-
-      // cache-check logic) so the cache benefit applies here too, which is
-      // actually an improvement on _set.py's own pset.__new__ (which
-      // bypasses `tset.persistent()`'s cache and always rebuilds).
-      return tset_persistent((TSetObject*)arg, NULL);
-   }
-   if (Py_TYPE(arg) == ST(PSetType)) {
-      // pset(some_pset): already the right (immutable) type -- psets are
-      // never subclassed (Py_TPFLAGS_BASETYPE is unset), so this is always
-      // exactly a no-op copy.
+   if (Py_TYPE(arg) == type) {
       Py_INCREF(arg);
       return arg;
    }
-   // General path: route through tset, then take a persistent snapshot.
-   t = tset_build_from_arg(arg);
+   if (PyObject_TypeCheck(arg, ST(TSetType))) {
+      TSetObject* ts = (TSetObject*)arg;
+      Trie_t els, idx;
+      Py_ssize_t top = 0, count = 0, ndeleted = 0;
+      int rc;
+      PCOLL_BEGIN_LOCK(arg);
+      rc = tset_share(ts, &els, &idx);
+      if (rc == 0) {
+         top = ts->top; count = ts->count; ndeleted = ts->ndeleted;
+      }
+      PCOLL_END_LOCK();
+      if (rc < 0) return NULL;
+      return pset_wrap_astype(type, els, idx, top, count, ndeleted);
+   }
+   if (PyObject_TypeCheck(arg, ST(PSetType))) {
+      PSetObject* p = (PSetObject*)arg;
+      trienode_incref(p->els);
+      trienode_incref(p->idx);
+      return pset_wrap_astype(type, p->els, p->idx, p->top, p->count,
+                              p->ndeleted);
+   }
+   t = tset_build_from_arg(ST(TSetType), arg);
    if (!t) return NULL;
-   result = tset_persistent((TSetObject*)t, NULL);
+   result = tset_persistent_as((TSetObject*)t, type);
    Py_DECREF(t);
    return result;
 }
@@ -1150,11 +1200,29 @@ static int pcoll_exec_set(PyObject* m, pcoll_state* st) {
       goto done;
    // tset is unhashable, like its base.
    st->TSetType->tp_hash = st->TSetType->tp_base->tp_hash;
+   pcoll_set_weaklistoffset(st->PSetType, offsetof(PSetObject, weaklist));
+   pcoll_set_weaklistoffset(st->TSetType, offsetof(TSetObject, weaklist));
+   if (pcoll_type_setattr(st->PSetType, "__transient_type__",
+                          (PyObject*)st->TSetType) < 0 ||
+       pcoll_type_setattr(st->TSetType, "__persistent_type__",
+                          (PyObject*)st->PSetType) < 0)
+      goto done;
+   {
+      PyObject* util = PyImport_ImportModule("pcollections.util._core");
+      PyObject* ok;
+      if (!util) goto done;
+      ok = PyObject_GetAttrString(util, "FROZENSET_HASH_MATCHES");
+      Py_DECREF(util);
+      if (!ok) goto done;
+      st->frozenset_hash_ok = PyObject_IsTrue(ok);
+      Py_DECREF(ok);
+      if (st->frozenset_hash_ok < 0) goto done;
+   }
    if (!(st->PSetIterType = pcoll_new_internal_type(m, &psetiter_spec)) ||
        !(st->TSetIterType = pcoll_new_internal_type(m, &tsetiter_spec)))
       goto done;
 
-   empty = PyObject_GC_New(PSetObject, st->PSetType);
+   empty = (PSetObject*)st->PSetType->tp_alloc(st->PSetType, 0);
    if (!empty) goto done;
    empty->els = fat_empty(SETELSLEAFSIZE);
    empty->idx = amt_empty(SETIDXLEAFSIZE);
@@ -1162,7 +1230,6 @@ static int pcoll_exec_set(PyObject* m, pcoll_state* st) {
    empty->count = 0;
    empty->ndeleted = 0;
    empty->hashcode = -1;
-   PyObject_GC_Track(empty);
    st->g_pset_empty = empty;
    if (pcoll_type_setattr(st->PSetType, "empty", (PyObject*)empty) < 0)
       goto done;

@@ -127,11 +127,11 @@ class _PListTestMixin:
         self.assertEqual(l, ll[10:])
         self.assertEqual(ll[:10], l)
         self.assertEqual(ll[10:], l)
-        # Cannot multiply by a non-integer
+        # Cannot multiply by a non-integer (TypeError, as for list).
         for notint in ['x', [1], 5.5]:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(TypeError):
                 u = l * notint
-            with self.assertRaises(ValueError):
+            with self.assertRaises(TypeError):
                 u = notint * l
     def test_add(self):
         "Tests the self.plist addition operator."
@@ -395,11 +395,11 @@ class _LListTestMixin:
         self.assertEqual(l, ll[10:])
         self.assertEqual(ll[:10], l)
         self.assertEqual(ll[10:], l)
-        # Cannot multiply by a non-integer
+        # Cannot multiply by a non-integer (TypeError, as for list).
         for notint in ['x', [1], 5.5]:
-            with self.assertRaises(ValueError):
+            with self.assertRaises(TypeError):
                 u = l * notint
-            with self.assertRaises(ValueError):
+            with self.assertRaises(TypeError):
                 u = notint * l
     def test_add(self):
         "Tests the self.plist addition operator."

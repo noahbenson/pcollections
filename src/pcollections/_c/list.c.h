@@ -103,6 +103,7 @@ typedef struct PListObject {
    Py_hash_t hashcode;   // -1 == not yet computed (matches CPython's usual
                          // cached-hash convention; a genuine hash of -1 is
                          // remapped to -2, same as tuple/str do).
+   PyObject* weaklist;
 } PListObject;
 
 // The types, the empty plist, and seqstr live in the module state (core.h).
@@ -123,13 +124,13 @@ typedef struct PListObject {
 // other (necessarily subclass, e.g. llist) target type we always build a
 // fresh, correctly-typed instance instead, since collapsing to the
 // unrelated g_plist_empty would silently lose the subclass.
+static PyObject* plist_type_empty(PyTypeObject* type);
 static PyObject* plist_wrap_astype(PyTypeObject* type, Trie_t root,
                                     trieint_t start, Py_ssize_t length) {
    PListObject* self;
-   if (length == 0 && type == ST(PListType)) {
+   if (length == 0) {
       fatnode_decref(root, pyobj_decref);
-      Py_INCREF(ST(g_plist_empty));
-      return (PyObject*)ST(g_plist_empty);
+      return plist_type_empty(type);
    }
    // tp_alloc (not PyObject_GC_New) so a subclass's auto-added trailing
    // fields (__dict__/__weakref__) are zero-initialized -- see dict.c.h's
@@ -147,23 +148,36 @@ static PyObject* plist_wrap_astype(PyTypeObject* type, Trie_t root,
    self->hashcode = -1;
    return (PyObject*)self;
 }
-static PyObject* plist_wrap(Trie_t root, trieint_t start, Py_ssize_t length) {
-   return plist_wrap_astype(ST(PListType), root, start, length);
+// A new empty instance of `type`.
+static PyObject* plist_make_empty(PyTypeObject* type) {
+   PListObject* self = (PListObject*)type->tp_alloc(type, 0);
+   if (!self) return NULL;
+   self->root = fat_empty(PYLEAFSIZE);
+   self->start = LIST_START_MID;
+   self->hashcode = -1;
+   return (PyObject*)self;
 }
-
-// Returns the canonical empty instance of `type` (a new reference), mirroring
-// the reference's `cls.empty` class-attribute lookup in plist.__new__ (plist,
-// unlike tlist, stores `empty` as a plain attribute rather than a
-// classmethod). For plain PListType this is just the g_plist_empty
-// singleton; for any other (necessarily subclass) type, the subclass is
-// expected to have set its own `empty` class attribute (falling back to
-// pdict.empty/plist.empty via ordinary MRO attribute lookup if it hasn't).
+// The empty instance of `type` (see pcoll_type_empty in core.h).
 static PyObject* plist_type_empty(PyTypeObject* type) {
    if (type == ST(PListType)) {
       Py_INCREF(ST(g_plist_empty));
       return (PyObject*)ST(g_plist_empty);
    }
-   return PyObject_GetAttrString((PyObject*)type, "empty");
+   return pcoll_type_empty(type, plist_make_empty);
+}
+
+// Converts a subscript to an index, raising TypeError as list does.
+static int seq_index_arg(PyObject* self, PyObject* key, Py_ssize_t* out) {
+   if (!PyIndex_Check(key)) {
+      PyErr_Format(PyExc_TypeError,
+                   "%.200s indices must be integers or slices, not %.200s",
+                   pcoll_short_name(Py_TYPE(self)),
+                   pcoll_short_name(Py_TYPE(key)));
+      return -1;
+   }
+   *out = PyNumber_AsSsize_t(key, PyExc_IndexError);
+   if (*out == -1 && PyErr_Occurred()) return -1;
+   return 0;
 }
 
 static int plist_traverse(PListObject* self, visitproc visit, void* arg) {
@@ -182,6 +196,7 @@ static void plist_dealloc(PListObject* self) {
    // Py_INCREF(type) -- see pdict_dealloc's comment in dict.c.h.
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    plist_clear(self);
    tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
@@ -321,17 +336,18 @@ static PyObject* plist_item(PListObject* self, Py_ssize_t i) {
 // transient tree (keys 0..slicelen-1) out of the elements
 // self->root[self->start + start_i + k*step_i] for k in [0, slicelen), then
 // freezes it. Used by both plist.__getitem__ and tlist.__getitem__.
-static Trie_t fat_getslice(Trie_t root, trieint_t start, PyObject* slice,
-                           Py_ssize_t length, Py_ssize_t* out_n) {
-   Py_ssize_t start_i, stop_i, step_i, slicelen, k;
+static Trie_t fat_getslice(Trie_t root, trieint_t start, Py_ssize_t length,
+                           Py_ssize_t start_i, Py_ssize_t stop_i,
+                           Py_ssize_t step_i, Py_ssize_t* out_n) {
+   // The slice was unpacked (which may run user code) by the caller.
+   Py_ssize_t slicelen = PySlice_AdjustIndices(length, &start_i, &stop_i,
+                                               step_i);
+   Py_ssize_t k;
    Trie_t work;
-   if (PySlice_GetIndicesEx(slice, length, &start_i, &stop_i, &step_i,
-                            &slicelen) < 0)
-      return NULL;
    work = fat_empty(PYLEAFSIZE);
    for (k = 0; k < slicelen; ++k) {
       Py_ssize_t srcidx = start_i + k * step_i;
-      void* valptr;
+      void* valptr = NULL;
       PyObject* val;
       fat_lookup(root, start + (trieint_t)srcidx, &valptr);
       val = *(PyObject**)valptr;
@@ -344,17 +360,18 @@ static Trie_t fat_getslice(Trie_t root, trieint_t start, PyObject* slice,
 
 static PyObject* plist_subscript(PListObject* self, PyObject* key) {
    if (PySlice_Check(key)) {
-      Py_ssize_t n;
-      Trie_t work = fat_getslice(self->root, self->start, key, self->length,
-                                 &n);
+      Py_ssize_t n, a, b, c;
+      Trie_t work;
+      if (PySlice_Unpack(key, &a, &b, &c) < 0) return NULL;
+      work = fat_getslice(self->root, self->start, self->length, a, b, c, &n);
       if (!work) return NULL;
       // Matches reference __getitem__'s slice branch: `self._new(...)` --
       // subclass-preserving (unlike e.g. plist.clear(), which hardcodes the
       // base plist.empty; see each method's own comment for which case it is).
       return plist_wrap_astype(Py_TYPE(self), work, LIST_START_MID, n);
    } else {
-      Py_ssize_t i = PyNumber_AsSsize_t(key, PyExc_IndexError);
-      if (i == -1 && PyErr_Occurred()) return NULL;
+      Py_ssize_t i;
+      if (seq_index_arg((PyObject*)self, key, &i) < 0) return NULL;
       return plist_item(self, i);
    }
 }
@@ -410,17 +427,14 @@ static PyObject* plist_delete(PListObject* self, PyObject* args) {
    // that exactly -- this is intentional fidelity to the reference, not an
    // oversight.
    if (idx == 0) {
-      if (n == 1) {
-         Py_INCREF(ST(g_plist_empty));
-         return (PyObject*)ST(g_plist_empty);
-      }
+      if (n == 1) return plist_type_empty(Py_TYPE(self));
       // fat_butitem(), like fat_anditem(), never touches or consumes a
       // reference to its input -- no incref of self->root needed here.
       work = fat_butitem(self->root, st, pyobj_incref);
-      return plist_wrap(work, st + 1, n - 1);
+      return plist_wrap_astype(Py_TYPE(self), work, st + 1, n - 1);
    } else if (idx == n - 1) {
       work = fat_butitem(self->root, st + (trieint_t)idx, pyobj_incref);
-      return plist_wrap(work, st, n - 1);
+      return plist_wrap_astype(Py_TYPE(self), work, st, n - 1);
    }
    // From here on, `work` is fed through tfat_setitem()/tfat_delitem() (the
    // *transient*, reference-consuming mutators), so it does need its own,
@@ -521,12 +535,7 @@ static PyObject* plist_insert(PListObject* self, PyObject* args) {
 }
 
 static PyObject* plist_clear_method(PListObject* self, PyObject* Py_UNUSED(ignored)) {
-   // Matches reference clear()'s `return plist.empty` -- hardcoded to the
-   // base plist singleton, deliberately NOT subclass-preserving (unlike
-   // most other mutators here).
-   (void)self;
-   Py_INCREF(ST(g_plist_empty));
-   return (PyObject*)ST(g_plist_empty);
+   return plist_type_empty(Py_TYPE(self));
 }
 
 static PyObject* plist_transient(PListObject* self, PyObject* Py_UNUSED(ignored));
@@ -548,6 +557,7 @@ static PyMethodDef plist_methods[] = {
     "Returns the empty plist."},
    {"transient", (PyCFunction)plist_transient, METH_NOARGS,
     "Efficiently copies the plist into a tlist and returns the tlist."},
+   PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 
@@ -603,6 +613,7 @@ typedef struct {
                           // tlist(plist_instance) constructor path -- see
                           // that constructor's comment.
    pcoll_tguard guard;    // see core.h.
+   PyObject* weaklist;
 } TListObject;
 
 // `type` must be TListType or a subtype of it (see the analogous note on
@@ -650,6 +661,7 @@ static void tlist_dealloc(TListObject* self) {
    // See plist_dealloc's comment: balances tp_alloc's Py_INCREF(type).
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
+   PCOLL_CLEAR_WEAKREFS(self);
    tlist_clear(self);
    tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
@@ -764,21 +776,33 @@ static PyObject* tlist_item_impl(TListObject* self, Py_ssize_t i) {
 }
 PCOLL_LOCKED1(PyObject*, tlist_item, tlist_item_impl, TListObject*, Py_ssize_t)
 
-static PyObject* tlist_getslice_impl(TListObject* self, PyObject* key) {
+static PyObject* tlist_getslice_impl(TListObject* self, PyObject* bounds) {
+   // `bounds` is a tuple of the unpacked (start, stop, step).
    Py_ssize_t n;
-   Trie_t work = fat_getslice(self->root, self->start, key, self->length, &n);
+   Trie_t work = fat_getslice(
+      self->root, self->start, self->length,
+      PyLong_AsSsize_t(PyTuple_GET_ITEM(bounds, 0)),
+      PyLong_AsSsize_t(PyTuple_GET_ITEM(bounds, 1)),
+      PyLong_AsSsize_t(PyTuple_GET_ITEM(bounds, 2)), &n);
    if (!work) return NULL;
-   return tlist_wrap(work, LIST_START_MID, n, NULL);
+   return tlist_wrap_astype(Py_TYPE(self), work, LIST_START_MID, n, NULL);
 }
 PCOLL_LOCKED1(PyObject*, tlist_getslice, tlist_getslice_impl,
               TListObject*, PyObject*)
 
 static PyObject* tlist_subscript(TListObject* self, PyObject* key) {
    if (PySlice_Check(key)) {
-      return tlist_getslice(self, key);
+      Py_ssize_t a, b, c;
+      PyObject* bounds, *result;
+      if (PySlice_Unpack(key, &a, &b, &c) < 0) return NULL;
+      bounds = Py_BuildValue("(nnn)", a, b, c);
+      if (!bounds) return NULL;
+      result = tlist_getslice(self, bounds);
+      Py_DECREF(bounds);
+      return result;
    } else {
-      Py_ssize_t i = PyNumber_AsSsize_t(key, PyExc_IndexError);
-      if (i == -1 && PyErr_Occurred()) return NULL;
+      Py_ssize_t i;
+      if (seq_index_arg((PyObject*)self, key, &i) < 0) return NULL;
       return tlist_item(self, i);
    }
 }
@@ -863,15 +887,79 @@ static int tlist_ass_item_impl(TListObject* self, Py_ssize_t i, PyObject* v) {
 PCOLL_LOCKED2(int, tlist_ass_item, tlist_ass_item_impl,
               TListObject*, Py_ssize_t, PyObject*)
 
+// Replaces the contents of the tlist with the elements of the list
+// `items`. The caller holds the guard.
+static void tlist_replace_guarded(TListObject* self, PyObject* items) {
+   Py_ssize_t i, n = PyList_GET_SIZE(items);
+   Trie_t root = fat_empty(PYLEAFSIZE);
+   Trie_t old = self->root;
+   for (i = 0; i < n; ++i) {
+      PyObject* val = PyList_GET_ITEM(items, i);
+      root = tfat_setitem(root, LIST_START_MID + (trieint_t)i, &val,
+                          pyobj_incref, pyobj_decref);
+   }
+   tguard_keys_changed(&self->guard);
+   self->root = root;
+   self->start = LIST_START_MID;
+   self->length = n;
+   tlist_invalidate_orig(self);
+   fatnode_decref(old, pyobj_decref);
+}
+// The raw elements of the tlist, as a new list.
+static PyObject* tlist_raw_list(TListObject* self) {
+   PyObject* items = PyList_New(self->length);
+   TriePath path;
+   Py_ssize_t i = 0;
+   int ok;
+   if (!items) return NULL;
+   for (ok = fat_firstpath(self->root, &path); ok && i < self->length;
+        ok = fat_nextpath(&path), ++i) {
+      PyObject* val = *(PyObject**)triepath_val(&path);
+      Py_INCREF(val);
+      PyList_SET_ITEM(items, i, val);
+   }
+   return items;
+}
+// Slice assignment and deletion, with list's semantics: the elements are
+// copied into a list, the list is changed, and the tlist is rebuilt from it
+// (so this takes time proportional to the length).
+static int tlist_ass_slice_impl(TListObject* self, PyObject* key, PyObject* v) {
+   PyObject* items;
+   int rc;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return -1;
+   items = tlist_raw_list(self);
+   rc = !items ? -1
+      : v ? PyObject_SetItem(items, key, v)
+      : PyObject_DelItem(items, key);
+   if (rc == 0) tlist_replace_guarded(self, items);
+   tguard_exit(&self->guard);
+   Py_XDECREF(items);
+   return rc;
+}
+PCOLL_LOCKED2(int, tlist_ass_slice, tlist_ass_slice_impl,
+              TListObject*, PyObject*, PyObject*)
 static int tlist_ass_subscript(TListObject* self, PyObject* key, PyObject* v) {
    if (PySlice_Check(key)) {
-      PyErr_SetString(PyExc_NotImplementedError,
-                      "tlist slice assignment/deletion is not yet supported");
-      return -1;
+      int rc;
+      if (!v) return tlist_ass_slice(self, key, NULL);
+      // Take the new elements first (reading `v` may run user code, or read
+      // this tlist).
+      v = PySequence_List(v);
+      if (!v) {
+         if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_TypeError,
+                            "can only assign an iterable");
+         }
+         return -1;
+      }
+      rc = tlist_ass_slice(self, key, v);
+      Py_DECREF(v);
+      return rc;
    }
    {
-      Py_ssize_t i = PyNumber_AsSsize_t(key, PyExc_IndexError);
-      if (i == -1 && PyErr_Occurred()) return -1;
+      Py_ssize_t i;
+      if (seq_index_arg((PyObject*)self, key, &i) < 0) return -1;
       return tlist_ass_item(self, i, v);
    }
 }
@@ -934,20 +1022,36 @@ static Trie_t tlist_share(TListObject* self) {
    return self->root;
 }
 
-static PyObject* tlist_persistent_impl(TListObject* self) {
+// Returns a new instance of `ptype` (a persistent partner type) holding the
+// transient's contents; the cached original is used when it has that type.
+static PyObject* tlist_persistent_as(TListObject* self, PyTypeObject* ptype) {
    Trie_t root;
    if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
-   if (self->length == 0) {
-      Py_INCREF(ST(g_plist_empty));
-      return (PyObject*)ST(g_plist_empty);
-   }
-   if (self->orig) {
+   if (self->orig && Py_TYPE(self->orig) == ptype) {
       Py_INCREF(self->orig);
       return self->orig;
    }
+   if (self->length == 0) return plist_type_empty(ptype);
    root = tlist_share(self);
    if (!root) return NULL;
-   return plist_wrap(root, self->start, self->length);
+   return plist_wrap_astype(ptype, root, self->start, self->length);
+}
+static PyObject* tlist_persistent_impl(TListObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
+   PyTypeObject* ptype = NULL;
+   PyObject* result;
+   if (tp == ST(TListType)) ptype = ST(PListType);
+   else if (ST(TLListType) && tp == ST(TLListType)) ptype = ST(LListType);
+   if (ptype) {
+      Py_INCREF(ptype);
+   } else {
+      ptype = pcoll_partner_type((PyObject*)self, "__persistent_type__",
+                                 ST(PListType));
+      if (!ptype) return NULL;
+   }
+   result = tlist_persistent_as(self, ptype);
+   Py_DECREF(ptype);
+   return result;
 }
 PCOLL_LOCKED0(PyObject*, tlist_persistent_locked, tlist_persistent_impl,
               TListObject*)
@@ -958,6 +1062,11 @@ static PyObject* tlist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored
 static PyObject* tlist_pop_impl(TListObject* self, Py_ssize_t index) {
    Py_ssize_t idx;
    PyObject* val;
+   if (self->length == 0) {
+      PyErr_Format(PyExc_IndexError, "pop from empty %s",
+                   pcoll_short_name(Py_TYPE(self)));
+      return NULL;
+   }
    if (normalize_index(index, self->length, "pop", &idx) < 0) return NULL;
    if (tguard_enter(&self->guard, (PyObject*)self) < 0) return NULL;
    val = tlist_item_impl(self, idx);  // new reference
@@ -974,9 +1083,24 @@ static PyObject* tlist_pop(TListObject* self, PyObject* args) {
 }
 
 static PyObject* plist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)) {
+   PyTypeObject* tp = Py_TYPE(self);
+   PyTypeObject* ttype = NULL;
+   PyObject* result;
+   if (tp == ST(PListType)) ttype = ST(TListType);
+   else if (ST(LListType) && tp == ST(LListType)) ttype = ST(TLListType);
+   if (ttype) {
+      Py_INCREF(ttype);
+   } else {
+      ttype = pcoll_partner_type((PyObject*)self, "__transient_type__",
+                                 ST(TListType));
+      if (!ttype) return NULL;
+   }
    trienode_incref(self->root);
    Py_INCREF(self);
-   return tlist_wrap(self->root, self->start, self->length, (PyObject*)self);
+   result = tlist_wrap_astype(ttype, self->root, self->start, self->length,
+                              (PyObject*)self);
+   Py_DECREF(ttype);
+   return result;
 }
 
 // Matches _list.py's tlist.empty being a *classmethod* (see
@@ -1001,6 +1125,7 @@ static PyMethodDef tlist_methods[] = {
     "Efficiently copies the tlist into a plist and returns the plist."},
    {"pop", (PyCFunction)tlist_pop, METH_VARARGS,
     "Removes and returns the item at index (default last)."},
+   PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 
@@ -1044,70 +1169,66 @@ static PyType_Spec tlist_spec = {
 
 
 //=============================================================================
-// Generic elementwise comparison, shared by plist/tlist richcompare. Works
-// against anything that supports len()/PySequence_GetItem (so plist, tlist,
-// list, tuple, ... all work uniformly) without needing to know the other
-// side's concrete type. Returns -2 on error (with an exception set), else a
-// standard -1/0/1 lexicographic-order result.
-static int generic_seq_compare(PyObject* a, PyObject* b) {
-   Py_ssize_t na, nb, n, i;
-   na = PySequence_Length(a);
-   if (na < 0) return -2;
-   nb = PySequence_Length(b);
-   if (nb < 0) return -2;
-   n = (na < nb) ? na : nb;
-   for (i = 0; i < n; ++i) {
-      PyObject* ea = PySequence_GetItem(a, i);
-      PyObject* eb;
-      int eq;
-      if (!ea) return -2;
-      eb = PySequence_GetItem(b, i);
-      if (!eb) { Py_DECREF(ea); return -2; }
-      eq = PyObject_RichCompareBool(ea, eb, Py_EQ);
-      if (eq < 0) { Py_DECREF(ea); Py_DECREF(eb); return -2; }
-      if (!eq) {
-         int lt = PyObject_RichCompareBool(ea, eb, Py_LT);
-         Py_DECREF(ea); Py_DECREF(eb);
-         if (lt < 0) return -2;
-         return lt ? -1 : 1;
-      }
-      Py_DECREF(ea); Py_DECREF(eb);
-   }
-   if (na < nb) return -1;
-   if (na > nb) return 1;
-   return 0;
-}
+// Comparison, shared by plist and tlist. Sequences compare with list, plist,
+// and tlist (and their subclasses) as lists do: elements are compared with
+// "identical or equal", and only the first pair that differs is ordered.
 
-// Matches PersistentSequence/TransientSequence._eq_types (and the type
-// checks in their __lt__/__le__/__gt__/__ge__) exactly: plist/tlist compare
-// against list, plist, and tlist, but deliberately NOT against tuple or
-// other sequence types -- exactly like `list == tuple(...)` is always False
-// in ordinary Python, regardless of matching contents.
 static int is_seq_comparable(PyObject* o) {
-   // isinstance-style checks (matching the reference's own
-   // `isinstance(other, PersistentSequence._eq_types)` /
-   // `TransientSequence._eq_types` -- see abc/_seq.py), not exact-type: any
-   // plist/tlist subclass (e.g. the future llist/tllist) must compare
-   // correctly too, not just the exact base types.
-   return (PyObject_TypeCheck(o, ST(PListType)) || PyObject_TypeCheck(o, ST(TListType)) ||
-           PyList_Check(o));
+   return (PyObject_TypeCheck(o, ST(PListType)) ||
+           PyObject_TypeCheck(o, ST(TListType)) || PyList_Check(o));
 }
 
 static PyObject* seq_richcompare(PyObject* self, PyObject* other, int op) {
-   int cmp;
-   if (op == Py_EQ || op == Py_NE) {
-      if (other == self) Py_RETURN_RICHCOMPARE(0, 0, op);
-      if (!is_seq_comparable(other)) Py_RETURN_NOTIMPLEMENTED;
-      if (PySequence_Length(self) != PySequence_Length(other))
-         return PyBool_FromLong(op == Py_NE);
-      cmp = generic_seq_compare(self, other);
-      if (cmp == -2) return NULL;
-      return PyBool_FromLong((cmp == 0) == (op == Py_EQ));
-   }
+   PyObject* a = NULL, *b = NULL, *result = NULL;
+   Py_ssize_t na, nb, i;
    if (!is_seq_comparable(other)) Py_RETURN_NOTIMPLEMENTED;
-   cmp = generic_seq_compare(self, other);
-   if (cmp == -2) return NULL;
-   Py_RETURN_RICHCOMPARE(cmp, 0, op);
+   if (other == self && (op == Py_EQ || op == Py_NE))
+      Py_RETURN_RICHCOMPARE(0, 0, op);
+   // Compare snapshots of the elements, as the builtins do for lists.
+   a = PySequence_List(self);
+   if (!a) return NULL;
+   b = PySequence_List(other);
+   if (!b) goto done;
+   na = PyList_GET_SIZE(a);
+   nb = PyList_GET_SIZE(b);
+   if ((op == Py_EQ || op == Py_NE) && na != nb) {
+      result = PyBool_FromLong(op == Py_NE);
+      goto done;
+   }
+   for (i = 0; i < na && i < nb; ++i) {
+      int eq = PyObject_RichCompareBool(PyList_GET_ITEM(a, i),
+                                        PyList_GET_ITEM(b, i), Py_EQ);
+      if (eq < 0) goto done;
+      if (!eq) break;
+   }
+   if (i >= na || i >= nb) {
+      {
+         int c = (na < nb) ? -1 : (na > nb) ? 1 : 0;
+         switch (op) {
+            case Py_LT: result = PyBool_FromLong(c < 0); break;
+            case Py_LE: result = PyBool_FromLong(c <= 0); break;
+            case Py_EQ: result = PyBool_FromLong(c == 0); break;
+            case Py_NE: result = PyBool_FromLong(c != 0); break;
+            case Py_GT: result = PyBool_FromLong(c > 0); break;
+            default: result = PyBool_FromLong(c >= 0); break;
+         }
+      }
+      goto done;
+   }
+   if (op == Py_EQ) {
+      result = Py_False;
+      Py_INCREF(result);
+   } else if (op == Py_NE) {
+      result = Py_True;
+      Py_INCREF(result);
+   } else {
+      result = PyObject_RichCompare(PyList_GET_ITEM(a, i),
+                                    PyList_GET_ITEM(b, i), op);
+   }
+done:
+   Py_XDECREF(a);
+   Py_XDECREF(b);
+   return result;
 }
 
 static PyObject* plist_richcompare(PListObject* self, PyObject* other, int op) {
@@ -1311,6 +1432,13 @@ static int pcoll_exec_list(PyObject* m, pcoll_state* st) {
    if (!st->TListType) goto done;
    if (register_virtual_subclass(abc, "PersistentSequence", st->PListType) < 0 ||
        register_virtual_subclass(abc, "TransientSequence", st->TListType) < 0)
+      goto done;
+   pcoll_set_weaklistoffset(st->PListType, offsetof(PListObject, weaklist));
+   pcoll_set_weaklistoffset(st->TListType, offsetof(TListObject, weaklist));
+   if (pcoll_type_setattr(st->PListType, "__transient_type__",
+                          (PyObject*)st->TListType) < 0 ||
+       pcoll_type_setattr(st->TListType, "__persistent_type__",
+                          (PyObject*)st->PListType) < 0)
       goto done;
    if (!(st->PListIterType = pcoll_new_internal_type(m, &plistiter_spec)) ||
        !(st->TListIterType = pcoll_new_internal_type(m, &tlistiter_spec)))
