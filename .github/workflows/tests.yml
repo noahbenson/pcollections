@@ -5,20 +5,22 @@
 
 name: CI
 
-# We run on either pushes or pulls into main or dev branches
+# We run on pushes and pull requests to main, dev, and any dev/* branch
+# (e.g. dev/c). Branch filters match whole names, so 'dev' alone would not
+# match 'dev/c'.
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, 'dev/**' ]
     paths-ignore:
       - '**/README.md'
       - '**/.gitignore'
-      - '/.github/workflows/deploy.yml'
+      - '.github/workflows/deploy.yml'
   pull_request:
-    branches: [ main, dev ]
+    branches: [ main, dev, 'dev/**' ]
     paths-ignore:
       - '**/README.md'
       - '**/.gitignore'
-      - '/.github/workflows/deploy.yml'
+      - '.github/workflows/deploy.yml'
   # We sometimes want to run this manually.
   workflow_dispatch:
   # We also sometimes want to run this from another workflow.
@@ -123,9 +125,11 @@ jobs:
       # visible at a glance in the Actions log/summary instead of only
       # showing up as an absence of C-specific tests deep in the test
       # output.
-      - name: Report which backend was tested
+      # The C extensions build on every platform in this matrix, so a silent
+      # fallback to the pure-Python backend here is a build failure.
+      - name: Confirm the C backend is in use
         run: |
-          python -c "import pcollections; print('pcollections.using_c_extension =', pcollections.using_c_extension)"
+          python -c "import pcollections, sys; print('pcollections.using_c_extension =', pcollections.using_c_extension); sys.exit(0 if pcollections.using_c_extension else 1)"
 #      - name: Process Code Coverage
 #        uses: codecov/codecov-action@v1
 
@@ -193,3 +197,58 @@ jobs:
         run: |
           cd ~
           python -m pcollections.test
+
+  # Builds the C extensions with AddressSanitizer and UndefinedBehaviorSanitizer
+  # and runs the full suite. PYTHONMALLOC=malloc routes Python's own
+  # allocations through malloc so ASan can see them too.
+  test-sanitizers:
+    name: sanitizers (ASan+UBSan) - ${{github.event_name}}
+    runs-on: ubuntu-latest
+    env:
+      CFLAGS: '-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined'
+      LDFLAGS: '-fsanitize=address,undefined'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install with sanitizers
+        run: |
+          pip install -e .
+      - name: Run Tests
+        run: |
+          # The instrumented extensions only load when the ASan runtime is
+          # loaded first, so the backend check has to happen here too.
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so)"
+          export ASAN_OPTIONS=detect_leaks=0
+          export UBSAN_OPTIONS=print_stacktrace=1
+          export PYTHONMALLOC=malloc
+          cd ~
+          python -c "import pcollections, sys; sys.exit(0 if pcollections.using_c_extension else 1)"
+          python -m pcollections.test
+
+  # Runs the suite on a debug build of CPython, whose internal consistency
+  # checks (garbage-collector reference accounting in particular) catch
+  # refcounting mistakes that a release build silently tolerates.
+  test-debug-python:
+    name: debug CPython - ${{github.event_name}}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install debug CPython
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3.12-dbg python3.12-dev python3.12-venv
+      - name: Install
+        run: |
+          python3.12d -m venv ~/dbgenv
+          ~/dbgenv/bin/python -c "import sys; assert hasattr(sys, 'gettotalrefcount')"
+          ~/dbgenv/bin/pip install .
+          ~/dbgenv/bin/python -c "import pcollections, sys; sys.exit(0 if pcollections.using_c_extension else 1)"
+      - name: Run Tests
+        run: |
+          cd ~
+          ~/dbgenv/bin/python -m pcollections.test
