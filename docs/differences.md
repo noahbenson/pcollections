@@ -92,7 +92,8 @@ it.
 
 A modification of a transient collection that overlaps another modification
 of the same collection, from another thread or from code that runs during the
-modification, raises `RuntimeError` instead of corrupting the collection. See
+modification, raises `RuntimeError` instead of corrupting the collection, and
+so does a read made while a modification is in progress. See
 [Threads](guide.md#threads).
 
 ## Subclasses

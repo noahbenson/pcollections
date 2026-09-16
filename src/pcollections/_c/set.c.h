@@ -92,11 +92,12 @@ static int set_hash_key(PyObject* key, trieint_t* out) {
 static int set_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
                           PyObject* key, trieint_t* out_index,
                           trieint_t* out_prev,
-                          const pcoll_tguard* g, PyObject* owner) {
+                          pcoll_tguard* g, PyObject* owner, int reading) {
    void* found;
    trieint_t ii;
    trieint_t prev = SET_NO_NEXT;
    uint64_t version = g ? g->version : 0;
+   if (reading && tguard_read(g, owner, "a lookup") < 0) return -1;
    if (!amt_lookup(idx, hkey, &found)) {
       if (out_prev) *out_prev = SET_NO_NEXT;
       return 0;
@@ -116,7 +117,7 @@ static int set_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
          Py_INCREF(ekey);
          eq = PyObject_RichCompareBool(key, ekey, Py_EQ);
          Py_DECREF(ekey);
-         if (g && g->version != version) {
+         if (g && (g->version != version || (reading && tguard_busy(g)))) {
             if (eq >= 0)
                tguard_lookup_error(Py_TYPE(owner)->tp_name);
             return -1;
@@ -350,7 +351,8 @@ static Py_hash_t pset_hash(PSetObject* self) {
 static int pset_contains(PSetObject* self, PyObject* el) {
    trieint_t hkey;
    if (set_hash_key(el, &hkey) < 0) return -1;
-   return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL, NULL, NULL);
+   return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL, NULL,
+                         NULL, 0);
 }
 
 static PyObject* pset_add(PSetObject* self, PyObject* obj) {
@@ -362,7 +364,7 @@ static PyObject* pset_add(PSetObject* self, PyObject* obj) {
    Py_ssize_t new_ndeleted = self->ndeleted;
    if (set_hash_key(obj, &hkey) < 0) return NULL;
    found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev,
-                          NULL, NULL);
+                          NULL, NULL, 0);
    if (found < 0) return NULL;
    if (found) {
       Py_INCREF(self);
@@ -417,7 +419,7 @@ static PyObject* pset_discard(PSetObject* self, PyObject* obj) {
    Py_ssize_t new_count, new_ndeleted;
    if (set_hash_key(obj, &hkey) < 0) return NULL;
    found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev,
-                          NULL, NULL);
+                          NULL, NULL, 0);
    if (found < 0) return NULL;
    if (!found) {
       Py_INCREF(self);
@@ -635,7 +637,7 @@ static int tset_add_guarded(TSetObject* self, trieint_t hkey, PyObject* obj) {
    trieint_t found_index, prev, newindex;
    SetEntry entry;
    int found = set_chain_find(self->els, self->idx, hkey, obj, &found_index,
-                              &prev, &self->guard, (PyObject*)self);
+                              &prev, &self->guard, (PyObject*)self, 0);
    if (found) return found < 0 ? -1 : 0;
    tguard_keys_changed(&self->guard);
    newindex = (trieint_t)self->top;
@@ -661,7 +663,7 @@ static int tset_discard_guarded(TSetObject* self, trieint_t hkey, PyObject* obj)
    trieint_t found_index, prev;
    void* ep; SetEntry entry; SetEntry tombstone;
    int found = set_chain_find(self->els, self->idx, hkey, obj, &found_index,
-                              &prev, &self->guard, (PyObject*)self);
+                              &prev, &self->guard, (PyObject*)self, 0);
    if (found <= 0) return found;
    tguard_keys_changed(&self->guard);
    fat_lookup(self->els, found_index, &ep);
@@ -722,7 +724,7 @@ static int tset_contains_impl(TSetObject* self, PyObject* el) {
    trieint_t hkey;
    if (set_hash_key(el, &hkey) < 0) return -1;
    return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL,
-                         &self->guard, (PyObject*)self);
+                         &self->guard, (PyObject*)self, 1);
 }
 PCOLL_LOCKED1(int, tset_contains, tset_contains_impl, TSetObject*, PyObject*)
 
@@ -1059,6 +1061,7 @@ static PyObject* setiter_next_impl(SetIterObject* self) {
                       "%.200s changed during iteration", name);
          return NULL;
       }
+      if (tguard_read(&t->guard, (PyObject*)t, "iteration") < 0) return NULL;
       if (self->state == 0) {
          self->state = 1;
          ok = fat_firstpath(t->els, &self->path);

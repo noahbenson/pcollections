@@ -655,12 +655,21 @@ static PyObject* tlist_item_impl(TListObject* self, Py_ssize_t i) {
    Py_INCREF(val);
    return val;
 }
-PCOLL_LOCKED1(PyObject*, tlist_item, tlist_item_impl, TListObject*, Py_ssize_t)
+static PyObject* tlist_read_item_impl(TListObject* self, Py_ssize_t i) {
+   if (tguard_read(&self->guard, (PyObject*)self, "a lookup") < 0)
+      return NULL;
+   return tlist_item_impl(self, i);
+}
+PCOLL_LOCKED1(PyObject*, tlist_item, tlist_read_item_impl,
+              TListObject*, Py_ssize_t)
 
 static PyObject* tlist_getslice_impl(TListObject* self, PyObject* bounds) {
    // `bounds` is a tuple of the unpacked (start, stop, step).
    Py_ssize_t n;
-   Trie_t work = fat_getslice(
+   Trie_t work;
+   if (tguard_read(&self->guard, (PyObject*)self, "a lookup") < 0)
+      return NULL;
+   work = fat_getslice(
       self->root, self->start, self->length,
       PyLong_AsSsize_t(PyTuple_GET_ITEM(bounds, 0)),
       PyLong_AsSsize_t(PyTuple_GET_ITEM(bounds, 1)),
@@ -1154,7 +1163,8 @@ static int seqiter_traverse(SeqIterObject* self, visitproc visit, void* arg) {
 // iterator: it yields the element at its current index, whatever the list
 // holds there now, and stops for good once the index reaches the end. It
 // walks the trie while the list is unchanged, and finds its place again by
-// index after any change.
+// index after any change. It raises RuntimeError if a modification is in
+// progress.
 static PyObject* seqiter_next_impl(SeqIterObject* self) {
    int ok;
    PyObject* val;
@@ -1172,6 +1182,7 @@ static PyObject* seqiter_next_impl(SeqIterObject* self) {
          self->state = 2;
          return NULL;
       }
+      if (tguard_read(&t->guard, (PyObject*)t, "iteration") < 0) return NULL;
       if (self->state == 0 || t->guard.version != self->version) {
          ok = fat_seekpath(t->root, t->start + (trieint_t)self->index,
                            &self->path);

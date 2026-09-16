@@ -17,17 +17,18 @@ not backward compatible; they are marked **(breaking)**.
   `PCOLLECTIONS_NO_C_EXTENSIONS` and `PCOLLECTIONS_REQUIRE_C` choose the
   implementation.
 - `pcollections` no longer depends on `phamt`, or on any other package.
-- Free-threaded ("no-GIL") builds of Python are supported.
 - Objects pickled with one implementation can be unpickled with the other.
 - Type stubs are included.
-- Python 3.7 is no longer supported. **(breaking)**
+- Python 3.8 through 3.15 are supported, including the free-threaded
+  builds of 3.13 and later. Python 3.7 is no longer supported. **(breaking)**
 
 ### Transient collections
 
 - A modification of a transient collection that overlaps another
   modification of the same collection (from another thread, or from a key's
   `__eq__` or `__hash__`) raises `RuntimeError` instead of corrupting the
-  collection.
+  collection. So does a read (a lookup or a step of an iteration) made while
+  a modification is in progress.
 - Changing the keys of a `tdict` or `tset` while iterating over it raises
   `RuntimeError`, as it does for `dict` and `set`. Iterating over a `tlist`
   while changing it behaves as it does for `list`.

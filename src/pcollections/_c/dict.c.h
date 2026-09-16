@@ -124,11 +124,12 @@ static int dict_hash_key(PyObject* key, trieint_t* out) {
 static int dict_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
                            PyObject* key, trieint_t* out_index,
                            PyObject** out_val, trieint_t* out_prev,
-                           const pcoll_tguard* g, PyObject* owner) {
+                           pcoll_tguard* g, PyObject* owner, int reading) {
    void* found;
    trieint_t ii;
    trieint_t prev = DICT_NO_NEXT;
    uint64_t version = g ? g->version : 0;
+   if (reading && tguard_read(g, owner, "a lookup") < 0) return -1;
    if (!amt_lookup(idx, hkey, &found)) {
       if (out_prev) *out_prev = DICT_NO_NEXT;
       return 0;
@@ -148,7 +149,7 @@ static int dict_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
          Py_INCREF(ekey);
          eq = PyObject_RichCompareBool(key, ekey, Py_EQ);
          Py_DECREF(ekey);
-         if (g && g->version != version) {
+         if (g && (g->version != version || (reading && tguard_busy(g)))) {
             if (eq >= 0)
                tguard_lookup_error(Py_TYPE(owner)->tp_name);
             return -1;
@@ -418,7 +419,7 @@ static PyObject* pdict_subscript(PDictObject* self, PyObject* key) {
    int found;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
    found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                           &val, NULL, NULL, NULL);
+                           &val, NULL, NULL, NULL, 0);
    if (found <= 0) {
       if (found == 0) PyErr_SetObject(PyExc_KeyError, key);
       return NULL;
@@ -435,7 +436,7 @@ static PyObject* pdict_get(PDictObject* self, PyObject* args) {
    if (!PyArg_ParseTuple(args, "O|O", &key, &deflt)) return NULL;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
    found = dict_chain_find(self->els, self->idx, hkey, key, NULL, &val,
-                           NULL, NULL, NULL);
+                           NULL, NULL, NULL, 0);
    if (found < 0) return NULL;
    if (!found) {
       Py_INCREF(deflt);
@@ -448,7 +449,7 @@ static int pdict_contains(PDictObject* self, PyObject* key) {
    trieint_t hkey;
    if (dict_hash_key(key, &hkey) < 0) return -1;
    return dict_chain_find(self->els, self->idx, hkey, key, NULL, NULL, NULL,
-                          NULL, NULL);
+                          NULL, NULL, 0);
 }
 
 static PyObject* pdict_set(PDictObject* self, PyObject* args) {
@@ -463,7 +464,7 @@ static PyObject* pdict_set(PDictObject* self, PyObject* args) {
    if (!PyArg_ParseTuple(args, "OO", &key, &val)) return NULL;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
    found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                           &old_val, &prev, NULL, NULL);
+                           &old_val, &prev, NULL, NULL, 0);
    if (found < 0) return NULL;
    if (found) {
       DictEntry entry;
@@ -528,7 +529,7 @@ static PyObject* pdict_drop_key(PDictObject* self, PyObject* key, int error) {
    Py_ssize_t new_count, new_ndeleted;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
    found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                           NULL, &prev, NULL, NULL);
+                           NULL, &prev, NULL, NULL, 0);
    if (found < 0) return NULL;
    if (!found) {
       if (error) {
@@ -909,7 +910,7 @@ static int tdict_lookup(TDictObject* self, PyObject* key, PyObject** out_val) {
    int found;
    if (dict_hash_key(key, &hkey) < 0) return -1;
    found = dict_chain_find(self->els, self->idx, hkey, key, NULL, &val, NULL,
-                           &self->guard, (PyObject*)self);
+                           &self->guard, (PyObject*)self, 1);
    if (found > 0 && out_val) {
       Py_INCREF(val);
       *out_val = val;
@@ -964,7 +965,8 @@ static int tdict_ass_subscript_guarded(TDictObject* self, trieint_t hkey,
    PyObject* old_val;
    int found;
    found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                           &old_val, &prev, &self->guard, (PyObject*)self);
+                           &old_val, &prev, &self->guard, (PyObject*)self,
+                           0);
    if (found < 0) return -1;
    if (val == NULL) {
       // __delitem__.
@@ -1344,7 +1346,8 @@ static PyObject* dictiter_yield(DictIterObject* self, int ok) {
 // transient owner may change between steps, and its iterator's path may then
 // point at nodes that no longer exist; so, like the builtin dict's iterators,
 // the iterator raises RuntimeError if the size or the set of keys changed,
-// and otherwise (only values were replaced) finds its place again by key.
+// or if a modification is in progress, and otherwise (only values were
+// replaced) finds its place again by key.
 static PyObject* dictiter_next_impl(DictIterObject* self) {
    Trie_t els;
    int ok;
@@ -1374,6 +1377,7 @@ static PyObject* dictiter_next_impl(DictIterObject* self) {
                       "%.200s keys changed during iteration", name);
          return NULL;
       }
+      if (tguard_read(&t->guard, (PyObject*)t, "iteration") < 0) return NULL;
       if (self->state == 0) {
          self->state = 1;
          ok = fat_firstpath(els, &self->path);

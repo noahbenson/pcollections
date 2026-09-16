@@ -78,9 +78,10 @@ free-threaded ("no-GIL") builds of Python, which `pcollections` supports.
 
 The transient types are meant to be used by one thread at a time, like the
 builtin `list`, `set`, and `dict`. They are not corrupted if that rule is
-broken: a modification that overlaps another modification of the same
-transient (from another thread, or from code such as a key's `__eq__` that runs
-during the modification) raises `RuntimeError`, as does a lookup whose
+broken: a modification that overlaps another modification of the same transient
+(from another thread, or from code such as a key's `__eq__` that runs during
+the modification) raises `RuntimeError`. So does a read (a lookup, or a step of
+an iteration) that is made while a modification is in progress, or whose
 transient changes during a key comparison. As with `dict` and `set`, changing
 the keys of a `tdict` or `tset` while iterating over it raises `RuntimeError`;
 iterating over a `tlist` while changing it behaves like iterating over a

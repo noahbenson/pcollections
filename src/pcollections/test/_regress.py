@@ -338,4 +338,106 @@ class _RegressionTests:
         """)
 
 
+    # Reading a transient while it is being modified ------------------------
+    # A compaction rehashes the remaining keys, which runs user code after the
+    # modification has begun and before the old trie is released. An iterator
+    # started there must not walk the old trie afterward; reads during a
+    # modification raise RuntimeError.
+    def test_read_during_compaction(self):
+        self.run_scenario("""
+            outcomes = set()
+            holder = []
+            class Key:
+                armed = None
+                skip = None
+                def __init__(self, v):
+                    self.v = v
+                def __hash__(self):
+                    if Key.armed is not None and self is not Key.skip:
+                        coll, Key.armed = Key.armed, None
+                        try:
+                            it = iter(coll)
+                            next(it)
+                            holder.append(it)
+                            outcomes.add('started')
+                        except RuntimeError:
+                            outcomes.add('refused')
+                        for probe in (lambda: Key(1) in coll,
+                                      lambda: list(coll)):
+                            try:
+                                probe()
+                                outcomes.add('read')
+                            except RuntimeError:
+                                pass
+                    return hash(self.v)
+                def __eq__(self, other):
+                    return isinstance(other, Key) and self.v == other.v
+            def add_d(c, k): c[k] = 0
+            def rem_d(c, k): del c[k]
+            for (make, add, remove) in ((tdict, add_d, rem_d),
+                                        (tset, tset.add, tset.discard)):
+                for n in (40, 400, 4000):
+                    coll = make()
+                    keys = [Key(i) for i in range(n)]
+                    for k in keys:
+                        add(coll, k)
+                    for k in keys[:-2]:
+                        Key.armed, Key.skip = coll, k
+                        remove(coll, k)
+                        Key.armed = None
+                        for it in holder:
+                            try:
+                                for x in it:
+                                    pass
+                            except RuntimeError:
+                                pass
+                        del holder[:]
+                    assert len(coll) == 2
+            assert outcomes == {'refused'}, outcomes
+            print('ok')
+        """)
+
+    # Reads from __del__ methods run by a modification (as the modification
+    # releases old values or shifts list elements) raise RuntimeError instead
+    # of seeing the collection part way through the change; a value released
+    # after the modification is done may read it normally.
+    def test_read_from_del_during_modification(self):
+        self.run_scenario("""
+            results = []
+            class Probe:
+                def __init__(self, action):
+                    self.action = action
+                def __del__(self):
+                    try:
+                        self.action()
+                        results.append('ok')
+                    except (RuntimeError, StopIteration):
+                        results.append('refused')
+            for n in (50, 300, 3000):
+                t = tdict((i, i) for i in range(n))
+                it = iter(t.items())
+                next(it)
+                t[0] = Probe(lambda: [next(it) for _ in range(5)])
+                t[1] = Probe(lambda: (1 in t, t.get(2), list(t)[:3]))
+                del t[0]
+                del t[1]
+                for i in range(2, n - 2):
+                    del t[i]
+                gc.collect()
+                assert dict(t.items()) == {n - 2: n - 2, n - 1: n - 1}
+            for n in (50, 300):
+                l = tlist(range(n))
+                it = iter(l)
+                next(it)
+                l[n // 2] = Probe(lambda: ([next(it) for _ in range(5)],
+                                           l[3], l[1:4]))
+                del l[n // 2]
+                for i in range(n // 3):
+                    del l[len(l) // 2]
+                gc.collect()
+                assert len(list(l)) == len(l)
+            assert results and set(results) <= {'ok', 'refused'}, results
+            print('ok')
+        """)
+
 make_tests('TestRegressions', _RegressionTests, globals())

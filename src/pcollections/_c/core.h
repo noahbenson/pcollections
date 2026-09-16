@@ -184,6 +184,10 @@
 //  - `busy` is set for the duration of each modification. A modification
 //    that finds it already set (reentrantly, or from another thread) raises
 //    RuntimeError instead of proceeding.
+//  - Operations that only read a transient (lookups, iteration, slicing)
+//    raise RuntimeError if `busy` is set when they start, and check it again
+//    after calling user code (tguard_read()): a transient part way through a
+//    modification may have freed nodes that a reader would otherwise walk.
 //  - `version` changes whenever the contents change, and `keyversion`
 //    whenever the set of keys (or, for lists, the positions) changes. A
 //    lookup that calls user code checks `version` afterward and raises
@@ -229,6 +233,22 @@ static inline void tguard_changed(pcoll_tguard* g) {
 static inline void tguard_keys_changed(pcoll_tguard* g) {
    g->version++;
    g->keyversion++;
+}
+// Whether a modification of the transient is in progress.
+static inline int tguard_busy(pcoll_tguard* g) {
+   return PCOLL_ATOMIC_LOAD_ACQUIRE(&g->busy) != 0;
+}
+// Starts, or continues after calling user code, an operation that reads
+// `self`: returns -1 with RuntimeError ("... changed during <what>") if a
+// modification is in progress, since the transient may then be part way
+// through a change (another thread's, or the one whose user code is running
+// this read).
+static inline int tguard_read(pcoll_tguard* g, PyObject* self,
+                              const char* what) {
+   if (!tguard_busy(g)) return 0;
+   PyErr_Format(PyExc_RuntimeError, "%.200s changed during %s",
+                Py_TYPE(self)->tp_name, what);
+   return -1;
 }
 // Raises the error for a lookup whose collection changed during a call to
 // user code.
