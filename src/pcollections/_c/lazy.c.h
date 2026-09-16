@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////////
-// _c/lazy.c
-// pcollections._c.lazy: the `lazy` value-cell type, its supporting
+// _c/lazy.c.h
+// The `lazy` value-cell type, its supporting
 // `LazyError` exception and `lazy_error_unwrap` helper, and the small
 // dereferencing utilities (unlazy/reprlazy/strlazy/holdlazy) that the lazy
 // collection types (ldict/tldict/llist/tllist -- built on top of this module)
@@ -61,170 +61,9 @@
 //     success path).
 
 //=============================================================================
-// Initialization.
-
-#include <Python.h>
-#include "uintbits.h"
-#include "trie.h"
-#include "fat.h"
-
-#ifdef __cplusplus
-#  define EXTC extern "C"
-#else
-#  define EXTC
-#endif
-
-//=============================================================================
-// Portable mutex/atomic-flag shim.
-//
-// The rest of this file was originally written directly against POSIX
-// <pthread.h> (for the recursive mutex) and C11 <stdatomic.h> (for the
-// lock-free "ready" flag) -- see the thread-safety design comment above.
-// That's fine on Linux/macOS, but <pthread.h> does not exist *at all* on
-// stock MSVC (there is no POSIX-threads implementation in the Windows CRT;
-// this is a missing header, not merely an unsupported one, so it fails
-// every Windows build unconditionally with "cannot open include file:
-// 'pthread.h'") -- a strictly worse problem than <stdatomic.h>'s partial
-// MSVC support that setup.py's file-header comment already anticipated.
-// Confirmed as the actual cause of Windows CI reporting
-// `pcollections.using_c_extension == False` after install succeeded
-// (silently, via each Extension's `optional=True`): this module alone was
-// failing to compile, and since pcollections/__init__.py loads all four C
-// extensions as a single all-or-nothing unit (see that module's docstring),
-// one failing extension took the whole C backend down with it even though
-// dict.c/list.c/set.c don't need any of this.
-//
-// Rather than depend on either POSIX or C11 threading, MS_WINDOWS/_WIN32
-// gets its own implementation of the small set of operations this file
-// actually needs, built on Win32 primitives that have been stable since
-// Windows XP: `CRITICAL_SECTION` (a reentrant/recursive lock by construction
-// -- the same semantics PTHREAD_MUTEX_RECURSIVE was explicitly requested
-// for below) in place of `pthread_mutex_t`, and the `Interlocked*` intrinsics
-// in place of <stdatomic.h>. `InterlockedCompareExchange`/`InterlockedExchange`
-// are full (sequentially consistent) hardware fences -- a strictly stronger
-// guarantee than the acquire/release ordering the POSIX/C11 side asks for
-// explicitly, so this is safe on every Windows architecture Python supports
-// (x86, x64, and ARM64, which -- unlike x86/x64 -- is not naturally
-// strongly-ordered and genuinely needs the fence, not just the compiler
-// barrier a weaker shim might have gotten away with on x86/x64 alone).
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-   typedef CRITICAL_SECTION pcoll_mutex_t;
-   typedef volatile LONG pcoll_atomic_flag_t;
-   static int pcoll_mutex_init_recursive(pcoll_mutex_t* m) {
-      // CRITICAL_SECTION is always reentrant/recursive for its owning
-      // thread -- there is no non-recursive variant to opt out of, unlike
-      // pthread_mutex_t -- so, unlike the POSIX branch below, there's no
-      // separate attr object to configure. InitializeCriticalSectionAndSpinCount
-      // (rather than plain InitializeCriticalSection, which returns void and
-      // can only fail via a raised STATUS_NO_MEMORY structured exception) is
-      // used here so an out-of-memory failure surfaces as an ordinary
-      // integer return code the caller can check, matching how the POSIX
-      // branch's pthread_mutex_init failure is already handled.
-      return InitializeCriticalSectionAndSpinCount(m, 0) ? 0 : -1;
-   }
-#  define PCOLL_MUTEX_INIT(m) pcoll_mutex_init_recursive(m)
-#  define PCOLL_MUTEX_DESTROY(m) DeleteCriticalSection(m)
-#  define PCOLL_MUTEX_LOCK(m) EnterCriticalSection(m)
-#  define PCOLL_MUTEX_UNLOCK(m) LeaveCriticalSection(m)
-   // No other thread can be looking at `self` yet during construction (it
-   // isn't published anywhere), so the initializing write needs no atomicity
-   // or fence, exactly like atomic_init()'s own (non-atomic-op) semantics.
-#  define PCOLL_ATOMIC_INIT(flag, val) (*(flag) = (val))
-   // A same-value compare-exchange is a standard, portable way to get a
-   // fully-fenced *read* out of the Interlocked family, which otherwise only
-   // exposes read-modify-write operations: if *flag == 0, this "exchanges"
-   // 0 for 0 (a no-op store); if *flag == 1, the comparison fails and
-   // nothing is written either way -- so *flag's value is never altered by
-   // this macro, only observed, and the operation is still a full fence.
-#  define PCOLL_ATOMIC_LOAD_ACQUIRE(flag) InterlockedCompareExchange((flag), 0, 0)
-#  define PCOLL_ATOMIC_STORE_RELEASE(flag, val) ((void)InterlockedExchange((flag), (val)))
-#else
-#  include <stdatomic.h>
-#  include <pthread.h>
-   typedef pthread_mutex_t pcoll_mutex_t;
-   typedef atomic_int pcoll_atomic_flag_t;
-   static int pcoll_mutex_init_recursive(pcoll_mutex_t* m) {
-      pthread_mutexattr_t attr;
-      int rc = pthread_mutexattr_init(&attr);
-      if (rc == 0) rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-      if (rc == 0) rc = pthread_mutex_init(m, &attr);
-      pthread_mutexattr_destroy(&attr);
-      return rc;
-   }
-#  define PCOLL_MUTEX_INIT(m) pcoll_mutex_init_recursive(m)
-#  define PCOLL_MUTEX_DESTROY(m) pthread_mutex_destroy(m)
-#  define PCOLL_MUTEX_LOCK(m) pthread_mutex_lock(m)
-#  define PCOLL_MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
-#  define PCOLL_ATOMIC_INIT(flag, val) atomic_init((flag), (val))
-#  define PCOLL_ATOMIC_LOAD_ACQUIRE(flag) atomic_load_explicit((flag), memory_order_acquire)
-#  define PCOLL_ATOMIC_STORE_RELEASE(flag, val) atomic_store_explicit((flag), (val), memory_order_release)
-#endif
-
-
-//=============================================================================
-// Module-level imports, cached once at PyInit_lazy time.
-
-static PyObject* g_functools_partial_type = NULL;
-
-// pdict/tdict (pcollections._c.dict) and plist/tlist (pcollections._c.list)
-// -- the base types that ldict/tldict/llist/tllist (further down) subclass.
-// Imported once at PyInit_lazy time.
-static PyTypeObject* PDictType = NULL;
-static PyTypeObject* TDictType = NULL;
-static PyTypeObject* PListType = NULL;
-static PyTypeObject* TListType = NULL;
-// collections.abc.ItemsView/ValuesView: ldict.items()/values() (and
-// tldict's) return plain instances of these generic ABC mixins rather than
-// new bespoke C view types -- see the note on LDictType's `items`/`values`
-// methods below for why that's sufficient and correct.
-static PyObject* g_ItemsView = NULL;
-static PyObject* g_ValuesView = NULL;
-// pcollections.util.seqstr -- the real reference implementation used by
-// ldict/tldict/llist's __str__/__repr__ (see ldict_repr/ldict_str/etc.
-// below). A bound PyCFunction wrapping reprlazy_c (below) is cached as
-// g_reprlazy_func and passed as seqstr's `tostr` argument wherever the
-// reference passes `tostr=reprlazy`.
-static PyObject* g_seqstr = NULL;
-static PyObject* g_reprlazy_func = NULL;
-// Cached *unbound* base-class methods, fetched once via
-// PyObject_GetAttrString((PyObject*)BaseType, "methodname") at init time --
-// each is a plain function/method-descriptor object that must be called as
-// `func(self, ...)`, exactly mirroring how the reference Python code calls
-// e.g. `pdict.get(self, key, default)` to reach the *base* implementation
-// even when `self` is really an ldict (bypassing ldict's own override,
-// which is the whole point). See call_unbound() below.
-static PyObject* g_pdict_get = NULL;
-static PyObject* g_tdict_get = NULL;
-static PyObject* g_tdict_pop = NULL;
-
-// Calls the real pcollections.util.seqstr(seq, maxlen=maxlen, tostr=tostr).
-// maxlen is passed only when has_maxlen is true (matching the reference's
-// maxlen=None default when omitted); tostr is passed only when non-NULL
-// (matching the reference's tostr=repr default when omitted).
-static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen,
-                              PyObject* tostr) {
-   PyObject* args; PyObject* kwargs; PyObject* result;
-   args = PyTuple_Pack(1, seq);
-   if (!args) return NULL;
-   kwargs = PyDict_New();
-   if (!kwargs) { Py_DECREF(args); return NULL; }
-   if (has_maxlen) {
-      PyObject* ml = PyLong_FromLong(maxlen);
-      if (!ml || PyDict_SetItemString(kwargs, "maxlen", ml) < 0) {
-         Py_XDECREF(ml); Py_DECREF(args); Py_DECREF(kwargs); return NULL;
-      }
-      Py_DECREF(ml);
-   }
-   if (tostr && PyDict_SetItemString(kwargs, "tostr", tostr) < 0) {
-      Py_DECREF(args); Py_DECREF(kwargs); return NULL;
-   }
-   result = PyObject_Call(g_seqstr, args, kwargs);
-   Py_DECREF(args); Py_DECREF(kwargs);
-   return result;
-}
-
+// The types, singletons, and cached imports this part uses (functools.partial,
+// collections.abc.ItemsView/ValuesView, seqstr, the unbound pdict.get/
+// tdict.get/tdict.pop methods, and so on) live in the module state (core.h).
 
 //=============================================================================
 // LazyError: a RuntimeError subclass carrying the (fn, args, kwargs) that a
@@ -234,11 +73,9 @@ static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen,
 // `.args`), and __str__/__repr__ build a descriptive message from it.
 //
 // `partial` may be either a real `functools.partial` instance (if a caller
-// constructs LazyError directly with one -- not something lazy.c itself ever
+// constructs LazyError directly with one -- not something lazy.c.h itself ever
 // does, but part of the documented interface) or a plain
 // (fn, args, kwargs-dict) tuple (what lazy_new always uses internally).
-
-static PyTypeObject* LazyErrorType = NULL;
 
 static int lazyerror_init(PyObject* self, PyObject* args, PyObject* kwds) {
    PyObject* partial_arg;
@@ -261,7 +98,7 @@ static PyObject* lazyerror_buildmsg(PyObject* self) {
    partial_val = PyObject_GetAttrString(self, "partial");
    if (!partial_val) return NULL;
 
-   is_real_partial = PyObject_IsInstance(partial_val, g_functools_partial_type);
+   is_real_partial = PyObject_IsInstance(partial_val, ST(g_functools_partial_type));
    if (is_real_partial < 0) { Py_DECREF(partial_val); return NULL; }
    if (is_real_partial) {
       fn = PyObject_GetAttrString(partial_val, "func");
@@ -377,13 +214,26 @@ typedef struct {
    PyObject_HEAD
 } LazyErrorUnwrapperObject;
 
+// The unwrapper takes part in GC only so that its reference to its (heap)
+// type is visible to the collector.
+static int lazyerrorunwrap_traverse(PyObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
+   return 0;
+}
+static void lazyerrorunwrap_dealloc(PyObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
+   PyObject_GC_UnTrack(self);
+   tp->tp_free(self);
+   Py_DECREF(tp);
+}
+
 static PyObject* lazyerrorunwrap_call(PyObject* self, PyObject* args, PyObject* kwds) {
    PyObject* err;
    static char* kwlist[] = {"err", NULL};
    PyObject* ctx;
    (void)self;
    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O", kwlist, &err)) return NULL;
-   if ((PyObject*)Py_TYPE(err) == (PyObject*)LazyErrorType) {
+   if ((PyObject*)Py_TYPE(err) == (PyObject*)ST(LazyErrorType)) {
       ctx = PyException_GetContext(err); // new reference, may be NULL (no context => None)
       if (!ctx) Py_RETURN_NONE;
       return ctx;
@@ -399,7 +249,7 @@ static PyObject* lazyerrorunwrap_exit(PyObject* self, PyObject* args) {
    PyObject *ex_type, *ex_val, *tb;
    (void)self;
    if (!PyArg_ParseTuple(args, "OOO", &ex_type, &ex_val, &tb)) return NULL;
-   if (ex_type == (PyObject*)LazyErrorType) {
+   if (ex_type == (PyObject*)ST(LazyErrorType)) {
       PyObject* ctx = PyException_GetContext(ex_val);
       if (!ctx) {
          PyErr_SetString(PyExc_RuntimeError,
@@ -417,16 +267,19 @@ static PyMethodDef lazyerrorunwrap_methods[] = {
    {"__exit__", (PyCFunction)lazyerrorunwrap_exit, METH_VARARGS, NULL},
    {NULL, NULL, 0, NULL}
 };
-static PyTypeObject LazyErrorUnwrapperType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.lazy.LazyErrorUnwrapper",
-   .tp_basicsize = sizeof(LazyErrorUnwrapperObject),
-   .tp_itemsize = 0,
-   .tp_flags = Py_TPFLAGS_DEFAULT,
-   .tp_call = lazyerrorunwrap_call,
-   .tp_methods = lazyerrorunwrap_methods,
+static PyType_Slot lazyerrorunwrap_slots[] = {
+   {Py_tp_call, (void*)lazyerrorunwrap_call},
+   {Py_tp_traverse, (void*)lazyerrorunwrap_traverse},
+   {Py_tp_dealloc, (void*)lazyerrorunwrap_dealloc},
+   {Py_tp_methods, (void*)lazyerrorunwrap_methods},
+   {0, NULL}
 };
-static PyObject* g_lazy_error_unwrap = NULL; // the singleton instance
+static PyType_Spec lazyerrorunwrap_spec = {
+   .name = "pcollections._c._core.LazyErrorUnwrapper",
+   .basicsize = sizeof(LazyErrorUnwrapperObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = lazyerrorunwrap_slots,
+};
 
 
 //=============================================================================
@@ -443,9 +296,8 @@ typedef struct {
    pcoll_atomic_flag_t ready; // 0 = pending, 1 = ready -- see the file header.
 } LazyObject;
 
-static PyTypeObject* LazyType = NULL;
-
 static int lazy_traverse(LazyObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->fn);
    Py_VISIT(self->args);
    Py_VISIT(self->kwargs);
@@ -469,7 +321,11 @@ static void lazy_dealloc(LazyObject* self) {
    Py_CLEAR(self->kwargs);
    Py_CLEAR(self->value);
    Py_CLEAR(self->init_error);
-   Py_TYPE(self)->tp_free((PyObject*)self);
+   {
+      PyTypeObject* tp = Py_TYPE(self);
+      tp->tp_free((PyObject*)self);
+      Py_DECREF(tp);  // heap-type instances own a reference to their type.
+   }
 }
 
 static PyObject* lazy_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
@@ -510,7 +366,7 @@ static PyObject* lazy_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    // whatever later point __call__ happens to fail.
    partial_tuple = PyTuple_Pack(3, fn, fn_args, fn_kwargs);
    if (!partial_tuple) { Py_DECREF(fn_args); Py_DECREF(fn_kwargs); return NULL; }
-   init_error = PyObject_CallFunctionObjArgs((PyObject*)LazyErrorType,
+   init_error = PyObject_CallFunctionObjArgs((PyObject*)ST(LazyErrorType),
                                               partial_tuple, NULL);
    Py_DECREF(partial_tuple);
    if (!init_error) { Py_DECREF(fn_args); Py_DECREF(fn_kwargs); return NULL; }
@@ -674,7 +530,7 @@ static PyType_Slot lazy_slots[] = {
    {0, NULL}
 };
 static PyType_Spec lazy_spec = {
-   .name = "pcollections._c.lazy.lazy",
+   .name = "pcollections.lazy",
    .basicsize = sizeof(LazyObject),
    .itemsize = 0,
    // Not subclassable (Py_TPFLAGS_BASETYPE unset): a `lazy` cell's identity
@@ -686,104 +542,9 @@ static PyType_Spec lazy_spec = {
 
 
 //=============================================================================
-// Shadow struct layouts for PDictObject/TDictObject/PListObject/TListObject.
-//
-// ldict/tldict/llist/tllist (below) subclass pdict/tdict/plist/tlist -- C
-// types defined in the *separate* translation units dict.c/list.c -- and
-// add no new slots of their own (matching the reference _lazy.py's
-// `__slots__ = ()` on every one of these four classes), so an ldict
-// instance is byte-for-byte identical in memory to a plist... er, pdict
-// instance. Most of what follows never needs to know this: __new__
-// delegates to the base type's own (already fully subclass-aware) tp_new,
-// get()/pop()/etc. delegate to cached *unbound* base-class methods, and
-// __getitem__/__iter__ delegate to the base type's own mp_subscript/
-// sq_item/tp_iter slots -- all through perfectly ordinary, public,
-// cross-TU-safe PyTypeObject/PyObject APIs, no struct-layout knowledge
-// required.
-//
-// A small handful of operations, however, have NO public-API equivalent:
-// as_pdict()/as_tdict()/as_plist() and the transient()<->persistent()
-// cross-type retargeting (ldict.transient() must return a *tldict*, not a
-// plain tdict; tldict.persistent() must return an *ldict*, etc.) all need
-// to reach past any dereferencing and directly *share* the other object's
-// raw backing trie(s) -- exactly what dict.c's/list.c's own *_wrap_astype
-// helpers do internally, except those are `static` (file-local) and so
-// cannot be called from here. For just these few call sites, we duplicate
-// the minimal struct layout (verified field-for-field against dict.c/
-// list.c at the time of writing) so we can read a source object's raw
-// (els, idx, top, count, ndeleted)/(root, start, length) directly, bump
-// the shared trie nodes' refcounts (trienode_incref -- a generic,
-// content-agnostic operation declared `static inline` in the shared
-// trie.h, so it's safe to call from any translation unit that includes
-// that header), and hand them to a freshly tp_alloc'd instance ourselves.
-//
-// KEEP THIS IN SYNC with the authoritative struct definitions in dict.c/
-// list.c: if those field lists (order, types, or added fields) ever
-// change, these mirrors must change with them, or the casts below become
-// undefined behavior. (This is the same "separate TUs, small duplicated
-// pieces" convention this project already uses for e.g. each collection
-// type's own copy of pyobj_incref/pyobj_decref/fat_freeze.)
-typedef struct {
-   PyObject_HEAD
-   Trie_t idx;
-   Trie_t els;
-   Py_ssize_t top;
-   Py_ssize_t count;
-   Py_ssize_t ndeleted;
-   Py_hash_t hashcode;
-} PDictObject;
-typedef struct {
-   PyObject_HEAD
-   Trie_t idx;
-   Trie_t els;
-   Py_ssize_t top;
-   Py_ssize_t count;
-   Py_ssize_t ndeleted;
-   PyObject* orig;
-} TDictObject;
-typedef struct {
-   PyObject_HEAD
-   Trie_t root;
-   trieint_t start;
-   Py_ssize_t length;
-   Py_hash_t hashcode;
-} PListObject;
-typedef struct {
-   PyObject_HEAD
-   Trie_t root;
-   trieint_t start;
-   Py_ssize_t length;
-   PyObject* orig;
-} TListObject;
-
-// Local copies of list.c's/dict.c's fat_freeze()/amt_freeze() (recursively
-// marks a transient trie and everything reachable from it as persistent).
-// Needed only by tllist_persistent()/tldict_persistent() below, which (like
-// the reference's tlist.persistent()/tdict.persistent()) must freeze the
-// tlist/tdict-shaped raw trie(s) they share into the llist/ldict they
-// return. Pure, generic, content-agnostic trie-structure operations (see
-// list.c's fat_freeze for the fuller rationale) -- safe to duplicate here
-// exactly as list.c/dict.c each already duplicate it independently.
-static void lazyfile_fat_freeze(Trie_t a) {
-   if (!trie_is_transient(a)) return;
-   trienode_set_transient(a, false);
-   if (!fatnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(a, bi))
-         lazyfile_fat_freeze(trienode_subt(a, bi));
-   }
-}
-static void lazyfile_amt_freeze(Trie_t a) {
-   if (!trie_is_transient(a)) return;
-   trienode_set_transient(a, false);
-   if (!amtnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < TRIEBITS_WIDTH;
-           bi = trienode_next_bitindex(a, bi))
-         lazyfile_amt_freeze(trienode_subt(a, amtnode_bit2cellindex(a, bi)));
-   }
-}
+// Shared helpers for the lazy collections. ldict/tldict/llist/tllist add no
+// fields to pdict/tdict/plist/tlist, so their instances use the base types'
+// object structs (dict.c.h, list.c.h) directly.
 
 // Prepends `self` to the (possibly empty) tuple `args` and calls
 // `unbound_func(self, *args)` -- i.e. calls an *unbound* base-class method
@@ -817,7 +578,7 @@ static PyObject* call_unbound(PyObject* unbound_func, PyObject* self, PyObject* 
 // to separately DECREF).
 static PyObject* unlazy_owned(PyObject* v) {
    if (!v) return NULL;
-   if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
       PyObject* result = PyObject_CallFunctionObjArgs(v, NULL);
       Py_DECREF(v);
       return result;
@@ -854,16 +615,16 @@ static PyObject* holdlazy_map_args(PyObject* args) {
    return result;
 }
 
-static PyTypeObject* build_c_subtype(PyType_Spec* spec, PyTypeObject* base) {
+static PyTypeObject* build_c_subtype(PyObject* m, PyType_Spec* spec, PyTypeObject* base) {
    PyObject* bases = PyTuple_Pack(1, (PyObject*)base);
    PyObject* result;
    PyTypeObject* result_t;
    if (!bases) return NULL;
-   result = PyType_FromSpecWithBases(spec, bases);
+   result = (PyObject*)pcoll_new_type(m, spec, bases);
    Py_DECREF(bases);
    if (!result) return NULL;
    result_t = (PyTypeObject*)result;
-   // Mirror dict.c's build_abc_subtype(): explicitly propagate tp_richcompare
+   // Mirror dict.c.h's build_abc_subtype(): explicitly propagate tp_richcompare
    // from `base` if this spec didn't set its own (none of ldict/tldict/
    // llist/tllist's specs set Py_tp_richcompare -- they all rely on
    // inheriting pdict/tdict/plist/tlist's own comparison behavior
@@ -872,7 +633,7 @@ static PyTypeObject* build_c_subtype(PyType_Spec* spec, PyTypeObject* base) {
    // tp_richcompare from a base that is *itself* a heap type built via
    // PyType_FromSpecWithBases (pdict/tdict rely on this for their own
    // inherited Mapping.__eq__ via a raw field poke rather than a spec
-   // slot -- see build_abc_subtype's own extensive comment in dict.c for
+   // slot -- see build_abc_subtype's own extensive comment in dict.c.h for
    // why it's done as a raw field assignment rather than a spec slot in
    // the first place). Doing the same raw-field copy one level further
    // down (base -> this new subtype) restores correct `==`/`!=` behavior;
@@ -887,15 +648,12 @@ static PyTypeObject* build_c_subtype(PyType_Spec* spec, PyTypeObject* base) {
 // ldict (persistent lazy dict) and tldict (transient lazy dict).
 // See _lazy.py's ldict/tldict for the reference.
 
-static PyTypeObject* LDictType = NULL;
-static PyTypeObject* TLDictType = NULL;
-static PDictObject* g_ldict_empty = NULL;
 
 // Raw-shares src's backing tries into a fresh instance of `type` (which must
 // be PDictObject-layout: PDictType or LDictType), with hashcode reset to
 // -1 (uncached) -- no leaf-level work at all, just two refcount bumps. Used
 // by ldict.as_pdict()/__holdlazy__() and by the ldict.empty bootstrap in
-// PyInit_lazy.
+// pcoll_exec_lazy.
 static PyObject* pdictlike_share(PyTypeObject* type, PDictObject* src) {
    PDictObject* self = (PDictObject*)type->tp_alloc(type, 0);
    if (!self) return NULL;
@@ -914,31 +672,31 @@ static PyObject* ldict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    PyObject* held_args = holdlazy_map_args(args);
    PyObject* result;
    if (!held_args) return NULL;
-   result = PDictType->tp_new(type, held_args, kwds);
+   result = ST(PDictType)->tp_new(type, held_args, kwds);
    Py_DECREF(held_args);
    return result;
 }
 
 static PyObject* ldict_subscript(PDictObject* self, PyObject* key) {
-   PyObject* v = PDictType->tp_as_mapping->mp_subscript((PyObject*)self, key);
+   PyObject* v = ST(PDictType)->tp_as_mapping->mp_subscript((PyObject*)self, key);
    return unlazy_owned(v);
 }
 
 static PyObject* ldict_get(PyObject* self, PyObject* args) {
-   return unlazy_owned(call_unbound(g_pdict_get, self, args));
+   return unlazy_owned(call_unbound(ST(g_pdict_get), self, args));
 }
 
 static PyObject* ldict_getlazy(PyObject* self, PyObject* args) {
    // Deliberately RAW (no unlazy_owned) -- matches the reference's
    // `getlazy`, whose entire purpose is to hand back the `lazy` object
    // itself rather than its (possibly not-yet-computed) value.
-   return call_unbound(g_pdict_get, self, args);
+   return call_unbound(ST(g_pdict_get), self, args);
 }
 
 static PyObject* ldict_items(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    // The reference's `ldict_items`/`ldict_values` are Python classes with an
    // overridable `_from_kv` hook (subclassing the pure-Python `pdict_items`/
-   // `pdict_values`). Our C dict.c instead builds PDictItemsType/
+   // `pdict_values`). Our C dict.c.h instead builds PDictItemsType/
    // PDictValuesType directly atop collections.abc.ItemsView/ValuesView,
    // with no `_from_kv`-style hook to subclass. But ItemsView/ValuesView's
    // own __iter__/__contains__ are already specified (by collections.abc)
@@ -947,26 +705,26 @@ static PyObject* ldict_items(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    // `self._mapping` really is the ldict instance itself. So plain
    // `ItemsView(self)`/`ValuesView(self)` already dereference correctly,
    // with no new C view type needed at all.
-   return PyObject_CallFunctionObjArgs(g_ItemsView, self, NULL);
+   return PyObject_CallFunctionObjArgs(ST(g_ItemsView), self, NULL);
 }
 static PyObject* ldict_values(PyObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs(g_ValuesView, self, NULL);
+   return PyObject_CallFunctionObjArgs(ST(g_ValuesView), self, NULL);
 }
 
 static PyObject* ldict_is_lazy(PyObject* self, PyObject* key) {
    // Raw (undereferenced) lookup -- matches reference's `pdict.__getitem__`.
-   PyObject* v = PDictType->tp_as_mapping->mp_subscript(self, key);
+   PyObject* v = ST(PDictType)->tp_as_mapping->mp_subscript(self, key);
    int is_lazy;
    if (!v) return NULL;
-   is_lazy = ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType);
+   is_lazy = ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType));
    Py_DECREF(v);
    return PyBool_FromLong(is_lazy);
 }
 static PyObject* ldict_is_ready(PyObject* self, PyObject* key) {
-   PyObject* v = PDictType->tp_as_mapping->mp_subscript(self, key);
+   PyObject* v = ST(PDictType)->tp_as_mapping->mp_subscript(self, key);
    PyObject* result;
    if (!v) return NULL;
-   if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
       result = PyObject_CallMethod(v, "is_ready", NULL);
    } else {
       result = Py_True;
@@ -982,10 +740,10 @@ static PyObject* ldict_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    PyObject* key;
    if (!it) return NULL;
    while ((key = PyIter_Next(it))) {
-      PyObject* v = PDictType->tp_as_mapping->mp_subscript(self, key);
+      PyObject* v = ST(PDictType)->tp_as_mapping->mp_subscript(self, key);
       Py_DECREF(key);
       if (!v) { Py_DECREF(it); return NULL; }
-      if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+      if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
          PyObject* forced = PyObject_CallFunctionObjArgs(v, NULL);
          Py_DECREF(v);
          if (!forced) { Py_DECREF(it); return NULL; }
@@ -1000,15 +758,15 @@ static PyObject* ldict_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    return self;
 }
 static PyObject* ldict_as_pdict(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return pdictlike_share(PDictType, self);
+   return pdictlike_share(ST(PDictType), self);
 }
 static PyObject* ldict_clear(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    (void)self;
-   Py_INCREF(g_ldict_empty);
-   return (PyObject*)g_ldict_empty;
+   Py_INCREF(ST(g_ldict_empty));
+   return (PyObject*)ST(g_ldict_empty);
 }
 static PyObject* ldict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   TDictObject* t = (TDictObject*)TLDictType->tp_alloc(TLDictType, 0);
+   TDictObject* t = (TDictObject*)ST(TLDictType)->tp_alloc(ST(TLDictType), 0);
    if (!t) return NULL;
    trienode_incref(self->els);
    trienode_incref(self->idx);
@@ -1034,10 +792,10 @@ static PyObject* ldict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored)
 // the time any ldict instance exists to be traversed/cleared), not
 // something that needs to be known at this file's compile time.
 static int ldict_gc_traverse(PyObject* self, visitproc visit, void* arg) {
-   return PDictType->tp_traverse(self, visit, arg);
+   return pdict_traverse((PDictObject*)self, visit, arg);
 }
 static int ldict_gc_clear(PyObject* self) {
-   return PDictType->tp_clear(self);
+   return pdict_clear((PDictObject*)self);
 }
 
 // __str__/__repr__: now that pcollections/util.py (really a util/
@@ -1065,7 +823,7 @@ static PyObject* ldict_str(PDictObject* self) {
    PyObject* raw = ldict_as_pdict(self, NULL);
    PyObject* s; PyObject* result;
    if (!raw) return NULL;
-   s = call_seqstr(raw, 60, 1, g_reprlazy_func);
+   s = call_seqstr(raw, 60, 1, ST(g_reprlazy_func));
    Py_DECREF(raw);
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{|%U|}", s);
@@ -1119,7 +877,7 @@ static PyType_Slot ldict_slots[] = {
    {0, NULL}
 };
 static PyType_Spec ldict_spec = {
-   .name = "pcollections._c.lazy.ldict",
+   .name = "pcollections.ldict",
    .basicsize = sizeof(PDictObject),
    .itemsize = 0,
    // Py_TPFLAGS_BASETYPE: ldict is subclassable in C, matching pdict/tdict's
@@ -1134,10 +892,10 @@ static PyType_Spec ldict_spec = {
    // correctly for a further Python-level subclass. The one caveat -- shared
    // with pdict/tdict already, not new here -- is that ldict_transient()/
    // tldict_persistent() (like pdict_transient()/tdict_persistent() in
-   // dict.c) always build a plain tldict/ldict rather than preserving a
+   // dict.c.h) always build a plain tldict/ldict rather than preserving a
    // subclass's type, since transient()/persistent() are cross-family
    // conversions, not same-family updates; see this file's ldict_transient()
-   // and dict.c's pdict_wrap()/tdict_wrap() for the established, symmetric
+   // and dict.c.h's pdict_wrap()/tdict_wrap() for the established, symmetric
    // pattern this follows.
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = ldict_slots,
@@ -1146,16 +904,16 @@ static PyType_Spec ldict_spec = {
 // ldict_hash: forces every lazy value via ldict's own (dereferencing)
 // items() before hashing -- matching the reference's documented "hashing an
 // ldict object results in all lazy values being calculated". This needs to
-// be a real override (not simply inherited from pdict) because dict.c's
+// be a real override (not simply inherited from pdict) because dict.c.h's
 // pdict_hash walks the raw backing trie directly (bypassing any subclass
 // __getitem__/items() override entirely) rather than going through `self`
 // polymorphically -- see this file's header-comment-adjacent note near
-// LDictType's build site in PyInit_lazy for the fuller rationale.
+// LDictType's build site in pcoll_exec_lazy for the fuller rationale.
 static Py_hash_t ldict_hash(PDictObject* self) {
    PyObject *items, *fs, *h;
    Py_hash_t result;
    if (self->hashcode != -1) return self->hashcode;
-   items = PyObject_CallFunctionObjArgs(g_ItemsView, (PyObject*)self, NULL);
+   items = PyObject_CallFunctionObjArgs(ST(g_ItemsView), (PyObject*)self, NULL);
    if (!items) return -1;
    fs = PySet_New(items);
    Py_DECREF(items);
@@ -1176,19 +934,19 @@ static PyObject* tldict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) 
    PyObject* held_args = holdlazy_map_args(args);
    PyObject* result;
    if (!held_args) return NULL;
-   result = TDictType->tp_new(type, held_args, kwds);
+   result = ST(TDictType)->tp_new(type, held_args, kwds);
    Py_DECREF(held_args);
    return result;
 }
 static PyObject* tldict_subscript(TDictObject* self, PyObject* key) {
-   PyObject* v = TDictType->tp_as_mapping->mp_subscript((PyObject*)self, key);
+   PyObject* v = ST(TDictType)->tp_as_mapping->mp_subscript((PyObject*)self, key);
    return unlazy_owned(v);
 }
 static PyObject* tldict_get(PyObject* self, PyObject* args) {
-   return unlazy_owned(call_unbound(g_tdict_get, self, args));
+   return unlazy_owned(call_unbound(ST(g_tdict_get), self, args));
 }
 static PyObject* tldict_getlazy(PyObject* self, PyObject* args) {
-   return call_unbound(g_tdict_get, self, args); // raw, no unlazy_owned.
+   return call_unbound(ST(g_tdict_get), self, args); // raw, no unlazy_owned.
 }
 static PyObject* tldict_pop(PyObject* self, PyObject* args) {
    // The reference's _lazy.py originally had `def pop(self, *args): return
@@ -1198,10 +956,10 @@ static PyObject* tldict_pop(PyObject* self, PyObject* args) {
    // in _lazy.py to `unlazy(tdict.pop(self, *args))` (an explicit
    // base-class call, exactly like every other method in this file) --
    // this C implementation already matched that fix.
-   return unlazy_owned(call_unbound(g_tdict_pop, self, args));
+   return unlazy_owned(call_unbound(ST(g_tdict_pop), self, args));
 }
 static PyObject* tldict_items(PyObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs(g_ItemsView, self, NULL);
+   return PyObject_CallFunctionObjArgs(ST(g_ItemsView), self, NULL);
 }
 static PyObject* tldict_values(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    // See ldict_items' comment on why a plain generic ValuesView already
@@ -1212,21 +970,21 @@ static PyObject* tldict_values(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    // order iteration yields them, which is equally *correct*, just not
    // necessarily as laziness-preserving in the case where the sought value
    // is found among the non-lazy entries. A deliberate simplification.
-   return PyObject_CallFunctionObjArgs(g_ValuesView, self, NULL);
+   return PyObject_CallFunctionObjArgs(ST(g_ValuesView), self, NULL);
 }
 static PyObject* tldict_is_lazy(PyObject* self, PyObject* key) {
-   PyObject* v = TDictType->tp_as_mapping->mp_subscript(self, key);
+   PyObject* v = ST(TDictType)->tp_as_mapping->mp_subscript(self, key);
    int is_lazy;
    if (!v) return NULL;
-   is_lazy = ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType);
+   is_lazy = ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType));
    Py_DECREF(v);
    return PyBool_FromLong(is_lazy);
 }
 static PyObject* tldict_is_ready(PyObject* self, PyObject* key) {
-   PyObject* v = TDictType->tp_as_mapping->mp_subscript(self, key);
+   PyObject* v = ST(TDictType)->tp_as_mapping->mp_subscript(self, key);
    PyObject* result;
    if (!v) return NULL;
-   if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
       result = PyObject_CallMethod(v, "is_ready", NULL);
    } else {
       result = Py_True;
@@ -1240,10 +998,10 @@ static PyObject* tldict_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) 
    PyObject* key;
    if (!it) return NULL;
    while ((key = PyIter_Next(it))) {
-      PyObject* v = TDictType->tp_as_mapping->mp_subscript(self, key);
+      PyObject* v = ST(TDictType)->tp_as_mapping->mp_subscript(self, key);
       Py_DECREF(key);
       if (!v) { Py_DECREF(it); return NULL; }
-      if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+      if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
          PyObject* forced = PyObject_CallFunctionObjArgs(v, NULL);
          Py_DECREF(v);
          if (!forced) { Py_DECREF(it); return NULL; }
@@ -1258,7 +1016,7 @@ static PyObject* tldict_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) 
    return self;
 }
 static PyObject* tldict_as_tdict(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   TDictObject* t = (TDictObject*)TDictType->tp_alloc(TDictType, 0);
+   TDictObject* t = (TDictObject*)ST(TDictType)->tp_alloc(ST(TDictType), 0);
    if (!t) return NULL;
    trienode_incref(self->els);
    trienode_incref(self->idx);
@@ -1275,16 +1033,16 @@ static PyObject* tldict_as_tdict(TDictObject* self, PyObject* Py_UNUSED(ignored)
 static PyObject* tldict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
    PDictObject* p;
    if (self->count == 0) {
-      Py_INCREF(g_ldict_empty);
-      return (PyObject*)g_ldict_empty;
+      Py_INCREF(ST(g_ldict_empty));
+      return (PyObject*)ST(g_ldict_empty);
    }
    if (self->orig) {
       Py_INCREF(self->orig);
       return self->orig;
    }
-   lazyfile_fat_freeze(self->els);
-   lazyfile_amt_freeze(self->idx);
-   p = (PDictObject*)LDictType->tp_alloc(LDictType, 0);
+   fat_freeze(self->els);
+   amt_freeze(self->idx);
+   p = (PDictObject*)ST(LDictType)->tp_alloc(ST(LDictType), 0);
    if (!p) return NULL;
    trienode_incref(self->els);
    trienode_incref(self->idx);
@@ -1300,7 +1058,7 @@ static PyObject* tldict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignore
 //   __str__: f"{{|{seqstr(self.as_tdict(), maxlen=60, tostr=reprlazy)}|}}"
 //   __repr__: f"{{|{seqstr(self.as_tdict())}|}}"
 // NB: both use the "{|...|}" delimiter -- NOT tdict's own transient
-// "{<...>}" shape (see tdict_str/tdict_repr in dict.c) -- this is what the
+// "{<...>}" shape (see tdict_str/tdict_repr in dict.c.h) -- this is what the
 // reference actually does, not a mistake to "fix" here.
 static PyObject* tldict_repr(TDictObject* self) {
    PyObject* as_td = tldict_as_tdict(self, NULL);
@@ -1317,7 +1075,7 @@ static PyObject* tldict_str(TDictObject* self) {
    PyObject* as_td = tldict_as_tdict(self, NULL);
    PyObject* s; PyObject* result;
    if (!as_td) return NULL;
-   s = call_seqstr(as_td, 60, 1, g_reprlazy_func);
+   s = call_seqstr(as_td, 60, 1, ST(g_reprlazy_func));
    Py_DECREF(as_td);
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{|%U|}", s);
@@ -1327,10 +1085,10 @@ static PyObject* tldict_str(TDictObject* self) {
 
 // See ldict_gc_traverse/ldict_gc_clear's comment.
 static int tldict_gc_traverse(PyObject* self, visitproc visit, void* arg) {
-   return TDictType->tp_traverse(self, visit, arg);
+   return tdict_traverse((TDictObject*)self, visit, arg);
 }
 static int tldict_gc_clear(PyObject* self) {
-   return TDictType->tp_clear(self);
+   return tdict_clear((TDictObject*)self);
 }
 
 static PyMethodDef tldict_methods[] = {
@@ -1372,7 +1130,7 @@ static PyType_Slot tldict_slots[] = {
    {0, NULL}
 };
 static PyType_Spec tldict_spec = {
-   .name = "pcollections._c.lazy.tldict",
+   .name = "pcollections.tldict",
    .basicsize = sizeof(TDictObject),
    .itemsize = 0,
    // Py_TPFLAGS_BASETYPE: see ldict_spec's comment above -- same reasoning
@@ -1386,20 +1144,20 @@ static PyType_Spec tldict_spec = {
 // llist (persistent lazy list) and tllist (transient lazy list).
 // See _lazy.py's llist/tllist for the reference.
 
-static PyTypeObject* LListType = NULL;
-static PyTypeObject* TLListType = NULL;
-static PListObject* g_llist_empty = NULL;
 
 typedef struct {
    PyObject_HEAD
    PyObject* inner; // the raw (un-dereferencing) iterator being wrapped.
 } UnlazyIterObject;
 static void unlazyiter_dealloc(UnlazyIterObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    Py_CLEAR(self->inner);
    PyObject_GC_Del(self);
+   Py_DECREF(tp);
 }
 static int unlazyiter_traverse(UnlazyIterObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->inner);
    return 0;
 }
@@ -1411,23 +1169,26 @@ static PyObject* unlazyiter_next(UnlazyIterObject* self) {
    return unlazy_owned(PyIter_Next(self->inner));
 }
 static PyObject* unlazyiter_self(PyObject* self) { Py_INCREF(self); return self; }
-static PyTypeObject UnlazyIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.lazy._unlazy_iterator",
-   .tp_basicsize = sizeof(UnlazyIterObject),
-   .tp_dealloc = (destructor)unlazyiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)unlazyiter_traverse,
-   .tp_clear = (inquiry)unlazyiter_clear,
-   .tp_iter = unlazyiter_self,
-   .tp_iternext = (iternextfunc)unlazyiter_next,
+static PyType_Slot unlazyiter_slots[] = {
+   {Py_tp_dealloc, (void*)unlazyiter_dealloc},
+   {Py_tp_traverse, (void*)unlazyiter_traverse},
+   {Py_tp_clear, (void*)unlazyiter_clear},
+   {Py_tp_iter, (void*)unlazyiter_self},
+   {Py_tp_iternext, (void*)unlazyiter_next},
+   {0, NULL}
+};
+static PyType_Spec unlazyiter_spec = {
+   .name = "pcollections._c._core._unlazy_iterator",
+   .basicsize = sizeof(UnlazyIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = unlazyiter_slots,
 };
 // Steals `inner` (a new reference to the raw iterator to wrap, or NULL if
 // obtaining it already failed, in which case this just propagates NULL).
 static PyObject* make_unlazy_iter(PyObject* inner) {
    UnlazyIterObject* it;
    if (!inner) return NULL;
-   it = PyObject_GC_New(UnlazyIterObject, &UnlazyIterType);
+   it = PyObject_GC_New(UnlazyIterObject, ST(UnlazyIterType));
    if (!it) { Py_DECREF(inner); return NULL; }
    it->inner = inner;
    PyObject_GC_Track(it);
@@ -1449,7 +1210,7 @@ static PyObject* llist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    PyObject* held_args = holdlazy_map_args(args);
    PyObject* result;
    if (!held_args) return NULL;
-   result = PListType->tp_new(type, held_args, kwds);
+   result = ST(PListType)->tp_new(type, held_args, kwds);
    Py_DECREF(held_args);
    return result;
 }
@@ -1461,30 +1222,30 @@ static PyObject* llist_subscript(PListObject* self, PyObject* key) {
    // *actual* instance, so when self is an llist, that already constructs
    // another llist (not a plain plist), still holding any lazy elements
    // uncached internally. Our C plist_subscript's slice branch is
-   // (correctly, per list.c's own subclass-preservation work) parameterized
+   // (correctly, per list.c.h's own subclass-preservation work) parameterized
    // by Py_TYPE(self) the same way, so delegating to PListType's own
    // mp_subscript here already produces an llist for a slice key, exactly
    // matching the reference -- `el` is therefore never itself a `lazy`
    // instance in the slice case, so it passes through unforced, while a
    // scalar index's raw (possibly-lazy) element does get dereferenced here.
-   PyObject* v = PListType->tp_as_mapping->mp_subscript((PyObject*)self, key);
+   PyObject* v = ST(PListType)->tp_as_mapping->mp_subscript((PyObject*)self, key);
    return unlazy_owned(v);
 }
 static PyObject* llist_item(PListObject* self, Py_ssize_t i) {
-   PyObject* v = PListType->tp_as_sequence->sq_item((PyObject*)self, i);
+   PyObject* v = ST(PListType)->tp_as_sequence->sq_item((PyObject*)self, i);
    return unlazy_owned(v);
 }
 static PyObject* llist_iter(PListObject* self) {
-   return make_unlazy_iter(PListType->tp_iter((PyObject*)self));
+   return make_unlazy_iter(ST(PListType)->tp_iter((PyObject*)self));
 }
 static PyObject* llist_is_lazy(PyObject* self, PyObject* index_obj) {
    Py_ssize_t i = PyNumber_AsSsize_t(index_obj, PyExc_IndexError);
    PyObject* v;
    int is_lazy;
    if (i == -1 && PyErr_Occurred()) return NULL;
-   v = PListType->tp_as_sequence->sq_item(self, i);
+   v = ST(PListType)->tp_as_sequence->sq_item(self, i);
    if (!v) return NULL;
-   is_lazy = ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType);
+   is_lazy = ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType));
    Py_DECREF(v);
    return PyBool_FromLong(is_lazy);
 }
@@ -1493,9 +1254,9 @@ static PyObject* llist_is_ready(PyObject* self, PyObject* index_obj) {
    PyObject* v;
    PyObject* result;
    if (i == -1 && PyErr_Occurred()) return NULL;
-   v = PListType->tp_as_sequence->sq_item(self, i);
+   v = ST(PListType)->tp_as_sequence->sq_item(self, i);
    if (!v) return NULL;
-   if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
       result = PyObject_CallMethod(v, "is_ready", NULL);
    } else {
       result = Py_True;
@@ -1509,9 +1270,9 @@ static PyObject* llist_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    Py_ssize_t i;
    if (n < 0) return NULL;
    for (i = 0; i < n; ++i) {
-      PyObject* v = PListType->tp_as_sequence->sq_item(self, i);
+      PyObject* v = ST(PListType)->tp_as_sequence->sq_item(self, i);
       if (!v) return NULL;
-      if ((PyObject*)Py_TYPE(v) == (PyObject*)LazyType) {
+      if ((PyObject*)Py_TYPE(v) == (PyObject*)ST(LazyType)) {
          PyObject* forced = PyObject_CallFunctionObjArgs(v, NULL);
          Py_DECREF(v);
          if (!forced) return NULL;
@@ -1524,18 +1285,18 @@ static PyObject* llist_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    return self;
 }
 static PyObject* llist_as_plist(PListObject* self, PyObject* Py_UNUSED(ignored)) {
-   return plistlike_share(PListType, self);
+   return plistlike_share(ST(PListType), self);
 }
 static PyObject* llist_getlazy(PyObject* self, PyObject* index_obj) {
-   return PListType->tp_as_mapping->mp_subscript(self, index_obj); // raw.
+   return ST(PListType)->tp_as_mapping->mp_subscript(self, index_obj); // raw.
 }
 static PyObject* llist_clear(PyObject* self, PyObject* Py_UNUSED(ignored)) {
    (void)self;
-   Py_INCREF(g_llist_empty);
-   return (PyObject*)g_llist_empty;
+   Py_INCREF(ST(g_llist_empty));
+   return (PyObject*)ST(g_llist_empty);
 }
 static PyObject* llist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)) {
-   TListObject* t = (TListObject*)TLListType->tp_alloc(TLListType, 0);
+   TListObject* t = (TListObject*)ST(TLListType)->tp_alloc(ST(TLListType), 0);
    if (!t) return NULL;
    trienode_incref(self->root);
    Py_INCREF(self);
@@ -1547,10 +1308,10 @@ static PyObject* llist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)
 }
 // See ldict_gc_traverse/ldict_gc_clear's comment.
 static int llist_gc_traverse(PyObject* self, visitproc visit, void* arg) {
-   return PListType->tp_traverse(self, visit, arg);
+   return plist_traverse((PListObject*)self, visit, arg);
 }
 static int llist_gc_clear(PyObject* self) {
-   return PListType->tp_clear(self);
+   return plist_clear((PListObject*)self);
 }
 // Matches _lazy.py's llist.__str__/__repr__ exactly, now that the real
 // util.seqstr is available:
@@ -1571,7 +1332,7 @@ static PyObject* llist_str(PListObject* self) {
    PyObject* raw = llist_as_plist(self, NULL);
    PyObject* s; PyObject* result;
    if (!raw) return NULL;
-   s = call_seqstr(raw, 60, 1, g_reprlazy_func);
+   s = call_seqstr(raw, 60, 1, ST(g_reprlazy_func));
    Py_DECREF(raw);
    if (!s) return NULL;
    result = PyUnicode_FromFormat("[|%U|]", s);
@@ -1592,7 +1353,7 @@ static Py_hash_t llist_hash(PListObject* self) {
    Py_hash_t result;
    Py_ssize_t n, i;
    if (self->hashcode != -1) return self->hashcode;
-   it = make_unlazy_iter(PListType->tp_iter((PyObject*)self));
+   it = make_unlazy_iter(ST(PListType)->tp_iter((PyObject*)self));
    if (!it) return -1;
    parts = PyList_New(0);
    if (!parts) { Py_DECREF(it); return -1; }
@@ -1658,42 +1419,42 @@ static PyType_Slot llist_slots[] = {
    {0, NULL}
 };
 static PyType_Spec llist_spec = {
-   .name = "pcollections._c.lazy.llist",
+   .name = "pcollections.llist",
    .basicsize = sizeof(PListObject),
    .itemsize = 0,
    // Py_TPFLAGS_BASETYPE: see ldict_spec's comment above -- same reasoning
    // applies symmetrically to llist (and, via plist/tlist's own
-   // Py_TPFLAGS_BASETYPE in list.c, mirrors that pair's own subclassability).
+   // Py_TPFLAGS_BASETYPE in list.c.h, mirrors that pair's own subclassability).
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = llist_slots,
 };
 
 static PyObject* tllist_subscript(TListObject* self, PyObject* key) {
-   PyObject* v = TListType->tp_as_mapping->mp_subscript((PyObject*)self, key);
+   PyObject* v = ST(TListType)->tp_as_mapping->mp_subscript((PyObject*)self, key);
    return unlazy_owned(v);
 }
 static PyObject* tllist_item(TListObject* self, Py_ssize_t i) {
-   PyObject* v = TListType->tp_as_sequence->sq_item((PyObject*)self, i);
+   PyObject* v = ST(TListType)->tp_as_sequence->sq_item((PyObject*)self, i);
    return unlazy_owned(v);
 }
 static PyObject* tllist_iter(TListObject* self) {
-   return make_unlazy_iter(TListType->tp_iter((PyObject*)self));
+   return make_unlazy_iter(ST(TListType)->tp_iter((PyObject*)self));
 }
 static PyObject* tllist_getlazy(PyObject* self, PyObject* index_obj) {
-   return TListType->tp_as_mapping->mp_subscript(self, index_obj); // raw.
+   return ST(TListType)->tp_as_mapping->mp_subscript(self, index_obj); // raw.
 }
 static PyObject* tllist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored)) {
    PListObject* p;
    if (self->length == 0) {
-      Py_INCREF(g_llist_empty);
-      return (PyObject*)g_llist_empty;
+      Py_INCREF(ST(g_llist_empty));
+      return (PyObject*)ST(g_llist_empty);
    }
    if (self->orig) {
       Py_INCREF(self->orig);
       return self->orig;
    }
-   lazyfile_fat_freeze(self->root);
-   p = (PListObject*)LListType->tp_alloc(LListType, 0);
+   fat_freeze(self->root);
+   p = (PListObject*)ST(LListType)->tp_alloc(ST(LListType), 0);
    if (!p) return NULL;
    trienode_incref(self->root);
    p->root = self->root;
@@ -1704,10 +1465,10 @@ static PyObject* tllist_persistent(TListObject* self, PyObject* Py_UNUSED(ignore
 }
 // See ldict_gc_traverse/ldict_gc_clear's comment.
 static int tllist_gc_traverse(PyObject* self, visitproc visit, void* arg) {
-   return TListType->tp_traverse(self, visit, arg);
+   return tlist_traverse((TListObject*)self, visit, arg);
 }
 static int tllist_gc_clear(PyObject* self) {
-   return TListType->tp_clear(self);
+   return tlist_clear((TListObject*)self);
 }
 static PyMethodDef tllist_methods[] = {
    {"getlazy", (PyCFunction)tllist_getlazy, METH_O,
@@ -1721,7 +1482,7 @@ static PyType_Slot tllist_slots[] = {
    // llist/ldict/tldict) -- it inherits tlist's tp_new unchanged, including
    // tlist's own isinstance(arg, plist)-based construction logic (which
    // will happily accept an llist argument too, raw-sharing its root
-   // without dereferencing -- see list.c's tlist_new comment).
+   // without dereferencing -- see list.c.h's tlist_new comment).
    {Py_tp_traverse, (void*)tllist_gc_traverse},
    {Py_tp_clear, (void*)tllist_gc_clear},
    {Py_mp_subscript, (void*)tllist_subscript},
@@ -1735,7 +1496,7 @@ static PyType_Slot tllist_slots[] = {
    {0, NULL}
 };
 static PyType_Spec tllist_spec = {
-   .name = "pcollections._c.lazy.tllist",
+   .name = "pcollections.tllist",
    .basicsize = sizeof(TListObject),
    .itemsize = 0,
    // Py_TPFLAGS_BASETYPE: see ldict_spec's comment above -- same reasoning
@@ -1750,7 +1511,7 @@ static PyType_Spec tllist_spec = {
 
 static PyObject* mod_unlazy(PyObject* self, PyObject* obj) {
    (void)self;
-   if ((PyObject*)Py_TYPE(obj) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(obj) == (PyObject*)ST(LazyType)) {
       return PyObject_CallFunctionObjArgs(obj, NULL);
    }
    Py_INCREF(obj);
@@ -1758,13 +1519,13 @@ static PyObject* mod_unlazy(PyObject* self, PyObject* obj) {
 }
 static PyObject* mod_reprlazy(PyObject* self, PyObject* obj) {
    (void)self;
-   if ((PyObject*)Py_TYPE(obj) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(obj) == (PyObject*)ST(LazyType)) {
       return PyUnicode_FromString("<lazy>");
    }
    return PyObject_Repr(obj);
 }
 // Named separately (rather than only inline inside lazy_module_methods
-// below) so PyInit_lazy can wrap it into a standalone callable object
+// below) so pcoll_exec_lazy can wrap it into a standalone callable object
 // (g_reprlazy_func) to pass as util.seqstr's `tostr` argument -- see
 // ldict_str/tldict_str/llist_str above, which need exactly the reference's
 // `tostr=reprlazy` behavior.
@@ -1773,7 +1534,7 @@ static PyMethodDef reprlazy_methoddef = {
    "Returns '<lazy>' if obj is a lazy object, otherwise repr(obj)."};
 static PyObject* mod_strlazy(PyObject* self, PyObject* obj) {
    (void)self;
-   if ((PyObject*)Py_TYPE(obj) == (PyObject*)LazyType) {
+   if ((PyObject*)Py_TYPE(obj) == (PyObject*)ST(LazyType)) {
       return PyUnicode_FromString("<lazy>");
    }
    return PyObject_Str(obj);
@@ -1813,165 +1574,85 @@ static PyMethodDef lazy_module_methods[] = {
    {NULL, NULL, 0, NULL}
 };
 
-static PyModuleDef lazy_module = {
-   PyModuleDef_HEAD_INIT,
-   "pcollections._c.lazy",
-   "C implementation of the `lazy` thread-safe deferred-computation cell, "
-   "plus its supporting LazyError/lazy_error_unwrap/unlazy/reprlazy/strlazy/"
-   "holdlazy helpers.",
-   -1,
-   lazy_module_methods, NULL, NULL, NULL, NULL
-};
+//=============================================================================
+// Module execution.
 
-PyMODINIT_FUNC PyInit_lazy(void) {
-   PyObject* m;
-   PyObject* functools_module;
+// Creates lazy, LazyError, lazy_error_unwrap, and the lazy collections, and
+// adds them to module `m`. Must run after pcoll_exec_dict/pcoll_exec_list.
+static int pcoll_exec_lazy(PyObject* m, pcoll_state* st) {
+   PyObject* functools = NULL;
+   PyObject* coll_abc = NULL;
+   PyObject* util = NULL;
+   PyObject* empty = NULL;
+   int rc = -1;
 
-   functools_module = PyImport_ImportModule("functools");
-   if (!functools_module) return NULL;
-   g_functools_partial_type = PyObject_GetAttrString(functools_module, "partial");
-   Py_DECREF(functools_module);
-   if (!g_functools_partial_type) return NULL;
+   functools = PyImport_ImportModule("functools");
+   if (!functools) goto done;
+   st->g_functools_partial_type = PyObject_GetAttrString(functools, "partial");
+   if (!st->g_functools_partial_type) goto done;
 
-   // LazyErrorType: a heap type derived from RuntimeError (via
-   // PyErr_NewException, which gives us the usual BaseException machinery
-   // -- .args, __traceback__, __context__, __cause__, pickling, etc. -- for
-   // free), with __init__/__str__/__repr__ patched to the reference's
-   // behavior.
-   LazyErrorType = (PyTypeObject*)PyErr_NewException(
-      "pcollections._c.lazy.LazyError", PyExc_RuntimeError, NULL);
-   if (!LazyErrorType) return NULL;
-   LazyErrorType->tp_init = lazyerror_init;
-   LazyErrorType->tp_str = lazyerror_str;
-   LazyErrorType->tp_repr = lazyerror_repr;
+   st->LazyErrorType = (PyTypeObject*)PyErr_NewException(
+      "pcollections.LazyError", PyExc_RuntimeError, NULL);
+   if (!st->LazyErrorType) goto done;
+   st->LazyErrorType->tp_init = lazyerror_init;
+   st->LazyErrorType->tp_str = lazyerror_str;
+   st->LazyErrorType->tp_repr = lazyerror_repr;
 
-   if (PyType_Ready(&LazyErrorUnwrapperType) < 0) return NULL;
-   g_lazy_error_unwrap = LazyErrorUnwrapperType.tp_alloc(&LazyErrorUnwrapperType, 0);
-   if (!g_lazy_error_unwrap) return NULL;
+   st->LazyErrorUnwrapperType = pcoll_new_internal_type(m, &lazyerrorunwrap_spec);
+   if (!st->LazyErrorUnwrapperType) goto done;
+   st->g_lazy_error_unwrap = st->LazyErrorUnwrapperType->tp_alloc(
+      st->LazyErrorUnwrapperType, 0);
+   if (!st->g_lazy_error_unwrap) goto done;
 
-   LazyType = (PyTypeObject*)PyType_FromSpec(&lazy_spec);
-   if (!LazyType) return NULL;
+   st->LazyType = pcoll_new_type(m, &lazy_spec, NULL);
+   if (!st->LazyType) goto done;
+   st->UnlazyIterType = pcoll_new_internal_type(m, &unlazyiter_spec);
+   if (!st->UnlazyIterType) goto done;
 
-   if (PyType_Ready(&UnlazyIterType) < 0) return NULL;
+   coll_abc = PyImport_ImportModule("collections.abc");
+   if (!coll_abc) goto done;
+   st->g_ItemsView = PyObject_GetAttrString(coll_abc, "ItemsView");
+   if (!st->g_ItemsView) goto done;
+   st->g_ValuesView = PyObject_GetAttrString(coll_abc, "ValuesView");
+   if (!st->g_ValuesView) goto done;
 
-   //---------------------------------------------------------------------
-   // Import pcollections._c.dict/.list (the base types ldict/tldict/llist/
-   // tllist subclass) and collections.abc (for ItemsView/ValuesView), and
-   // cache the handful of base-class unbound methods used throughout the
-   // functions above.
-   {
-      PyObject* dict_module = PyImport_ImportModule("pcollections._c.dict");
-      PyObject* list_module;
-      PyObject* abc_module;
-      PyObject* pdict_empty_obj;
-      PyObject* plist_empty_obj;
+   st->g_pdict_get = PyObject_GetAttrString((PyObject*)st->PDictType, "get");
+   if (!st->g_pdict_get) goto done;
+   st->g_tdict_get = PyObject_GetAttrString((PyObject*)st->TDictType, "get");
+   if (!st->g_tdict_get) goto done;
+   st->g_tdict_pop = PyObject_GetAttrString((PyObject*)st->TDictType, "pop");
+   if (!st->g_tdict_pop) goto done;
 
-      if (!dict_module) return NULL;
-      PDictType = (PyTypeObject*)PyObject_GetAttrString(dict_module, "pdict");
-      TDictType = (PyTypeObject*)PyObject_GetAttrString(dict_module, "tdict");
-      Py_DECREF(dict_module);
-      if (!PDictType || !TDictType) return NULL;
+   st->g_reprlazy_func = PyCFunction_NewEx(&reprlazy_methoddef, NULL, NULL);
+   if (!st->g_reprlazy_func) goto done;
 
-      list_module = PyImport_ImportModule("pcollections._c.list");
-      if (!list_module) return NULL;
-      PListType = (PyTypeObject*)PyObject_GetAttrString(list_module, "plist");
-      TListType = (PyTypeObject*)PyObject_GetAttrString(list_module, "tlist");
-      Py_DECREF(list_module);
-      if (!PListType || !TListType) return NULL;
+   if (!(st->LDictType = build_c_subtype(m, &ldict_spec, st->PDictType)) ||
+       !(st->TLDictType = build_c_subtype(m, &tldict_spec, st->TDictType)) ||
+       !(st->LListType = build_c_subtype(m, &llist_spec, st->PListType)) ||
+       !(st->TLListType = build_c_subtype(m, &tllist_spec, st->TListType)))
+      goto done;
 
-      abc_module = PyImport_ImportModule("collections.abc");
-      if (!abc_module) return NULL;
-      g_ItemsView = PyObject_GetAttrString(abc_module, "ItemsView");
-      g_ValuesView = PyObject_GetAttrString(abc_module, "ValuesView");
-      Py_DECREF(abc_module);
-      if (!g_ItemsView || !g_ValuesView) return NULL;
+   empty = pdictlike_share(st->LDictType, st->g_pdict_empty);
+   if (!empty) goto done;
+   st->g_ldict_empty = (PDictObject*)empty;
+   if (pcoll_type_setattr(st->LDictType, "empty", empty) < 0) goto done;
+   empty = plistlike_share(st->LListType, st->g_plist_empty);
+   if (!empty) goto done;
+   st->g_llist_empty = (PListObject*)empty;
+   if (pcoll_type_setattr(st->LListType, "empty", empty) < 0) goto done;
 
-      g_pdict_get = PyObject_GetAttrString((PyObject*)PDictType, "get");
-      g_tdict_get = PyObject_GetAttrString((PyObject*)TDictType, "get");
-      g_tdict_pop = PyObject_GetAttrString((PyObject*)TDictType, "pop");
-      if (!g_pdict_get || !g_tdict_get || !g_tdict_pop) return NULL;
-
-      {
-         PyObject* util_module = PyImport_ImportModule("pcollections.util");
-         if (!util_module) return NULL;
-         g_seqstr = PyObject_GetAttrString(util_module, "seqstr");
-         Py_DECREF(util_module);
-         if (!g_seqstr) return NULL;
-      }
-      g_reprlazy_func = PyCFunction_NewEx(&reprlazy_methoddef, NULL, NULL);
-      if (!g_reprlazy_func) return NULL;
-
-      //------------------------------------------------------------------
-      // Build LDictType/TLDictType/LListType/TLListType as heap types
-      // subclassing PDictType/TDictType/PListType/TListType directly (now
-      // that those are all Py_TPFLAGS_BASETYPE-enabled -- see dict.c's/
-      // list.c's own header comments on that subclassing support).
-      LDictType = build_c_subtype(&ldict_spec, PDictType);
-      TLDictType = build_c_subtype(&tldict_spec, TDictType);
-      LListType = build_c_subtype(&llist_spec, PListType);
-      TLListType = build_c_subtype(&tllist_spec, TListType);
-      if (!LDictType || !TLDictType || !LListType || !TLListType) return NULL;
-
-      //------------------------------------------------------------------
-      // Bootstrap ldict.empty/llist.empty (plain class attributes, mirroring
-      // pdict.empty/plist.empty -- NOT classmethods, unlike tdict/tlist's
-      // own "empty" -- see this file's header-comment-adjacent notes on
-      // tldict/tllist deliberately having no stored `.empty` at all). Each
-      // is built by raw-sharing PDictType.empty's/PListType.empty's already-
-      // correctly-constructed (and already non-transient/persistent) empty
-      // trie(s) -- this sidesteps ever needing to build a *new* empty trie
-      // ourselves (which would require knowing dict.c's/list.c's private
-      // leaf-size constants).
-      pdict_empty_obj = PyObject_GetAttrString((PyObject*)PDictType, "empty");
-      if (!pdict_empty_obj) return NULL;
-      g_ldict_empty = (PDictObject*)pdictlike_share(LDictType, (PDictObject*)pdict_empty_obj);
-      Py_DECREF(pdict_empty_obj);
-      if (!g_ldict_empty) return NULL;
-      if (PyDict_SetItemString(LDictType->tp_dict, "empty", (PyObject*)g_ldict_empty) < 0)
-         return NULL;
-      PyType_Modified(LDictType);
-
-      plist_empty_obj = PyObject_GetAttrString((PyObject*)PListType, "empty");
-      if (!plist_empty_obj) return NULL;
-      g_llist_empty = (PListObject*)plistlike_share(LListType, (PListObject*)plist_empty_obj);
-      Py_DECREF(plist_empty_obj);
-      if (!g_llist_empty) return NULL;
-      if (PyDict_SetItemString(LListType->tp_dict, "empty", (PyObject*)g_llist_empty) < 0)
-         return NULL;
-      PyType_Modified(LListType);
-   }
-
-   m = PyModule_Create(&lazy_module);
-   if (!m) return NULL;
-
-   Py_INCREF(LazyType);
-   if (PyModule_AddObject(m, "lazy", (PyObject*)LazyType) < 0) {
-      Py_DECREF(LazyType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(LazyErrorType);
-   if (PyModule_AddObject(m, "LazyError", (PyObject*)LazyErrorType) < 0) {
-      Py_DECREF(LazyErrorType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(g_lazy_error_unwrap);
-   if (PyModule_AddObject(m, "lazy_error_unwrap", g_lazy_error_unwrap) < 0) {
-      Py_DECREF(g_lazy_error_unwrap); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(LDictType);
-   if (PyModule_AddObject(m, "ldict", (PyObject*)LDictType) < 0) {
-      Py_DECREF(LDictType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TLDictType);
-   if (PyModule_AddObject(m, "tldict", (PyObject*)TLDictType) < 0) {
-      Py_DECREF(TLDictType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(LListType);
-   if (PyModule_AddObject(m, "llist", (PyObject*)LListType) < 0) {
-      Py_DECREF(LListType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TLListType);
-   if (PyModule_AddObject(m, "tllist", (PyObject*)TLListType) < 0) {
-      Py_DECREF(TLListType); Py_DECREF(m); return NULL;
-   }
-
-   return m;
+   if (pcoll_module_add(m, "lazy", (PyObject*)st->LazyType) < 0 ||
+       pcoll_module_add(m, "LazyError", (PyObject*)st->LazyErrorType) < 0 ||
+       pcoll_module_add(m, "lazy_error_unwrap", st->g_lazy_error_unwrap) < 0 ||
+       pcoll_module_add(m, "ldict", (PyObject*)st->LDictType) < 0 ||
+       pcoll_module_add(m, "tldict", (PyObject*)st->TLDictType) < 0 ||
+       pcoll_module_add(m, "llist", (PyObject*)st->LListType) < 0 ||
+       pcoll_module_add(m, "tllist", (PyObject*)st->TLListType) < 0)
+      goto done;
+   rc = 0;
+done:
+   Py_XDECREF(functools);
+   Py_XDECREF(coll_abc);
+   Py_XDECREF(util);
+   return rc;
 }

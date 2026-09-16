@@ -8,7 +8,7 @@ from itertools import (chain, islice)
 
 # plist/tlist encode their contents as a single dense, (possibly negative-
 # indexed, via prepend) integer-keyed trie -- exactly the "insertion-order
-# value table" role _c/list.c's own FAT plays (see that file and
+# value table" role _c/list.c.h's own FAT plays (see that file and
 # pcollections/_trie.py's module docstring for why FAT is, in this pure-
 # Python port, an AMT specialized only by name/role rather than a
 # structurally distinct trie kind). Imported under the names this file

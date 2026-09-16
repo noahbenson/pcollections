@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////////
-// _c/list.c
+// _c/list.c.h
 // The persistent (plist) and transient (tlist) list types, implemented as
 // thin CPython wrappers around a FAT node tree (see fat.h/trie.h).
 //
@@ -32,7 +32,7 @@
 // insert/clear/transient/persistent/__iter__/__len__/__getitem__/
 // __setitem__/__delitem__/__reduce__ -- plus __repr__/__hash__/__eq__/
 // ordering and cyclic-GC support. PListType/TListType are built as HEAP
-// types at import time (see PyInit_list, and the comment on PListType's
+// types at import time (see pcoll_exec_list, and the comment on PListType's
 // declaration below) specifically so they can set PersistentSequence/
 // TransientSequence (imported from pcollections.abc at runtime) as their
 // tp_base: this means everything else -- count/index/extend/sort/reverse/
@@ -42,37 +42,16 @@
 // `tlist` had been declared in Python as subclasses of those ABC mixins,
 // rather than being reimplemented here. plist/tlist ARE subclassable in C
 // (Py_TPFLAGS_BASETYPE is set on both -- see the note on their PyType_Spec
-// flags below): pcollections._c.lazy's `llist`/`tllist` subclass them
+// flags below): pcollections._c._core's `llist`/`tllist` subclass them
 // directly, so every construction site that the reference's plist/tlist
 // route through `self._new(...)`/`cls._new(...)`/`cls.empty` now threads
 // `Py_TYPE(self)`/`type` through instead of hardcoding PListType/TListType,
-// mirroring dict.c's identical pdict/tdict subclassing support (see that
+// mirroring dict.c.h's identical pdict/tdict subclassing support (see that
 // file's header comment for the fuller rationale, including the
 // tp_alloc-vs-PyObject_GC_New memory-safety subtlety that a subclass with
 // auto-added __dict__/__weakref__ slots requires).
 
 
-//=============================================================================
-// Initialization.
-
-#include <Python.h>
-#include <string.h>
-#include "uintbits.h"
-// trie.h provides pcoll_atomic_u64_t/PCOLL_ATOMIC_U64_FETCH_*1 (a portable
-// stand-in for <stdatomic.h>, which MSVC doesn't have at all without
-// /std:c11 -- see trie.h's shim comment); this file doesn't call any
-// atomic_* function directly, so it doesn't need its own <stdatomic.h>
-// include (and, on Windows, must not have one).
-#include "trie.h"
-#include "fat.h"
-
-#ifdef __cplusplus
-#  define EXTC extern "C"
-#else
-#  define EXTC
-#endif
-
-// Every FAT node in this file stores PyObject* leaves.
 #define PYLEAFSIZE ((uint8_t)sizeof(PyObject*))
 
 // The `start` value used for every freshly-constructed (not derived from an
@@ -89,73 +68,6 @@
 // both directions: reaching real wraparound would take on the order of
 // 2**63 net prepends or appends, which is not a real-world concern.
 #define LIST_START_MID ((trieint_t)1 << (TRIEINT_WIDTH - 1))
-
-
-//=============================================================================
-// fat_empty(): the real (non-test) definition of the canonical-empty-node
-// singleton that trie.h/fat.h declare but deliberately don't define (each
-// translation unit that uses FAT gets to decide how/whether to cache these).
-// Indexed by leafsize purely for robustness/parity with the project's test
-// harnesses; in practice this file only ever asks for PYLEAFSIZE.
-
-static Trie_t g_fat_empty_singletons[256];
-
-Trie_t fat_empty(uint8_t leafsize) {
-   if (!g_fat_empty_singletons[leafsize]) {
-      Trie_t t = fatnode_new(0, leafsize, FAT_MAX_DEPTH, false);
-      t->header.bits = 0;
-      // Permanent extra hold: this singleton is never really freed no matter
-      // how many callers decref the reference they were handed.
-      trienode_incref(t);
-      g_fat_empty_singletons[leafsize] = t;
-   }
-   trienode_incref(g_fat_empty_singletons[leafsize]);
-   return g_fat_empty_singletons[leafsize];
-}
-
-
-//=============================================================================
-// fat_freeze(): recursively mark `a` and every transient node reachable from
-// it as persistent (clearing TRIE_FLAG_ISTRANSIENT), stopping the recursion
-// the instant a node is found already persistent -- per FAT's invariant, a
-// persistent node can never have a transient descendant (transient nodes
-// only ever arise as freshly-claimed copies made during an in-progress
-// transient mutation session), so if a node is already persistent,
-// everything beneath it already is too.
-//
-// This is genuinely necessary, not just a nice-to-have: tlist.persistent()
-// can be called partway through a mutation session and the tlist must
-// remain usable afterward (the reference implementation supports exactly
-// this -- nothing invalidates the transient wrapper when persistent() is
-// called). If we only flipped the root's own flag, every OTHER node this
-// session already claimed would still read as transient, and a later
-// mutation through the SAME tlist would go on mutating those nodes in
-// place -- silently corrupting the "immutable" snapshot just handed out.
-// Recursively freezing (an operation bounded by how much of the tree this
-// session actually touched, not the tree's full size) is what makes the
-// handed-out snapshot genuinely safe to alias.
-static void fat_freeze(Trie_t a) {
-   if (!trie_is_transient(a))
-      return;  // already persistent, and so, by invariant, is everything below.
-   trienode_set_transient(a, false);
-   if (!fatnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(a, bi))
-         fat_freeze(trienode_subt(a, bi));
-   }
-}
-
-
-//=============================================================================
-// Leaf refcounting callbacks shared by both types.
-
-static void pyobj_incref(void* v) {
-   Py_INCREF(*(PyObject**)v);
-}
-static void pyobj_decref(void* v) {
-   Py_DECREF(*(PyObject**)v);
-}
 
 
 //=============================================================================
@@ -204,7 +116,7 @@ static int normalize_index(Py_ssize_t idx, Py_ssize_t n, const char* what,
 //=============================================================================
 // plist
 
-typedef struct {
+typedef struct PListObject {
    PyObject_HEAD
    Trie_t root;         // owned ref; always fully persistent.
    trieint_t start;      // logical key of element 0 (wraps mod 2**64).
@@ -215,45 +127,7 @@ typedef struct {
                          // remapped to -2, same as tuple/str do).
 } PListObject;
 
-// PListType/TListType (below) are HEAP types, not static ones: plist/tlist
-// need to inherit from the Python-level PersistentSequence/TransientSequence
-// ABC mixins (see PyInit_list), and CPython flatly refuses to let a
-// statically-allocated PyTypeObject derive from a dynamically-allocated
-// (heap) base ("TypeError: type '...' is not dynamically allocated but its
-// base type '...' is dynamically allocated") -- so these are built at
-// import time via PyType_FromSpecWithBases() instead of being compiled-in
-// PyTypeObject structs, and referenced everywhere else as plain pointers.
-static PyTypeObject* PListType = NULL;
-static PyTypeObject PListIterType;
-static PListObject* g_plist_empty = NULL;  // the canonical empty plist.
-
-// pcollections.util.seqstr -- the real reference string-formatting helper
-// (imported once at PyInit_list time), used by plist_repr/plist_str/
-// tlist_repr/tlist_str below so they match abc/_seq.py's
-// PersistentSequence.__str__/__repr__ and TransientSequence.__str__/
-// __repr__ exactly.
-static PyObject* g_seqstr = NULL;
-
-// Calls the real pcollections.util.seqstr(seq, maxlen=maxlen) (or plain
-// seqstr(seq) when has_maxlen is false, matching the reference's
-// maxlen=None default); tostr is always left at its default (repr).
-static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen) {
-   PyObject* args; PyObject* kwargs; PyObject* result;
-   args = PyTuple_Pack(1, seq);
-   if (!args) return NULL;
-   kwargs = PyDict_New();
-   if (!kwargs) { Py_DECREF(args); return NULL; }
-   if (has_maxlen) {
-      PyObject* ml = PyLong_FromLong(maxlen);
-      if (!ml || PyDict_SetItemString(kwargs, "maxlen", ml) < 0) {
-         Py_XDECREF(ml); Py_DECREF(args); Py_DECREF(kwargs); return NULL;
-      }
-      Py_DECREF(ml);
-   }
-   result = PyObject_Call(g_seqstr, args, kwargs);
-   Py_DECREF(args); Py_DECREF(kwargs);
-   return result;
-}
+// The types, the empty plist, and seqstr live in the module state (core.h).
 
 // Takes ownership of the one reference to `root` that callers already hold
 // (per this file's fat_anditem/fat_butitem/tfat_* usage convention) and
@@ -265,7 +139,7 @@ static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen) {
 // `type` must be PListType or a subtype of it (layout-compatible as a
 // PListObject -- true for any subclass adding no new slots, the only kind
 // this Py_TPFLAGS_BASETYPE-enabled subclassing supports; see pdict_wrap_
-// astype's identical note in dict.c). The 0-length collapse to the
+// astype's identical note in dict.c.h). The 0-length collapse to the
 // canonical empty singleton is, per that same file's convention, a pure
 // optimization applied *only* when `type` is exactly PListType -- for any
 // other (necessarily subclass, e.g. llist) target type we always build a
@@ -274,13 +148,13 @@ static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen) {
 static PyObject* plist_wrap_astype(PyTypeObject* type, Trie_t root,
                                     trieint_t start, Py_ssize_t length) {
    PListObject* self;
-   if (length == 0 && type == PListType) {
+   if (length == 0 && type == ST(PListType)) {
       fatnode_decref(root, pyobj_decref);
-      Py_INCREF(g_plist_empty);
-      return (PyObject*)g_plist_empty;
+      Py_INCREF(ST(g_plist_empty));
+      return (PyObject*)ST(g_plist_empty);
    }
    // tp_alloc (not PyObject_GC_New) so a subclass's auto-added trailing
-   // fields (__dict__/__weakref__) are zero-initialized -- see dict.c's
+   // fields (__dict__/__weakref__) are zero-initialized -- see dict.c.h's
    // pdict_wrap_astype comment for the full rationale. tp_alloc already
    // GC-tracks + INCREFs the type, so no manual PyObject_GC_Track here;
    // plist_dealloc balances the INCREF with Py_DECREF(Py_TYPE(self)).
@@ -296,7 +170,7 @@ static PyObject* plist_wrap_astype(PyTypeObject* type, Trie_t root,
    return (PyObject*)self;
 }
 static PyObject* plist_wrap(Trie_t root, trieint_t start, Py_ssize_t length) {
-   return plist_wrap_astype(PListType, root, start, length);
+   return plist_wrap_astype(ST(PListType), root, start, length);
 }
 
 // Returns the canonical empty instance of `type` (a new reference), mirroring
@@ -307,14 +181,15 @@ static PyObject* plist_wrap(Trie_t root, trieint_t start, Py_ssize_t length) {
 // expected to have set its own `empty` class attribute (falling back to
 // pdict.empty/plist.empty via ordinary MRO attribute lookup if it hasn't).
 static PyObject* plist_type_empty(PyTypeObject* type) {
-   if (type == PListType) {
-      Py_INCREF(g_plist_empty);
-      return (PyObject*)g_plist_empty;
+   if (type == ST(PListType)) {
+      Py_INCREF(ST(g_plist_empty));
+      return (PyObject*)ST(g_plist_empty);
    }
    return PyObject_GetAttrString((PyObject*)type, "empty");
 }
 
 static int plist_traverse(PListObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    if (self->root) return fat_gc_traverse(self->root, visit, arg);
    return 0;
 }
@@ -326,7 +201,7 @@ static int plist_clear(PListObject* self) {
 }
 static void plist_dealloc(PListObject* self) {
    // Standard CPython heap-type dealloc idiom, balancing tp_alloc's
-   // Py_INCREF(type) -- see pdict_dealloc's comment in dict.c.
+   // Py_INCREF(type) -- see pdict_dealloc's comment in dict.c.h.
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    plist_clear(self);
@@ -400,7 +275,7 @@ static PyObject* plist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
 // and wraps the result in the type's delimiter pair.
 static PyObject* seq_str(PyObject* self, const char* open, const char* close,
                           int truncate) {
-   PyObject* s = call_seqstr(self, 60, truncate);
+   PyObject* s = call_seqstr(self, 60, truncate, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("%s%U%s", open, s, close);
@@ -555,8 +430,8 @@ static PyObject* plist_delete(PListObject* self, PyObject* args) {
    // oversight.
    if (idx == 0) {
       if (n == 1) {
-         Py_INCREF(g_plist_empty);
-         return (PyObject*)g_plist_empty;
+         Py_INCREF(ST(g_plist_empty));
+         return (PyObject*)ST(g_plist_empty);
       }
       // fat_butitem(), like fat_anditem(), never touches or consumes a
       // reference to its input -- no incref of self->root needed here.
@@ -669,8 +544,8 @@ static PyObject* plist_clear_method(PListObject* self, PyObject* Py_UNUSED(ignor
    // base plist singleton, deliberately NOT subclass-preserving (unlike
    // most other mutators here).
    (void)self;
-   Py_INCREF(g_plist_empty);
-   return (PyObject*)g_plist_empty;
+   Py_INCREF(ST(g_plist_empty));
+   return (PyObject*)ST(g_plist_empty);
 }
 
 static PyObject* plist_transient(PListObject* self, PyObject* Py_UNUSED(ignored));
@@ -696,7 +571,7 @@ static PyMethodDef plist_methods[] = {
 };
 
 // PListType is built as a HEAP type (see the note on its declaration above),
-// via PyType_FromSpecWithBases() in PyInit_list -- so what used to be a
+// via PyType_FromSpecWithBases() in pcoll_exec_list -- so what used to be a
 // single static PyTypeObject initializer is a PyType_Spec/PyType_Slot pair
 // instead; the actual PyTypeObject* is constructed at import time, once
 // PersistentSequence (fetched at runtime from pcollections.abc) is on hand
@@ -721,12 +596,12 @@ static PyType_Slot plist_slots[] = {
    {0, NULL}
 };
 static PyType_Spec plist_spec = {
-   .name = "pcollections._c.list.plist",
+   .name = "pcollections.plist",
    .basicsize = sizeof(PListObject),
    .itemsize = 0,
-   // Py_TPFLAGS_BASETYPE: plist is subclassable (pcollections._c.lazy's
+   // Py_TPFLAGS_BASETYPE: plist is subclassable (pcollections._c._core's
    // `llist` subclasses it directly) -- see the file header comment and
-   // dict.c's identical note on pdict_spec/tdict_spec's flags.
+   // dict.c.h's identical note on pdict_spec/tdict_spec's flags.
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = plist_slots,
 };
@@ -747,9 +622,6 @@ typedef struct {
                           // tlist(plist_instance) constructor path -- see
                           // that constructor's comment.
 } TListObject;
-
-static PyTypeObject* TListType = NULL;
-static PyTypeObject TListIterType;
 
 // `type` must be TListType or a subtype of it (see the analogous note on
 // plist_wrap_astype above); `tlist_wrap()` below is the TListType-only
@@ -774,10 +646,11 @@ static PyObject* tlist_wrap_astype(PyTypeObject* type, Trie_t root,
 }
 static PyObject* tlist_wrap(Trie_t root, trieint_t start, Py_ssize_t length,
                             PyObject* orig /* borrowed; NULL for none */) {
-   return tlist_wrap_astype(TListType, root, start, length, orig);
+   return tlist_wrap_astype(ST(TListType), root, start, length, orig);
 }
 
 static int tlist_traverse(TListObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->orig);
    if (self->root) return fat_gc_traverse(self->root, visit, arg);
    return 0;
@@ -864,8 +737,8 @@ static PyObject* tlist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    // asymmetry between `tlist(p)` sharing a plist's root and `tlist(t)`
    // rebuilding from iteration). Deliberately also matches any future plist
    // subclass (e.g. llist), sharing its root raw/undereferenced -- see
-   // dict.c's analogous comment on tdict_new's pdict-argument branch.
-   if (PyObject_TypeCheck(arg, PListType)) {
+   // dict.c.h's analogous comment on tdict_new's pdict-argument branch.
+   if (PyObject_TypeCheck(arg, ST(PListType))) {
       // Direct constructor call: shares the plist's (already fully
       // persistent) root immediately -- no copying, no freezing needed.
       // Lazily claimed/copied node-by-node the moment any mutation actually
@@ -883,7 +756,7 @@ static PyObject* tlist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
 
 // Matches abc/_seq.py's TransientSequence.__repr__/__str__: both use the
 // "[<...>]" delimiter (no repr/str asymmetry here, unlike TransientMapping
-// in dict.c), __str__ truncated at 60 chars, __repr__ not.
+// in dict.c.h), __str__ truncated at 60 chars, __repr__ not.
 static PyObject* tlist_repr(TListObject* self) {
    return seq_str((PyObject*)self, "[<", ">]", 0);
 }
@@ -1049,8 +922,8 @@ static PyObject* tlist_clear_method(TListObject* self, PyObject* Py_UNUSED(ignor
 static PyObject* tlist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored)) {
    Trie_t root;
    if (self->length == 0) {
-      Py_INCREF(g_plist_empty);
-      return (PyObject*)g_plist_empty;
+      Py_INCREF(ST(g_plist_empty));
+      return (PyObject*)ST(g_plist_empty);
    }
    if (self->orig) {
       Py_INCREF(self->orig);
@@ -1083,7 +956,7 @@ static PyObject* plist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)
 }
 
 // Matches _list.py's tlist.empty being a *classmethod* (see
-// tdict_empty_classmethod's comment in dict.c for the fuller rationale --
+// tdict_empty_classmethod's comment in dict.c.h for the fuller rationale --
 // same pattern here). Previously unexposed to Python at all.
 static PyObject* tlist_empty_classmethod(PyObject* cls, PyObject* Py_UNUSED(ignored)) {
    return tlist_empty_astype((PyTypeObject*)cls);
@@ -1111,7 +984,7 @@ static PyObject* tlist_richcompare(TListObject* self, PyObject* other, int op);
 static PyObject* tlist_iter(TListObject* self);
 
 // TListType, like PListType above, is built as a heap type via
-// PyType_FromSpecWithBases() in PyInit_list, so it can inherit from
+// PyType_FromSpecWithBases() in pcoll_exec_list, so it can inherit from
 // TransientSequence.
 static PyType_Slot tlist_slots[] = {
    {Py_tp_dealloc, (void*)tlist_dealloc},
@@ -1135,12 +1008,12 @@ static PyType_Slot tlist_slots[] = {
    {0, NULL}
 };
 static PyType_Spec tlist_spec = {
-   .name = "pcollections._c.list.tlist",
+   .name = "pcollections.tlist",
    .basicsize = sizeof(TListObject),
    .itemsize = 0,
-   // Py_TPFLAGS_BASETYPE: tlist is subclassable (pcollections._c.lazy's
+   // Py_TPFLAGS_BASETYPE: tlist is subclassable (pcollections._c._core's
    // `tllist` subclasses it directly) -- see the file header comment and
-   // dict.c's identical note on pdict_spec/tdict_spec's flags.
+   // dict.c.h's identical note on pdict_spec/tdict_spec's flags.
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = tlist_slots,
 };
@@ -1192,7 +1065,7 @@ static int is_seq_comparable(PyObject* o) {
    // `TransientSequence._eq_types` -- see abc/_seq.py), not exact-type: any
    // plist/tlist subclass (e.g. the future llist/tllist) must compare
    // correctly too, not just the exact base types.
-   return (PyObject_TypeCheck(o, PListType) || PyObject_TypeCheck(o, TListType) ||
+   return (PyObject_TypeCheck(o, ST(PListType)) || PyObject_TypeCheck(o, ST(TListType)) ||
            PyList_Check(o));
 }
 
@@ -1239,11 +1112,14 @@ typedef struct {
 } SeqIterObject;
 
 static void seqiter_dealloc(SeqIterObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    Py_XDECREF(self->owner);
    PyObject_GC_Del(self);
+   Py_DECREF(tp);
 }
 static int seqiter_traverse(SeqIterObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->owner);
    return 0;
 }
@@ -1251,9 +1127,9 @@ static int seqiter_traverse(SeqIterObject* self, visitproc visit, void* arg) {
 static Trie_t seqiter_owner_root(SeqIterObject* self) {
    // isinstance-style check (not exact-type): self->owner may legitimately
    // be a plist/tlist *subclass* instance (e.g. llist/tllist) now that
-   // PListType/TListType are subclassable -- see dict.c's analogous fix to
+   // PListType/TListType are subclassable -- see dict.c.h's analogous fix to
    // dictiter_owner_els for the same reasoning.
-   if (PyObject_TypeCheck(self->owner, PListType))
+   if (PyObject_TypeCheck(self->owner, ST(PListType)))
       return ((PListObject*)self->owner)->root;
    else
       return ((TListObject*)self->owner)->root;
@@ -1293,32 +1169,31 @@ static PyObject* make_seqiter(PyTypeObject* itertype, PyObject* owner) {
    return (PyObject*)it;
 }
 
-static PyTypeObject PListIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.list.plist_iterator",
-   .tp_basicsize = sizeof(SeqIterObject),
-   .tp_dealloc = (destructor)seqiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)seqiter_traverse,
-   .tp_iter = seqiter_self,
-   .tp_iternext = (iternextfunc)seqiter_next,
+static PyType_Slot seqiter_slots[] = {
+   {Py_tp_dealloc, (void*)seqiter_dealloc},
+   {Py_tp_traverse, (void*)seqiter_traverse},
+   {Py_tp_iter, (void*)seqiter_self},
+   {Py_tp_iternext, (void*)seqiter_next},
+   {0, NULL}
 };
-static PyTypeObject TListIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.list.tlist_iterator",
-   .tp_basicsize = sizeof(SeqIterObject),
-   .tp_dealloc = (destructor)seqiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)seqiter_traverse,
-   .tp_iter = seqiter_self,
-   .tp_iternext = (iternextfunc)seqiter_next,
+static PyType_Spec plistiter_spec = {
+   .name = "pcollections._c._core.plist_iterator",
+   .basicsize = sizeof(SeqIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = seqiter_slots,
+};
+static PyType_Spec tlistiter_spec = {
+   .name = "pcollections._c._core.tlist_iterator",
+   .basicsize = sizeof(SeqIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = seqiter_slots,
 };
 
 static PyObject* plist_iter(PListObject* self) {
-   return make_seqiter(&PListIterType, (PyObject*)self);
+   return make_seqiter(ST(PListIterType), (PyObject*)self);
 }
 static PyObject* tlist_iter(TListObject* self) {
-   return make_seqiter(&TListIterType, (PyObject*)self);
+   return make_seqiter(ST(TListIterType), (PyObject*)self);
 }
 
 
@@ -1334,9 +1209,9 @@ static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
    // isinstance(arg, tlist) -- a real isinstance check (matches any tlist
    // subclass, e.g. the future tllist), mirroring the reference's own
    // isinstance-based fast path; raw-shares the frozen root without
-   // dereferencing any lazily-held values (see dict.c's analogous comment
+   // dereferencing any lazily-held values (see dict.c.h's analogous comment
    // on pdict_new_dispatch's tdict-argument branch for the rationale).
-   if (PyObject_TypeCheck(arg, TListType)) {
+   if (PyObject_TypeCheck(arg, ST(TListType))) {
       TListObject* t = (TListObject*)arg;
       Trie_t root;
       if (t->length == 0) return plist_type_empty(type);
@@ -1355,7 +1230,7 @@ static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
    // isinstance(arg, plist) but NOT already an instance of `type` -- only
    // reachable when `type` is a strict plist subclass and `arg` is some
    // other plist/plist-subclass instance not caught above.
-   if (PyObject_TypeCheck(arg, PListType)) {
+   if (PyObject_TypeCheck(arg, ST(PListType))) {
       PListObject* p = (PListObject*)arg;
       if (p->length == 0) return plist_type_empty(type);
       trienode_incref(p->root);
@@ -1366,138 +1241,46 @@ static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
 
 
 //=============================================================================
-// Module definition.
+// Module execution.
 
-static PyModuleDef list_module = {
-   PyModuleDef_HEAD_INIT,
-   "pcollections._c.list",
-   "C implementations of plist and tlist, backed by FAT trees.",
-   -1,
-   NULL, NULL, NULL, NULL, NULL
-};
-
-// Builds the heap type described by `spec`, inheriting from the Python-level
-// ABC mixin class named `base_name` (looked up on `abc_module`), so the
-// result inherits all of that class's default method implementations
-// (sort/reverse/extend/index/count/__add__/__radd__/__mul__/__rmul__/
-// __imul__/pop/remove/copy/__reduce__/__json__/etc.) for free, on top of the
-// primitives implemented natively in C via `spec`'s own slots. This has to
-// go through PyType_FromSpecWithBases() rather than a plain static
-// PyTypeObject + PyType_Ready(): CPython refuses to let a *statically*
-// allocated type derive from a *dynamically* allocated (heap) one, and
-// PersistentSequence/TransientSequence -- being ordinary Python classes --
-// are heap types. Returns a new reference, or NULL (with an exception set)
-// on failure.
-static PyTypeObject* build_abc_subtype(PyType_Spec* spec, PyObject* abc_module,
-                                        const char* base_name) {
-   PyObject* base;
-   PyObject* bases;
-   PyObject* result;
-   base = PyObject_GetAttrString(abc_module, base_name);
-   if (!base) return NULL;
-   if (!PyType_Check(base)) {
-      Py_DECREF(base);
-      PyErr_Format(PyExc_TypeError, "pcollections.abc.%s is not a type",
-                   base_name);
-      return NULL;
-   }
-   bases = PyTuple_Pack(1, base);
-   Py_DECREF(base);
-   if (!bases) return NULL;
-   result = PyType_FromSpecWithBases(spec, bases);
-   Py_DECREF(bases);
-   return (PyTypeObject*)result;
-}
-
-// Registers `concrete` as a virtual subclass (via .register()) of the type
-// named `attr_name` on `module`. See dict.c's twin of this function for the
-// full rationale (isinstance()/issubclass() compatibility after plist/tlist
-// switched from inheriting PersistentSequence/TransientSequence directly to
-// inheriting their plain, non-ABCMeta _PersistentSequenceBase/
-// _TransientSequenceBase mixins -- necessary on CPython 3.14, see
-// pcollections.abc._core's _PersistentBase docstring). Returns 0 on success,
-// -1 (with an exception set) on failure.
-static int register_virtual_subclass(PyObject* module, const char* attr_name,
-                                      PyTypeObject* concrete) {
-   PyObject* abc_cls;
-   PyObject* result;
-   abc_cls = PyObject_GetAttrString(module, attr_name);
-   if (!abc_cls) return -1;
-   result = PyObject_CallMethod(abc_cls, "register", "O", (PyObject*)concrete);
-   Py_DECREF(abc_cls);
-   if (!result) return -1;
-   Py_DECREF(result);
-   return 0;
-}
-
-PyMODINIT_FUNC PyInit_list(void) {
-   PyObject* m;
+// Creates plist, tlist, their iterators, and the empty plist, and adds the
+// public types to module `m`.
+static int pcoll_exec_list(PyObject* m, pcoll_state* st) {
+   PyObject* abc = NULL;
    PListObject* empty;
-   PyObject* abc_module;
+   int rc = -1;
 
-   // Import pcollections.abc, then build plist/tlist as heap types
-   // inheriting from the plain (non-ABCMeta) _PersistentSequenceBase/
-   // _TransientSequenceBase mixins (rather than PersistentSequence/
-   // TransientSequence themselves, which are ABCMeta-based and, as of
-   // CPython 3.14, can no longer be used as a heap type's base via the
-   // PyType_FromSpecWithBases/PyType_FromMetaclass C API -- see
-   // pcollections.abc._core's _PersistentBase docstring), then .register()
-   // them as virtual subclasses of the real PersistentSequence/
-   // TransientSequence for isinstance()/issubclass() compatibility.
-   abc_module = PyImport_ImportModule("pcollections.abc");
-   if (!abc_module) return NULL;
-   PListType = build_abc_subtype(&plist_spec, abc_module, "_PersistentSequenceBase");
-   TListType = build_abc_subtype(&tlist_spec, abc_module, "_TransientSequenceBase");
-   if (!PListType || !TListType) { Py_DECREF(abc_module); return NULL; }
-   if (register_virtual_subclass(abc_module, "PersistentSequence", PListType) < 0 ||
-       register_virtual_subclass(abc_module, "TransientSequence", TListType) < 0) {
-      Py_DECREF(abc_module); return NULL;
-   }
-   Py_DECREF(abc_module);
+   abc = PyImport_ImportModule("pcollections.abc");
+   if (!abc) goto done;
+   // plist/tlist implement their own tp_richcompare.
+   st->PListType = build_abc_subtype(m, &plist_spec, abc,
+                                     "_PersistentSequenceBase", 0);
+   if (!st->PListType) goto done;
+   st->TListType = build_abc_subtype(m, &tlist_spec, abc,
+                                     "_TransientSequenceBase", 0);
+   if (!st->TListType) goto done;
+   if (register_virtual_subclass(abc, "PersistentSequence", st->PListType) < 0 ||
+       register_virtual_subclass(abc, "TransientSequence", st->TListType) < 0)
+      goto done;
+   if (!(st->PListIterType = pcoll_new_internal_type(m, &plistiter_spec)) ||
+       !(st->TListIterType = pcoll_new_internal_type(m, &tlistiter_spec)))
+      goto done;
 
-   {
-      PyObject* util_module = PyImport_ImportModule("pcollections.util");
-      if (!util_module) return NULL;
-      g_seqstr = PyObject_GetAttrString(util_module, "seqstr");
-      Py_DECREF(util_module);
-      if (!g_seqstr) return NULL;
-   }
-
-   if (PyType_Ready(&PListIterType) < 0) return NULL;
-   if (PyType_Ready(&TListIterType) < 0) return NULL;
-
-   // Build the canonical empty plist singleton by hand (plist_wrap() itself
-   // depends on it already existing, so it can't be used here).
-   // Use tp_alloc here too (see plist_wrap_astype's comment), for
-   // consistency with every other PListObject allocation site.
-   empty = (PListObject*)PListType->tp_alloc(PListType, 0);
-   if (!empty) return NULL;
+   empty = (PListObject*)st->PListType->tp_alloc(st->PListType, 0);
+   if (!empty) goto done;
    empty->root = fat_empty(PYLEAFSIZE);
-   // Even though this list has zero elements (so `start` is never read via
-   // an actual key lookup on `empty` itself), `start` is the base every
-   // append()/prepend() off of `g_plist_empty` builds from -- so it needs
-   // the same midpoint offset as any other fresh list (see LIST_START_MID)
-   // to avoid an immediate underflow on the very first prepend.
    empty->start = LIST_START_MID;
    empty->length = 0;
    empty->hashcode = -1;
-   g_plist_empty = empty;
+   st->g_plist_empty = empty;
+   if (pcoll_type_setattr(st->PListType, "empty", (PyObject*)empty) < 0)
+      goto done;
 
-   if (PyDict_SetItemString(PListType->tp_dict, "empty",
-                            (PyObject*)g_plist_empty) < 0)
-      return NULL;
-   PyType_Modified(PListType);
-
-   m = PyModule_Create(&list_module);
-   if (!m) return NULL;
-
-   Py_INCREF(PListType);
-   if (PyModule_AddObject(m, "plist", (PyObject*)PListType) < 0) {
-      Py_DECREF(PListType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TListType);
-   if (PyModule_AddObject(m, "tlist", (PyObject*)TListType) < 0) {
-      Py_DECREF(TListType); Py_DECREF(m); return NULL;
-   }
-   return m;
+   if (pcoll_module_add(m, "plist", (PyObject*)st->PListType) < 0 ||
+       pcoll_module_add(m, "tlist", (PyObject*)st->TListType) < 0)
+      goto done;
+   rc = 0;
+done:
+   Py_XDECREF(abc);
+   return rc;
 }

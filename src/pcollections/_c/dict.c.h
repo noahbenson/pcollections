@@ -1,5 +1,5 @@
 ///////////////////////////////////////////////////////////////////////////////
-// _c/dict.c
+// _c/dict.c.h
 // The persistent (pdict) and transient (tdict) dict types, implemented as
 // thin CPython wrappers around a pair of tries: an AMT used as a hash table
 // (hash(key) -> index) and a FAT used as an insertion-ordered value table
@@ -11,10 +11,10 @@
 //
 //  - `els` (a FAT) is the insertion-ordered value table. Its keys are dense
 //    integers 0, 1, 2, ..., `top`-1 (assigned in insertion order, exactly
-//    like plist/tlist's own FAT-tree list encoding in list.c -- except a
+//    like plist/tlist's own FAT-tree list encoding in list.c.h -- except a
 //    dict's `top` only ever grows via new insertions, so unlike a list's
 //    `start` there is no prepend-style operation and therefore no need for
-//    list.c's LIST_START_MID wraparound trick: index 0 is always safe).
+//    list.c.h's LIST_START_MID wraparound trick: index 0 is always safe).
 //    Each leaf is a `DictEntry` (see below): the (key, value) pair plus the
 //    FAT index of the *next* entry sharing the same hash (or DICT_NO_NEXT),
 //    forming a singly-linked collision chain. Iterating `els` in ascending
@@ -37,7 +37,7 @@
 // Compaction: deleting an entry patches up the collision chain around it
 // (repointing `idx` or the previous link's `.next`, exactly as a real
 // removal would) but does NOT actually remove it from `els` -- `els` is a
-// FAT, which (like list.c's plist/tlist encoding) maintains a strictly
+// FAT, which (like list.c.h's plist/tlist encoding) maintains a strictly
 // *dense* invariant: removing a key from the middle would shift every
 // later index down by one to close the gap, silently invalidating every
 // `idx` entry and collision-chain `.next` pointer at or past that index.
@@ -77,9 +77,9 @@
 // __eq__/__ne__/__contains__/__str__ -- is inherited for free from
 // PersistentMapping/TransientMapping (which in turn get __eq__/__contains__
 // from collections.abc.Mapping), via the same PyType_FromSpecWithBases
-// heap-type technique list.c uses for plist/tlist. Unlike plist/tlist,
+// heap-type technique list.c.h uses for plist/tlist. Unlike plist/tlist,
 // pdict/tdict *are* subclassable in C (Py_TPFLAGS_BASETYPE is set on both --
-// see pdict_spec's comment): pcollections._c.lazy's ldict/tldict subclass
+// see pdict_spec's comment): pcollections._c._core's ldict/tldict subclass
 // them directly, exactly mirroring the reference _lazy.py's
 // `class ldict(pdict)`/`class tldict(tdict)`. Every construction site in
 // this file that the reference spells as `self._new(...)`/`cls._new(...)`
@@ -90,27 +90,6 @@
 // mutation -- see pdict_wrap_astype()/tdict_wrap_astype()/
 // pdict_new_dispatch()/tdict_new() for where this actually happens.
 
-
-//=============================================================================
-// Initialization.
-
-#include <Python.h>
-#include <string.h>
-#include "uintbits.h"
-// trie.h provides pcoll_atomic_u64_t/PCOLL_ATOMIC_U64_FETCH_*1 (a portable
-// stand-in for <stdatomic.h>, which MSVC doesn't have at all without
-// /std:c11 -- see trie.h's shim comment); this file doesn't call any
-// atomic_* function directly, so it doesn't need its own <stdatomic.h>
-// include (and, on Windows, must not have one).
-#include "trie.h"
-#include "amt.h"
-#include "fat.h"
-
-#ifdef __cplusplus
-#  define EXTC extern "C"
-#else
-#  define EXTC
-#endif
 
 // els (the FAT value table) stores DictEntry leaves.
 typedef struct {
@@ -134,94 +113,21 @@ typedef struct {
 
 
 //=============================================================================
-// fat_empty()/amt_empty(): the real (non-test) definitions of the
-// canonical-empty-node singletons that trie.h/amt.h/fat.h declare but
-// deliberately don't define (each translation unit that uses these tries
-// gets to decide how/whether to cache them) -- see list.c for the identical
-// pattern and rationale. Indexed by leafsize for robustness; in practice
-// this file only ever asks for ELSLEAFSIZE/IDXLEAFSIZE respectively.
-
-static Trie_t g_fat_empty_singletons[256];
-static Trie_t g_amt_empty_singletons[256];
-
-Trie_t fat_empty(uint8_t leafsize) {
-   if (!g_fat_empty_singletons[leafsize]) {
-      Trie_t t = fatnode_new(0, leafsize, FAT_MAX_DEPTH, false);
-      t->header.bits = 0;
-      trienode_incref(t);
-      g_fat_empty_singletons[leafsize] = t;
-   }
-   trienode_incref(g_fat_empty_singletons[leafsize]);
-   return g_fat_empty_singletons[leafsize];
-}
-Trie_t amt_empty(uint8_t leafsize) {
-   if (!g_amt_empty_singletons[leafsize]) {
-      // Must go through amtnode_new() (which calls amtnode_init()), not a
-      // bare amtnode_alloc() -- amtnode_alloc() only reserves the memory and
-      // leaves the whole header (including leafsize!) uninitialized. An
-      // early version of this function called amtnode_alloc() directly and
-      // left header.leafsize as garbage, which amt_anditem()/amt_1leaf()
-      // later read to size a memcpy -- caught immediately by ASAN as a
-      // stack-buffer-overflow the first time pdict.set() was ever exercised.
-      Trie_t t = amtnode_new(0, leafsize, AMT_MAX_DEPTH, 0, false);
-      t->header.bits = 0;
-      trienode_incref(t);
-      g_amt_empty_singletons[leafsize] = t;
-   }
-   trienode_incref(g_amt_empty_singletons[leafsize]);
-   return g_amt_empty_singletons[leafsize];
-}
-
-
-//=============================================================================
-// fat_freeze()/amt_freeze(): recursively mark `a` and every transient node
-// reachable from it as persistent. See list.c's fat_freeze() for the full
-// rationale (needed so tdict.persistent() can be called mid-mutation-session
-// and leave the tdict itself still usable afterward); amt_freeze() is the
-// same operation for AMT nodes, needed because `idx` can accumulate
-// transient-claimed nodes exactly like `els` can.
-
-static void fat_freeze(Trie_t a) {
-   if (!trie_is_transient(a))
-      return;
-   trienode_set_transient(a, false);
-   if (!fatnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(a, bi))
-         fat_freeze(trienode_subt(a, bi));
-   }
-}
-static void amt_freeze(Trie_t a) {
-   if (!trie_is_transient(a))
-      return;
-   trienode_set_transient(a, false);
-   if (!amtnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < TRIEBITS_WIDTH;
-           bi = trienode_next_bitindex(a, bi))
-         amt_freeze(trienode_subt(a, amtnode_bit2cellindex(a, bi)));
-   }
-}
-
-
-//=============================================================================
 // Leaf refcounting callbacks.
 
 // els leaves (DictEntry) own a reference to both their key and value.
+// A tombstone's key and value are both NULL.
 static void dictentry_incref(void* v) {
    DictEntry* e = (DictEntry*)v;
-   Py_INCREF(e->key);
-   Py_INCREF(e->val);
+   Py_XINCREF(e->key);
+   Py_XINCREF(e->val);
 }
 static void dictentry_decref(void* v) {
    DictEntry* e = (DictEntry*)v;
-   Py_DECREF(e->key);
-   Py_DECREF(e->val);
+   Py_XDECREF(e->key);
+   Py_XDECREF(e->val);
 }
-// idx leaves are raw FAT indices -- nothing to refcount.
-static void noop_incref(void* v) { (void)v; }
-static void noop_decref(void* v) { (void)v; }
+// idx leaves are raw FAT indices; they use noop_incref/noop_decref (core.h).
 
 //=============================================================================
 // Tombstones.
@@ -229,7 +135,7 @@ static void noop_decref(void* v) { (void)v; }
 // IMPORTANT correction to the design-comment at the top of this file: `els`
 // (a FAT) can NOT hold "holes" the way that comment originally assumed.
 // FAT maintains a genuinely *dense* invariant -- exactly like a Python list
-// (which is exactly what it's used for in list.c) -- so removing a key from
+// (which is exactly what it's used for in list.c.h) -- so removing a key from
 // the *middle* of it (via fat_butitem()/tfat_delitem()) does not just clear
 // an occupancy bit: it closes the gap by shifting every subsequent index
 // down by one, precisely the way plist.delete()/list.pop() must. That's
@@ -252,25 +158,18 @@ static void noop_decref(void* v) { (void)v; }
 // already tracks) until compaction rebuilds `els`/`idx` from scratch and
 // skips tombstones on the way -- see dict_rebuild_compacted() below.
 //
-// A tombstone is a DictEntry whose key/val both point at the single shared
-// `g_dict_dummy` sentinel (an ordinary, otherwise-unreachable object created
-// once at module-init time -- mirroring CPython's own dict/set "dummy"
-// placeholder), which every direct `els`-walking loop (dict_rebuild_
-// compacted(), pdict_repr()/tdict_repr(), pdict_hash(), dictiter_next())
-// checks for via pointer identity and skips. A dict_chain_find() walk can
-// never land on a tombstoned entry in the first place -- it's always fully
-// unlinked from every collision chain before being tombstoned -- so that
-// function (and anything built on it: __getitem__, __contains__, get(),
-// set()'s/__setitem__'s "already present" check, etc.) needs no changes at
-// all.
-static PyObject* g_dict_dummy = NULL;
-
+// A tombstone is a DictEntry whose key and value are both NULL. Every direct
+// `els`-walking loop (dict_rebuild_compacted(), pdict_repr()/tdict_repr(),
+// pdict_hash(), dictiter_next(), the GC traversal) checks for it and skips it.
+// A dict_chain_find() walk never lands on a tombstone: an entry is always
+// unlinked from its collision chain before it is tombstoned, so __getitem__,
+// __contains__, get(), set() and friends need no check.
 static int dictentry_is_tombstone(const DictEntry* e) {
-   return e->key == g_dict_dummy;
+   return e->key == NULL;
 }
 static void dict_make_tombstone(DictEntry* out) {
-   out->key = g_dict_dummy;
-   out->val = g_dict_dummy;
+   out->key = NULL;
+   out->val = NULL;
    out->next = DICT_NO_NEXT;
 }
 
@@ -305,7 +204,7 @@ static int dict_gc_traverse(Trie_t node, visitproc visit, void* arg) {
 // are unsigned trieint_t. Since idx is a genuine hash table (not an ordered
 // list like els), all we need is a bit-preserving reinterpretation -- there
 // is no ordering or wraparound-headroom concern here at all (contrast
-// list.c's LIST_START_MID, which exists only because FAT list keys *do*
+// list.c.h's LIST_START_MID, which exists only because FAT list keys *do*
 // need to sort in a particular way).
 static int dict_hash_key(PyObject* key, trieint_t* out) {
    Py_hash_t h = PyObject_Hash(key);
@@ -391,7 +290,7 @@ static int dict_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
 //=============================================================================
 // pdict
 
-typedef struct {
+typedef struct PDictObject {
    PyObject_HEAD
    Trie_t idx;           // AMT: hash -> first FAT index. Persistent.
    Trie_t els;           // FAT: index -> DictEntry. Persistent.
@@ -401,78 +300,16 @@ typedef struct {
    Py_hash_t hashcode;    // -1 == not yet computed.
 } PDictObject;
 
-// PDictType/TDictType are heap types (see list.c's PListType for the full
-// rationale): pdict/tdict need to inherit from the Python-level
-// PersistentMapping/TransientMapping ABC mixins, and CPython refuses to let
-// a statically allocated type derive from a dynamically allocated one.
-static PyTypeObject* PDictType = NULL;
-static PyTypeObject* TDictType = NULL;
-// The six view types are heap types too (see build_view_subtype() below),
-// inheriting from collections.abc.KeysView/ItemsView/ValuesView respectively
-// -- per the same PyType_FromSpecWithBases heap-type trick used for
-// PDictType/TDictType/PListType/TListType, so that isinstance(d.keys(),
-// collections.abc.KeysView) (etc.) holds, and so KeysView/ItemsView's own
-// Set-derived default __and__/__or__/__sub__/__xor__/comparisons all work
-// for free. They add NO native fields of their own (see build_view_subtype);
-// all state lives in the inherited `_mapping` slot from collections.abc's
-// own MappingView.
-static PyTypeObject* PDictKeysType = NULL;
-static PyTypeObject* PDictItemsType = NULL;
-static PyTypeObject* PDictValuesType = NULL;
-static PyTypeObject* TDictKeysType = NULL;
-static PyTypeObject* TDictItemsType = NULL;
-static PyTypeObject* TDictValuesType = NULL;
-// The plain key iterator types (for pdict/tdict's own __iter__, and reused
-// for the items()/values() views' __iter__ overrides -- see DictIterObject
-// below), by contrast, are ordinary static types: they don't need to
-// isinstance() as anything in particular, so there's no reason to pay for
-// the heap-type machinery.
-static PyTypeObject PDictIterType;
-static PyTypeObject TDictIterType;
-static PDictObject* g_pdict_empty = NULL;
-// Imported once at module-init time (see PyInit_dict), used to replicate the
-// reference _dict.py's `isinstance(arg, Mapping)`/`isinstance(arg, Sized)`
-// checks in pdict/tdict's general-iterable constructor dispatch.
-static PyObject* g_abc_Mapping = NULL;
-static PyObject* g_abc_Sized = NULL;
-// pcollections.util.seqstr -- the real reference string-formatting helper,
-// imported once at PyInit_dict time and used by pdict_repr/pdict_str/
-// tdict_repr/tdict_str below so those match abc/_map.py's
-// PersistentMapping.__str__/__repr__ and TransientMapping.__str__/__repr__
-// exactly (including TransientMapping.__repr__'s "{|...|}" delimiter, which
-// does NOT match its own __str__'s "{<...>}" -- this looks like a
-// copy-paste bug in the reference, but is faithfully replicated here; see
-// tdict_repr below).
-static PyObject* g_seqstr = NULL;
-
-// Calls the real pcollections.util.seqstr(seq, maxlen=maxlen) (or plain
-// seqstr(seq) when has_maxlen is false, matching the reference's
-// maxlen=None default). tostr is always left at its default (repr) here --
-// dict.c has no lazy-aware formatting need (that's lazy.c's ldict/tldict).
-static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen) {
-   PyObject* args; PyObject* kwargs; PyObject* result;
-   args = PyTuple_Pack(1, seq);
-   if (!args) return NULL;
-   kwargs = PyDict_New();
-   if (!kwargs) { Py_DECREF(args); return NULL; }
-   if (has_maxlen) {
-      PyObject* ml = PyLong_FromLong(maxlen);
-      if (!ml || PyDict_SetItemString(kwargs, "maxlen", ml) < 0) {
-         Py_XDECREF(ml); Py_DECREF(args); Py_DECREF(kwargs); return NULL;
-      }
-      Py_DECREF(ml);
-   }
-   result = PyObject_Call(g_seqstr, args, kwargs);
-   Py_DECREF(args); Py_DECREF(kwargs);
-   return result;
-}
+// The types, the empty pdict, and the cached imports this part uses live in
+// the module state (core.h): ST(PDictType), ST(g_pdict_empty), and so on.
 
 static PyObject* pdict_keys(PDictObject* self, PyObject* Py_UNUSED(ignored));
 static PyObject* pdict_items(PDictObject* self, PyObject* Py_UNUSED(ignored));
 static PyObject* pdict_values(PDictObject* self, PyObject* Py_UNUSED(ignored));
 
 static int pdict_traverse(PDictObject* self, visitproc visit, void* arg) {
-   return dict_gc_traverse(self->els, visit, arg);
+   PCOLL_VISIT_TYPE(self);
+   return self->els ? dict_gc_traverse(self->els, visit, arg) : 0;
 }
 static int pdict_clear(PDictObject* self) {
    Trie_t els = self->els, idx = self->idx;
@@ -503,7 +340,7 @@ static Py_ssize_t pdict_length(PDictObject* self) {
 // Takes ownership of the one reference to `els`/`idx` that callers already
 // hold, wrapping them in a new instance of `type` -- EXCEPT that a 0-element
 // result collapses to the canonical empty pdict singleton instead (mirrors
-// plist_wrap's identical convention in list.c), but *only* when `type` is
+// plist_wrap's identical convention in list.c.h), but *only* when `type` is
 // exactly PDictType: that collapse is a pure optimization (any 0-element
 // pdict is behaviorally identical to the singleton), not something the
 // reference _dict.py itself does (pdict.set()/drop() just call
@@ -522,11 +359,11 @@ static PyObject* pdict_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
                                     Py_ssize_t top, Py_ssize_t count,
                                     Py_ssize_t ndeleted) {
    PDictObject* self;
-   if (count == 0 && type == PDictType) {
+   if (count == 0 && type == ST(PDictType)) {
       fatnode_decref(els, dictentry_decref);
       amtnode_decref(idx, noop_decref);
-      Py_INCREF(g_pdict_empty);
-      return (PyObject*)g_pdict_empty;
+      Py_INCREF(ST(g_pdict_empty));
+      return (PyObject*)ST(g_pdict_empty);
    }
    // Use type->tp_alloc (not PyObject_GC_New) so that a subclass which adds
    // trailing fields (e.g. a plain `class ldict(pdict): pass` picks up
@@ -552,20 +389,20 @@ static PyObject* pdict_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
 }
 static PyObject* pdict_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
                              Py_ssize_t count, Py_ssize_t ndeleted) {
-   return pdict_wrap_astype(PDictType, els, idx, top, count, ndeleted);
+   return pdict_wrap_astype(ST(PDictType), els, idx, top, count, ndeleted);
 }
 
 // Returns the canonical empty instance of `type` (a new reference), mirroring
 // the reference's `cls.empty` attribute lookup in pdict.__new__. For plain
 // PDictType this is just the g_pdict_empty singleton built once at
-// PyInit_dict time; for any other (necessarily subclass) type, the class is
+// module execution time; for any other (necessarily subclass) type, the class is
 // expected to have its own `.empty` class attribute set up the same way
-// PDictType/PListType set theirs -- lazy.c does this for ldict at its own
+// PDictType/PListType set theirs -- lazy.c.h does this for ldict at its own
 // init time.
 static PyObject* pdict_type_empty(PyTypeObject* type) {
-   if (type == PDictType) {
-      Py_INCREF(g_pdict_empty);
-      return (PyObject*)g_pdict_empty;
+   if (type == ST(PDictType)) {
+      Py_INCREF(ST(g_pdict_empty));
+      return (PyObject*)ST(g_pdict_empty);
    }
    return PyObject_GetAttrString((PyObject*)type, "empty");
 }
@@ -648,7 +485,7 @@ static int dict_should_compact(Py_ssize_t count, Py_ssize_t ndeleted) {
 
 // Defined further down (after tdict exists -- see the comment there), and
 // implemented by routing through tdict's own general-argument constructor,
-// exactly mirroring plist_new_dispatch()'s relationship to tlist in list.c.
+// exactly mirroring plist_new_dispatch()'s relationship to tlist in list.c.h.
 static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject* kw);
 
 static PyObject* pdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
@@ -670,7 +507,7 @@ static PyObject* pdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
 // Matches abc/_map.py's PersistentMapping.__repr__: f"{{|{seqstr(self)}|}}"
 // (untruncated, default tostr=repr).
 static PyObject* pdict_repr(PDictObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 0, 0);
+   PyObject* s = call_seqstr((PyObject*)self, 0, 0, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{|%U|}", s);
@@ -680,7 +517,7 @@ static PyObject* pdict_repr(PDictObject* self) {
 // Matches abc/_map.py's PersistentMapping.__str__:
 // f"{{|{seqstr(self, maxlen=60)}|}}" (truncated at 60 chars).
 static PyObject* pdict_str(PDictObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 60, 1);
+   PyObject* s = call_seqstr((PyObject*)self, 60, 1, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{|%U|}", s);
@@ -896,8 +733,8 @@ have_new_els:
 
 static PyObject* pdict_clear_method(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
    (void)self;
-   Py_INCREF(g_pdict_empty);
-   return (PyObject*)g_pdict_empty;
+   Py_INCREF(ST(g_pdict_empty));
+   return (PyObject*)ST(g_pdict_empty);
 }
 
 static PyObject* pdict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored));
@@ -939,11 +776,11 @@ static PyType_Slot pdict_slots[] = {
    {0, NULL}
 };
 static PyType_Spec pdict_spec = {
-   .name = "pcollections._c.dict.pdict",
+   .name = "pcollections.pdict",
    .basicsize = sizeof(PDictObject),
    .itemsize = 0,
    // Py_TPFLAGS_BASETYPE: pdict *is* meant to be subclassed in C -- see
-   // pcollections._c.lazy's ldict, which adds no fields of its own (matching
+   // pcollections._c._core's ldict, which adds no fields of its own (matching
    // the reference _lazy.py's `class ldict(pdict): __slots__ = ()`) and
    // relies on pdict_wrap_astype()/pdict_new_dispatch() etc. throughout this
    // file having been made to build instances of `Py_TYPE(self)`/`cls`
@@ -965,13 +802,14 @@ typedef struct {
    Py_ssize_t count;
    Py_ssize_t ndeleted;
    PyObject* orig;          // cached pdict (owned ref), or NULL -- see the
-                            // matching field on TListObject in list.c for
+                            // matching field on TListObject in list.c.h for
                             // the exact caching/invalidation convention.
 } TDictObject;
 
 static int tdict_traverse(TDictObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->orig);
-   return dict_gc_traverse(self->els, visit, arg);
+   return self->els ? dict_gc_traverse(self->els, visit, arg) : 0;
 }
 static int tdict_clear(TDictObject* self) {
    Trie_t els = self->els, idx = self->idx;
@@ -1021,7 +859,7 @@ static PyObject* tdict_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
 static PyObject* tdict_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
                              Py_ssize_t count, Py_ssize_t ndeleted,
                              PyObject* orig) {
-   return tdict_wrap_astype(TDictType, els, idx, top, count, ndeleted, orig);
+   return tdict_wrap_astype(ST(TDictType), els, idx, top, count, ndeleted, orig);
 }
 static void tdict_invalidate_orig(TDictObject* self) {
    PyObject* orig = self->orig;
@@ -1052,7 +890,7 @@ static PyObject* tdict_build_from_arg_astype(PyTypeObject* type, PyObject* arg) 
    PyObject* item;
    int is_mapping;
    if (!obj) return NULL;
-   is_mapping = PyObject_IsInstance(arg, g_abc_Mapping);
+   is_mapping = PyObject_IsInstance(arg, ST(g_abc_Mapping));
    if (is_mapping < 0) { Py_DECREF(obj); return NULL; }
    if (is_mapping) {
       items_src = PyObject_CallMethod(arg, "items", NULL);
@@ -1119,9 +957,9 @@ static PyObject* tdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    // deliberately excluded from these fast structural-sharing paths and
    // falls through to the general `tdict_build_from_arg_astype` path below,
    // which goes through `arg.items()` and so (for a lazy-dict argument)
-   // correctly *dereferences* rather than raw-sharing -- see lazy.c's
+   // correctly *dereferences* rather than raw-sharing -- see lazy.c.h's
    // ldict/tldict for why that distinction matters.
-   if (Py_TYPE(arg) == TDictType) {
+   if (Py_TYPE(arg) == ST(TDictType)) {
       // tdict(some_tdict): share a frozen snapshot of that tdict's current
       // (els, idx) -- not the tdict's own live, still-mutable trees -- as
       // the starting point for a brand-new, independent transient session.
@@ -1137,7 +975,7 @@ static PyObject* tdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       trienode_incref(idx);
       Py_XINCREF(orig);
       obj = tdict_wrap_astype(type, els, idx, t->top, t->count, t->ndeleted, orig);
-   } else if (Py_TYPE(arg) == PDictType) {
+   } else if (Py_TYPE(arg) == ST(PDictType)) {
       // tdict(some_pdict): the same O(1) sharing logic as pdict_transient()
       // (below), just parameterized by `type` instead of hardcoded to
       // TDictType -- `cls._new(...)` in the reference's tdict.__new__, not
@@ -1174,7 +1012,7 @@ static PyObject* tdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
 // delimiter here instead; that bug has since been fixed in abc/_map.py
 // (confirmed with Noah), so this now matches.
 static PyObject* tdict_repr(TDictObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 0, 0);
+   PyObject* s = call_seqstr((PyObject*)self, 0, 0, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{<%U>}", s);
@@ -1184,7 +1022,7 @@ static PyObject* tdict_repr(TDictObject* self) {
 // Matches abc/_map.py's TransientMapping.__str__:
 // f"{{<{seqstr(self, maxlen=60)}>}}" (truncated, "{<...>}" delimiter).
 static PyObject* tdict_str(TDictObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 60, 1);
+   PyObject* s = call_seqstr((PyObject*)self, 60, 1, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{<%U>}", s);
@@ -1340,8 +1178,8 @@ static PyObject* pdict_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
 static PyObject* tdict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
    Trie_t els, idx;
    if (self->count == 0) {
-      Py_INCREF(g_pdict_empty);
-      return (PyObject*)g_pdict_empty;
+      Py_INCREF(ST(g_pdict_empty));
+      return (PyObject*)ST(g_pdict_empty);
    }
    if (self->orig) {
       Py_INCREF(self->orig);
@@ -1363,7 +1201,7 @@ static PyObject* pdict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored)
    trienode_incref(self->idx);
    // tdict_wrap() takes ownership of (does not itself incref) the `orig`
    // reference it's handed -- self must be incref'd here, exactly as
-   // plist_transient() does in list.c, or the returned tdict ends up holding
+   // plist_transient() does in list.c.h, or the returned tdict ends up holding
    // an unowned pointer to self, and later decref's it once too many times
    // when the tdict is deallocated (a use-after-free/double-free on `self`).
    Py_INCREF(self);
@@ -1419,10 +1257,10 @@ static PyType_Slot tdict_slots[] = {
    {0, NULL}
 };
 static PyType_Spec tdict_spec = {
-   .name = "pcollections._c.dict.tdict",
+   .name = "pcollections.tdict",
    .basicsize = sizeof(TDictObject),
    .itemsize = 0,
-   // See pdict_spec's comment on Py_TPFLAGS_BASETYPE -- tldict (lazy.c) is
+   // See pdict_spec's comment on Py_TPFLAGS_BASETYPE -- tldict (lazy.c.h) is
    // the subclass this enables here.
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = tdict_slots,
@@ -1433,7 +1271,7 @@ static PyType_Spec tdict_spec = {
 // pdict_new()'s general-argument routing (both the "n==1, general iterable"
 // case and the "n==0, kwargs-only" case) is defined down here, now that
 // tdict_new()/tdict_persistent() both exist -- mirrors plist_new_dispatch()'s
-// relationship to tlist in list.c exactly.
+// relationship to tlist in list.c.h exactly.
 
 static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject* kw) {
    PyObject* targs;
@@ -1441,7 +1279,7 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
    PyObject* result;
    Py_ssize_t kwn = (kw ? PyDict_Size(kw) : 0);
    if (kwn == 0 && arg != NULL) {
-      int sized = PyObject_IsInstance(arg, g_abc_Sized);
+      int sized = PyObject_IsInstance(arg, ST(g_abc_Sized));
       if (sized < 0) return NULL;
       if (sized) {
          Py_ssize_t n = PyObject_Length(arg);
@@ -1454,10 +1292,10 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
       // -- a genuine isinstance check, not `type(arg) is tdict`, so this
       // deliberately also matches a tldict argument (raw-sharing its
       // internal state without dereferencing any lazy values -- see
-      // lazy.c's tldict for why that's the reference's actual, if slightly
+      // lazy.c.h's tldict for why that's the reference's actual, if slightly
       // surprising, behavior for a *transient* lazy-dict argument, as
       // opposed to a *persistent* one).
-      if (PyObject_TypeCheck(arg, TDictType)) {
+      if (PyObject_TypeCheck(arg, ST(TDictType))) {
          TDictObject* t2 = (TDictObject*)arg;
          Trie_t els = t2->els, idx = t2->idx;
          fat_freeze(els);
@@ -1472,7 +1310,7 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
          Py_INCREF(arg);
          return arg;
       }
-      if (Py_TYPE(arg) == PDictType) {
+      if (Py_TYPE(arg) == ST(PDictType)) {
          // pdict(some_pdict) or, e.g., ldict(some_plain_pdict): share arg's
          // raw (els, idx) directly into a fresh `type`-typed instance --
          // `cls._new(arg._els, arg._idx, arg._top)` in the reference.
@@ -1495,7 +1333,7 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
    // correctly *dereferencing* any lazy values along the way.
    targs = arg ? PyTuple_Pack(1, arg) : PyTuple_New(0);
    if (!targs) return NULL;
-   t = tdict_new(TDictType, targs, kw);
+   t = tdict_new(ST(TDictType), targs, kw);
    Py_DECREF(targs);
    if (!t) return NULL;
    {
@@ -1522,7 +1360,7 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
 // Iterators.
 // A single pair of iterator types (one for pdict, one for tdict -- so that
 // the owner-type check below stays a simple, explicit Py_TYPE() comparison,
-// exactly mirroring list.c's plist_iterator/tlist_iterator split) is reused
+// exactly mirroring list.c.h's plist_iterator/tlist_iterator split) is reused
 // for THREE purposes: pdict/tdict's own plain __iter__ (mode KEYS), and the
 // items()/values() views' __iter__ overrides (modes ITEMS/VALUES -- see
 // below). All three walk `els` directly via fat_firstpath/fat_nextpath in a
@@ -1549,21 +1387,24 @@ typedef struct {
 } DictIterObject;
 
 static void dictiter_dealloc(DictIterObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    Py_XDECREF(self->owner);
    PyObject_GC_Del(self);
+   Py_DECREF(tp);
 }
 static int dictiter_traverse(DictIterObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->owner);
    return 0;
 }
 static Trie_t dictiter_owner_els(DictIterObject* self) {
    // PyObject_TypeCheck (isinstance-equivalent), not an exact Py_TYPE()
-   // match: self->owner may now be an ldict/tldict (pcollections._c.lazy)
+   // match: self->owner may now be an ldict/tldict (pcollections._c._core)
    // rather than a plain pdict/tdict, and must still be routed to the
    // right struct layout by *family* (persistent vs transient), not by
    // exact class.
-   if (PyObject_TypeCheck(self->owner, PDictType))
+   if (PyObject_TypeCheck(self->owner, ST(PDictType)))
       return ((PDictObject*)self->owner)->els;
    else
       return ((TDictObject*)self->owner)->els;
@@ -1609,32 +1450,31 @@ static PyObject* make_dictiter(PyTypeObject* itertype, PyObject* owner_dict,
    return (PyObject*)it;
 }
 
-static PyTypeObject PDictIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.dict.pdict_iterator",
-   .tp_basicsize = sizeof(DictIterObject),
-   .tp_dealloc = (destructor)dictiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)dictiter_traverse,
-   .tp_iter = dictiter_self,
-   .tp_iternext = (iternextfunc)dictiter_next,
+static PyType_Slot dictiter_slots[] = {
+   {Py_tp_dealloc, (void*)dictiter_dealloc},
+   {Py_tp_traverse, (void*)dictiter_traverse},
+   {Py_tp_iter, (void*)dictiter_self},
+   {Py_tp_iternext, (void*)dictiter_next},
+   {0, NULL}
 };
-static PyTypeObject TDictIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.dict.tdict_iterator",
-   .tp_basicsize = sizeof(DictIterObject),
-   .tp_dealloc = (destructor)dictiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)dictiter_traverse,
-   .tp_iter = dictiter_self,
-   .tp_iternext = (iternextfunc)dictiter_next,
+static PyType_Spec pdictiter_spec = {
+   .name = "pcollections._c._core.pdict_iterator",
+   .basicsize = sizeof(DictIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = dictiter_slots,
+};
+static PyType_Spec tdictiter_spec = {
+   .name = "pcollections._c._core.tdict_iterator",
+   .basicsize = sizeof(DictIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = dictiter_slots,
 };
 
 static PyObject* pdict_iter(PDictObject* self) {
-   return make_dictiter(&PDictIterType, (PyObject*)self, DICTITER_KEYS);
+   return make_dictiter(ST(PDictIterType), (PyObject*)self, DICTITER_KEYS);
 }
 static PyObject* tdict_iter(TDictObject* self) {
-   return make_dictiter(&TDictIterType, (PyObject*)self, DICTITER_KEYS);
+   return make_dictiter(ST(TDictIterType), (PyObject*)self, DICTITER_KEYS);
 }
 
 
@@ -1674,14 +1514,14 @@ static PyObject* dictview_new(PyTypeObject* type, PyObject* args, PyObject* kwds
       return NULL;
    }
    if (!PyArg_ParseTuple(args, "O", &d)) return NULL;
-   if (type == PDictKeysType || type == PDictItemsType || type == PDictValuesType)
-      required = PDictType;
+   if (type == ST(PDictKeysType) || type == ST(PDictItemsType) || type == ST(PDictValuesType))
+      required = ST(PDictType);
    else
-      required = TDictType;
+      required = ST(TDictType);
    // PyObject_TypeCheck (isinstance-equivalent), not an exact Py_TYPE()
    // match: `d` only needs to be layout-compatible as a PDictObject/
    // TDictObject, which holds for any subclass that adds no fields of its
-   // own -- e.g. ldict/tldict (pcollections._c.lazy) -- so `some_ldict.keys()`
+   // own -- e.g. ldict/tldict (pcollections._c._core) -- so `some_ldict.keys()`
    // (inherited unmodified from pdict) must be able to construct a
    // PDictKeysType view over an `ldict` instance, not just a plain `pdict`.
    if (!PyObject_TypeCheck(d, required)) {
@@ -1705,7 +1545,7 @@ static PyObject* pdictitems_iter(PyObject* self) {
    PyObject* mapping = dictview_get_mapping(self);
    PyObject* it;
    if (!mapping) return NULL;
-   it = make_dictiter(&PDictIterType, mapping, DICTITER_ITEMS);
+   it = make_dictiter(ST(PDictIterType), mapping, DICTITER_ITEMS);
    Py_DECREF(mapping);
    return it;
 }
@@ -1713,7 +1553,7 @@ static PyObject* pdictvalues_iter(PyObject* self) {
    PyObject* mapping = dictview_get_mapping(self);
    PyObject* it;
    if (!mapping) return NULL;
-   it = make_dictiter(&PDictIterType, mapping, DICTITER_VALUES);
+   it = make_dictiter(ST(PDictIterType), mapping, DICTITER_VALUES);
    Py_DECREF(mapping);
    return it;
 }
@@ -1721,7 +1561,7 @@ static PyObject* tdictitems_iter(PyObject* self) {
    PyObject* mapping = dictview_get_mapping(self);
    PyObject* it;
    if (!mapping) return NULL;
-   it = make_dictiter(&TDictIterType, mapping, DICTITER_ITEMS);
+   it = make_dictiter(ST(TDictIterType), mapping, DICTITER_ITEMS);
    Py_DECREF(mapping);
    return it;
 }
@@ -1729,13 +1569,13 @@ static PyObject* tdictvalues_iter(PyObject* self) {
    PyObject* mapping = dictview_get_mapping(self);
    PyObject* it;
    if (!mapping) return NULL;
-   it = make_dictiter(&TDictIterType, mapping, DICTITER_VALUES);
+   it = make_dictiter(ST(TDictIterType), mapping, DICTITER_VALUES);
    Py_DECREF(mapping);
    return it;
 }
 
 // Each array below reserves two placeholder entries for Py_tp_traverse/
-// Py_tp_clear, patched in by build_view_type() at PyInit_dict time (see its
+// Py_tp_clear, patched in by build_view_type() at module execution time (see its
 // comment): PyType_FromSpecWithBases does NOT reliably inherit tp_traverse/
 // tp_clear from a Python-defined (heap) base the way ordinary Python class
 // statements do -- confirmed the hard way via
@@ -1775,370 +1615,187 @@ static PyType_Slot tdict_values_view_slots[] = {
    {Py_tp_clear, NULL},
    {0, NULL}
 };
-// .basicsize is filled in at PyInit_dict time (see build_view_type) -- it
+// .basicsize is filled in at module execution time (see build_view_type) -- it
 // depends on the dynamically-imported ABC base type's own tp_basicsize.
-static PyType_Spec pdict_keys_view_spec = {
-   .name = "pcollections._c.dict.pdict_keys", .basicsize = 0, .itemsize = 0,
+static const PyType_Spec pdict_keys_view_spec = {
+   .name = "pcollections._c._core.pdict_keys", .basicsize = 0, .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, .slots = dictview_keys_slots,
 };
-static PyType_Spec pdict_items_view_spec = {
-   .name = "pcollections._c.dict.pdict_items", .basicsize = 0, .itemsize = 0,
+static const PyType_Spec pdict_items_view_spec = {
+   .name = "pcollections._c._core.pdict_items", .basicsize = 0, .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, .slots = pdict_items_view_slots,
 };
-static PyType_Spec pdict_values_view_spec = {
-   .name = "pcollections._c.dict.pdict_values", .basicsize = 0, .itemsize = 0,
+static const PyType_Spec pdict_values_view_spec = {
+   .name = "pcollections._c._core.pdict_values", .basicsize = 0, .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, .slots = pdict_values_view_slots,
 };
-static PyType_Spec tdict_keys_view_spec = {
-   .name = "pcollections._c.dict.tdict_keys", .basicsize = 0, .itemsize = 0,
+static const PyType_Spec tdict_keys_view_spec = {
+   .name = "pcollections._c._core.tdict_keys", .basicsize = 0, .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, .slots = dictview_keys_slots,
 };
-static PyType_Spec tdict_items_view_spec = {
-   .name = "pcollections._c.dict.tdict_items", .basicsize = 0, .itemsize = 0,
+static const PyType_Spec tdict_items_view_spec = {
+   .name = "pcollections._c._core.tdict_items", .basicsize = 0, .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, .slots = tdict_items_view_slots,
 };
-static PyType_Spec tdict_values_view_spec = {
-   .name = "pcollections._c.dict.tdict_values", .basicsize = 0, .itemsize = 0,
+static const PyType_Spec tdict_values_view_spec = {
+   .name = "pcollections._c._core.tdict_values", .basicsize = 0, .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, .slots = tdict_values_view_slots,
 };
 
 static PyObject* pdict_keys(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs((PyObject*)PDictKeysType, (PyObject*)self, NULL);
+   return PyObject_CallFunctionObjArgs((PyObject*)ST(PDictKeysType), (PyObject*)self, NULL);
 }
 static PyObject* pdict_items(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs((PyObject*)PDictItemsType, (PyObject*)self, NULL);
+   return PyObject_CallFunctionObjArgs((PyObject*)ST(PDictItemsType), (PyObject*)self, NULL);
 }
 static PyObject* pdict_values(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs((PyObject*)PDictValuesType, (PyObject*)self, NULL);
+   return PyObject_CallFunctionObjArgs((PyObject*)ST(PDictValuesType), (PyObject*)self, NULL);
 }
 static PyObject* tdict_keys(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs((PyObject*)TDictKeysType, (PyObject*)self, NULL);
+   return PyObject_CallFunctionObjArgs((PyObject*)ST(TDictKeysType), (PyObject*)self, NULL);
 }
 static PyObject* tdict_items(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs((PyObject*)TDictItemsType, (PyObject*)self, NULL);
+   return PyObject_CallFunctionObjArgs((PyObject*)ST(TDictItemsType), (PyObject*)self, NULL);
 }
 static PyObject* tdict_values(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   return PyObject_CallFunctionObjArgs((PyObject*)TDictValuesType, (PyObject*)self, NULL);
+   return PyObject_CallFunctionObjArgs((PyObject*)ST(TDictValuesType), (PyObject*)self, NULL);
 }
 
 
 //=============================================================================
-// Module definition.
+// Module execution.
 
-static PyModuleDef dict_module = {
-   PyModuleDef_HEAD_INIT,
-   "pcollections._c.dict",
-   "C implementations of pdict and tdict, backed by an AMT hash table and a"
-   " FAT value table.",
-   -1,
-   NULL, NULL, NULL, NULL, NULL
-};
-
-// Builds the heap type described by `spec`, inheriting from the Python-level
-// PersistentMapping/TransientMapping ABC mixin class named `base_name`
-// (looked up on `abc_module`) -- see build_abc_subtype()'s twin in list.c
-// for the full rationale; duplicated here (rather than shared) since this is
-// a separate translation unit/module. Returns a new reference, or NULL (with
-// an exception set) on failure.
-static PyTypeObject* build_abc_subtype(PyType_Spec* spec, PyObject* abc_module,
-                                        const char* base_name) {
-   PyObject* base;
-   PyObject* bases;
-   PyObject* result;
+// Builds one of the six view types on top of `base` (a plain mixin from
+// pcollections.abc._view). The views add no fields of their own, so their
+// basicsize is exactly the base's. PyType_FromSpecWithBases does not inherit
+// tp_traverse/tp_clear from a Python-defined base, so the base's are copied
+// in explicitly. The static spec is copied first, so concurrent execution in
+// several interpreters never writes to shared memory.
+static PyTypeObject* build_view_type(PyObject* m, const PyType_Spec* spec,
+                                     PyObject* base) {
+   PyType_Spec local_spec;
+   PyType_Slot local_slots[8];
    PyTypeObject* base_t;
-   PyTypeObject* result_t;
-   base = PyObject_GetAttrString(abc_module, base_name);
-   if (!base) return NULL;
-   if (!PyType_Check(base)) {
-      Py_DECREF(base);
-      PyErr_Format(PyExc_TypeError, "pcollections.abc.%s is not a type",
-                   base_name);
-      return NULL;
-   }
-   base_t = (PyTypeObject*)base;
-   bases = PyTuple_Pack(1, base);
-   Py_DECREF(base);
-   if (!bases) return NULL;
-   result = PyType_FromSpecWithBases(spec, bases);
-   Py_DECREF(bases);
-   if (!result) return NULL;
-   result_t = (PyTypeObject*)result;
-   // pdict/tdict both rely on PersistentMapping/TransientMapping's own
-   // tp_richcompare (== collections.abc.Mapping's __eq__/__ne__) being
-   // inherited, without providing it natively. Naively listing
-   // Py_tp_richcompare in pdict_slots[]/tdict_slots[] (even when copying the
-   // exact same base function pointer) does NOT work: CPython's
-   // spec-processing treats an explicitly-listed comparison slot as "this
-   // type implements it", and additionally synthesizes a matching
-   // __eq__/__ne__/... *wrapper descriptor* directly in this new type's own
-   // tp_dict. Since slot_tp_richcompare (the generic dispatcher Python-
-   // defined classes use) looks up __eq__ via the *instance's actual type*
-   // MRO -- which, with that wrapper now present, finds THIS type's own
-   // newly-synthesized wrapper first, calling straight back into
-   // tp_richcompare -- that infinite-loops with no Python-level frames ever
-   // created (confirmed the hard way: RecursionError with an empty
-   // traceback, isolated and reproduced in a ~40-line standalone probe
-   // before this fix). Poking the C struct field directly here, *after*
-   // construction, sidesteps spec-processing entirely: no wrapper is ever
-   // added to tp_dict, so MRO lookup falls through correctly to
-   // Mapping.__eq__ (etc.) on the base class, exactly as plain Python
-   // single-inheritance would behave.
-   //
-   // tp_hash is NOT touched here: pdict provides its own native tp_hash
-   // (pdict_hash, via a real Py_tp_hash slot in pdict_spec -- a concrete
-   // function, not a generic MRO-dispatching one, so it's in no danger of
-   // this same self-reference loop and must not be overwritten), while
-   // tdict provides none at all and needs TransientMapping's unhashability
-   // patched in separately -- see PyInit_dict()'s explicit fixup for that,
-   // right after this function builds TDictType.
-   result_t->tp_richcompare = base_t->tp_richcompare;
-   return result_t;
-}
-
-// Registers `concrete` as a virtual subclass (via .register()) of the type
-// named `attr_name` on `module`. Used so that isinstance()/issubclass()
-// checks against e.g. pcollections.abc.PersistentMapping (and, transitively,
-// against collections.abc.Mapping -- confirmed empirically that .register()
-// with a *real* subclass of a stdlib ABC is honored by that stdlib ABC too)
-// keep succeeding for pdict/tdict/the view types even though their real base
-// is now a plain, non-ABCMeta mixin (see build_abc_subtype()'s own comment,
-// and pcollections.abc._core's _PersistentBase docstring, for why that
-// mixin swap was necessary at all on CPython 3.14). Returns 0 on success, -1
-// (with an exception set) on failure.
-static int register_as_virtual_subclass(PyObject* abc_cls, PyTypeObject* concrete) {
-   PyObject* result = PyObject_CallMethod(abc_cls, "register", "O", (PyObject*)concrete);
-   if (!result) return -1;
-   Py_DECREF(result);
-   return 0;
-}
-static int register_virtual_subclass(PyObject* module, const char* attr_name,
-                                      PyTypeObject* concrete) {
-   PyObject* abc_cls;
-   int rc;
-   abc_cls = PyObject_GetAttrString(module, attr_name);
-   if (!abc_cls) return -1;
-   rc = register_as_virtual_subclass(abc_cls, concrete);
-   Py_DECREF(abc_cls);
-   return rc;
-}
-
-// Builds one of the six view heap types, inheriting from `base` (a plain,
-// non-ABCMeta mixin from pcollections.abc._view -- _KeysViewBase/
-// _ItemsViewBase/_ValuesViewBase -- see that module's docstring for why
-// these are used instead of collections.abc.KeysView/ItemsView/ValuesView
-// directly as of this ABCMeta fix). Unlike
-// build_abc_subtype() above, this fills in spec->basicsize dynamically from
-// base's own tp_basicsize right before construction -- see the file-level
-// comment on the view-type globals for why: these types add no native
-// fields of their own, so they need exactly as much room as their ABC base
-// already reserves (for its own `_mapping` slot), no more and no less.
-static PyTypeObject* build_view_type(PyType_Spec* spec, PyObject* base) {
    PyObject* bases;
-   PyObject* result;
-   PyTypeObject* base_t;
-   PyType_Slot* slot;
+   PyTypeObject* result;
+   int n;
    if (!PyType_Check(base)) {
       PyErr_SetString(PyExc_TypeError, "expected a type object");
       return NULL;
    }
    base_t = (PyTypeObject*)base;
-   spec->basicsize = base_t->tp_basicsize;
-   // Patch in the base's own tp_traverse/tp_clear -- see the comment on
-   // the *_view_slots[] arrays above for why this is necessary at all.
-   for (slot = spec->slots; slot->slot != 0; ++slot) {
-      if (slot->slot == Py_tp_traverse)
-         slot->pfunc = (void*)base_t->tp_traverse;
-      else if (slot->slot == Py_tp_clear)
-         slot->pfunc = (void*)base_t->tp_clear;
+   local_spec = *spec;
+   local_spec.basicsize = (int)base_t->tp_basicsize;
+   for (n = 0; spec->slots[n].slot != 0; ++n) {
+      local_slots[n] = spec->slots[n];
+      if (local_slots[n].slot == Py_tp_traverse)
+         local_slots[n].pfunc = (void*)base_t->tp_traverse;
+      else if (local_slots[n].slot == Py_tp_clear)
+         local_slots[n].pfunc = (void*)base_t->tp_clear;
    }
+   local_slots[n] = spec->slots[n];
+   local_spec.slots = local_slots;
    bases = PyTuple_Pack(1, base);
    if (!bases) return NULL;
-   result = PyType_FromSpecWithBases(spec, bases);
+   result = pcoll_new_type(m, &local_spec, bases);
    Py_DECREF(bases);
-   return (PyTypeObject*)result;
+   return result;
 }
 
-PyMODINIT_FUNC PyInit_dict(void) {
-   PyObject* m;
-   PyObject* pcoll_abc_module;
-   PyObject* coll_abc_module;
-   PyObject* KeysView_t; PyObject* ItemsView_t; PyObject* ValuesView_t;
+// Creates pdict, tdict, their views and iterators, and the empty pdict, and
+// adds the public types to module `m`. `st` is this interpreter's state.
+static int pcoll_exec_dict(PyObject* m, pcoll_state* st) {
+   PyObject* pcoll_abc = NULL;
+   PyObject* coll_abc = NULL;
+   PyObject* KeysView_t = NULL;
+   PyObject* ItemsView_t = NULL;
+   PyObject* ValuesView_t = NULL;
+   PyObject* KeysBase = NULL;
+   PyObject* ItemsBase = NULL;
+   PyObject* ValuesBase = NULL;
    PDictObject* empty;
+   int rc = -1;
 
-   // The tombstone sentinel -- see the comment near dictentry_is_tombstone()
-   // above. A plain object() instance works fine: it's never exposed to
-   // Python code, compared only by identity, and (being childless) costs
-   // nothing extra during GC traversal of the rare `els` node that still
-   // holds one between compactions.
-   g_dict_dummy = PyObject_CallObject((PyObject*)&PyBaseObject_Type, NULL);
-   if (!g_dict_dummy) return NULL;
+   pcoll_abc = PyImport_ImportModule("pcollections.abc");
+   if (!pcoll_abc) goto done;
+   st->PDictType = build_abc_subtype(m, &pdict_spec, pcoll_abc,
+                                     "_PersistentMappingBase", 1);
+   if (!st->PDictType) goto done;
+   st->TDictType = build_abc_subtype(m, &tdict_spec, pcoll_abc,
+                                     "_TransientMappingBase", 1);
+   if (!st->TDictType) goto done;
+   if (register_virtual_subclass(pcoll_abc, "PersistentMapping", st->PDictType) < 0 ||
+       register_virtual_subclass(pcoll_abc, "TransientMapping", st->TDictType) < 0)
+      goto done;
+   // tdict is unhashable, like its base (MutableMapping sets __hash__ = None).
+   st->TDictType->tp_hash = st->TDictType->tp_base->tp_hash;
 
-   // pdict/tdict are built on top of pcollections.abc's plain (non-ABCMeta)
-   // _PersistentMappingBase/_TransientMappingBase mixins -- not the real,
-   // ABCMeta-based PersistentMapping/TransientMapping -- since CPython 3.14
-   // rejects building a heap type (via PyType_FromSpecWithBases, which is
-   // what build_abc_subtype() does) on top of a base whose metaclass
-   // overrides tp_new, which ABCMeta does. See pcollections.abc._core's
-   // _PersistentBase docstring for the full story. We keep pcoll_abc_module
-   // open past this point (rather than decref'ing it immediately) because
-   // it's needed twice more below: to .register() PDictType/TDictType as
-   // virtual subclasses of the real PersistentMapping/TransientMapping, and
-   // to look up the dict-view family's own plain mixins
-   // (_KeysViewBase/_ItemsViewBase/_ValuesViewBase, see pcollections.abc._view)
-   // for build_view_type().
-   pcoll_abc_module = PyImport_ImportModule("pcollections.abc");
-   if (!pcoll_abc_module) return NULL;
-   PDictType = build_abc_subtype(&pdict_spec, pcoll_abc_module, "_PersistentMappingBase");
-   TDictType = build_abc_subtype(&tdict_spec, pcoll_abc_module, "_TransientMappingBase");
-   if (!PDictType || !TDictType) { Py_DECREF(pcoll_abc_module); return NULL; }
-   // .register() PDictType/TDictType as virtual subclasses of the real
-   // PersistentMapping/TransientMapping ABCs, so isinstance()/issubclass()
-   // checks against pcollections.abc.PersistentMapping/TransientMapping --
-   // and, transitively, against collections.abc.Mapping/MutableMapping,
-   // confirmed empirically -- keep succeeding exactly as they did when
-   // PDictType/TDictType were real (not virtual) subclasses of those ABCs.
-   if (register_virtual_subclass(pcoll_abc_module, "PersistentMapping", PDictType) < 0) {
-      Py_DECREF(pcoll_abc_module); return NULL;
-   }
-   if (register_virtual_subclass(pcoll_abc_module, "TransientMapping", TDictType) < 0) {
-      Py_DECREF(pcoll_abc_module); return NULL;
-   }
-   // tdict provides no tp_hash of its own at all (unlike pdict) -- patch in
-   // TransientMapping's (i.e. MutableMapping's) __hash__ = None
-   // unhashability directly, the same safe way build_abc_subtype() patches
-   // tp_richcompare (a concrete function -- PyObject_HashNotImplemented --
-   // not a generic MRO-dispatching one, so this one's not even at risk of
-   // that self-reference loop, but going through spec slots isn't needed
-   // either way).
-   TDictType->tp_hash = ((PyTypeObject*)TDictType)->tp_base->tp_hash;
+   coll_abc = PyImport_ImportModule("collections.abc");
+   if (!coll_abc) goto done;
+   st->g_abc_Mapping = PyObject_GetAttrString(coll_abc, "Mapping");
+   if (!st->g_abc_Mapping) goto done;
+   st->g_abc_Sized = PyObject_GetAttrString(coll_abc, "Sized");
+   if (!st->g_abc_Sized) goto done;
+   // The views are registered with the real stdlib view ABCs.
+   KeysView_t = PyObject_GetAttrString(coll_abc, "KeysView");
+   ItemsView_t = PyObject_GetAttrString(coll_abc, "ItemsView");
+   ValuesView_t = PyObject_GetAttrString(coll_abc, "ValuesView");
+   if (!KeysView_t || !ItemsView_t || !ValuesView_t) goto done;
+   KeysBase = PyObject_GetAttrString(pcoll_abc, "_KeysViewBase");
+   ItemsBase = PyObject_GetAttrString(pcoll_abc, "_ItemsViewBase");
+   ValuesBase = PyObject_GetAttrString(pcoll_abc, "_ValuesViewBase");
+   if (!KeysBase || !ItemsBase || !ValuesBase) goto done;
+   if (!(st->PDictKeysType = build_view_type(m, &pdict_keys_view_spec, KeysBase)) ||
+       !(st->PDictItemsType = build_view_type(m, &pdict_items_view_spec, ItemsBase)) ||
+       !(st->PDictValuesType = build_view_type(m, &pdict_values_view_spec, ValuesBase)) ||
+       !(st->TDictKeysType = build_view_type(m, &tdict_keys_view_spec, KeysBase)) ||
+       !(st->TDictItemsType = build_view_type(m, &tdict_items_view_spec, ItemsBase)) ||
+       !(st->TDictValuesType = build_view_type(m, &tdict_values_view_spec, ValuesBase)))
+      goto done;
+   if (register_as_virtual_subclass(KeysView_t, st->PDictKeysType) < 0 ||
+       register_as_virtual_subclass(KeysView_t, st->TDictKeysType) < 0 ||
+       register_as_virtual_subclass(ItemsView_t, st->PDictItemsType) < 0 ||
+       register_as_virtual_subclass(ItemsView_t, st->TDictItemsType) < 0 ||
+       register_as_virtual_subclass(ValuesView_t, st->PDictValuesType) < 0 ||
+       register_as_virtual_subclass(ValuesView_t, st->TDictValuesType) < 0)
+      goto done;
 
-   {
-      PyObject* util_module = PyImport_ImportModule("pcollections.util");
-      if (!util_module) { Py_DECREF(pcoll_abc_module); return NULL; }
-      g_seqstr = PyObject_GetAttrString(util_module, "seqstr");
-      Py_DECREF(util_module);
-      if (!g_seqstr) { Py_DECREF(pcoll_abc_module); return NULL; }
-   }
+   if (!(st->PDictIterType = pcoll_new_internal_type(m, &pdictiter_spec)) ||
+       !(st->TDictIterType = pcoll_new_internal_type(m, &tdictiter_spec)))
+      goto done;
 
-   coll_abc_module = PyImport_ImportModule("collections.abc");
-   if (!coll_abc_module) { Py_DECREF(pcoll_abc_module); return NULL; }
-   g_abc_Mapping = PyObject_GetAttrString(coll_abc_module, "Mapping");
-   g_abc_Sized = PyObject_GetAttrString(coll_abc_module, "Sized");
-   // The *real* stdlib KeysView/ItemsView/ValuesView -- kept only so the six
-   // view heap types built below can be .register()'ed with them (for
-   // isinstance()/issubclass() compatibility); they are NOT used as those
-   // types' actual base anymore (see build_view_type()'s comment and
-   // pcollections.abc._view's module docstring).
-   KeysView_t = PyObject_GetAttrString(coll_abc_module, "KeysView");
-   ItemsView_t = PyObject_GetAttrString(coll_abc_module, "ItemsView");
-   ValuesView_t = PyObject_GetAttrString(coll_abc_module, "ValuesView");
-   Py_DECREF(coll_abc_module);
-   if (!g_abc_Mapping || !g_abc_Sized || !KeysView_t || !ItemsView_t || !ValuesView_t) {
-      Py_XDECREF(KeysView_t); Py_XDECREF(ItemsView_t); Py_XDECREF(ValuesView_t);
-      Py_DECREF(pcoll_abc_module);
-      return NULL;
-   }
-
-   {
-      // The plain (non-ABCMeta) mixins that build_view_type() actually
-      // builds the six view heap types on top of -- see _view.py.
-      PyObject* PKeysViewBase = PyObject_GetAttrString(pcoll_abc_module, "_KeysViewBase");
-      PyObject* PItemsViewBase = PyObject_GetAttrString(pcoll_abc_module, "_ItemsViewBase");
-      PyObject* PValuesViewBase = PyObject_GetAttrString(pcoll_abc_module, "_ValuesViewBase");
-      if (!PKeysViewBase || !PItemsViewBase || !PValuesViewBase) {
-         Py_XDECREF(PKeysViewBase); Py_XDECREF(PItemsViewBase); Py_XDECREF(PValuesViewBase);
-         Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
-         Py_DECREF(pcoll_abc_module);
-         return NULL;
-      }
-      PDictKeysType = build_view_type(&pdict_keys_view_spec, PKeysViewBase);
-      PDictItemsType = build_view_type(&pdict_items_view_spec, PItemsViewBase);
-      PDictValuesType = build_view_type(&pdict_values_view_spec, PValuesViewBase);
-      TDictKeysType = build_view_type(&tdict_keys_view_spec, PKeysViewBase);
-      TDictItemsType = build_view_type(&tdict_items_view_spec, PItemsViewBase);
-      TDictValuesType = build_view_type(&tdict_values_view_spec, PValuesViewBase);
-      Py_DECREF(PKeysViewBase); Py_DECREF(PItemsViewBase); Py_DECREF(PValuesViewBase);
-   }
-   Py_DECREF(pcoll_abc_module);
-   if (!PDictKeysType || !PDictItemsType || !PDictValuesType ||
-       !TDictKeysType || !TDictItemsType || !TDictValuesType) {
-      Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
-      return NULL;
-   }
-   // .register() the six view types with the real stdlib KeysView/ItemsView/
-   // ValuesView (see register_as_virtual_subclass()'s comment) --
-   // transitively also satisfies isinstance/issubclass checks against
-   // Set/Collection/Iterable/Container/Sized for the Keys/Items views,
-   // confirmed empirically.
-   if (register_as_virtual_subclass(KeysView_t, PDictKeysType) < 0 ||
-       register_as_virtual_subclass(KeysView_t, TDictKeysType) < 0 ||
-       register_as_virtual_subclass(ItemsView_t, PDictItemsType) < 0 ||
-       register_as_virtual_subclass(ItemsView_t, TDictItemsType) < 0 ||
-       register_as_virtual_subclass(ValuesView_t, PDictValuesType) < 0 ||
-       register_as_virtual_subclass(ValuesView_t, TDictValuesType) < 0) {
-      Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
-      return NULL;
-   }
-   Py_DECREF(KeysView_t); Py_DECREF(ItemsView_t); Py_DECREF(ValuesView_t);
-
-   if (PyType_Ready(&PDictIterType) < 0) return NULL;
-   if (PyType_Ready(&TDictIterType) < 0) return NULL;
-
-   // Build the canonical empty pdict singleton by hand (pdict_wrap() itself
-   // depends on it already existing, so it can't be used here).
-   // Use tp_alloc here too (see pdict_wrap_astype's comment) for consistency
-   // with every other PDictObject allocation site, and so this singleton's
-   // dealloc (should it ever run) balances correctly against tp_alloc's
-   // Py_INCREF(PDictType).
-   empty = (PDictObject*)PDictType->tp_alloc(PDictType, 0);
-   if (!empty) return NULL;
+   // The canonical empty pdict. (pdict_wrap() returns this singleton for an
+   // empty result, so it is built by hand.)
+   empty = (PDictObject*)st->PDictType->tp_alloc(st->PDictType, 0);
+   if (!empty) goto done;
    empty->els = fat_empty(ELSLEAFSIZE);
    empty->idx = amt_empty(IDXLEAFSIZE);
    empty->top = 0;
    empty->count = 0;
    empty->ndeleted = 0;
    empty->hashcode = -1;
-   g_pdict_empty = empty;
+   st->g_pdict_empty = empty;
+   if (pcoll_type_setattr(st->PDictType, "empty", (PyObject*)empty) < 0)
+      goto done;
 
-   if (PyDict_SetItemString(PDictType->tp_dict, "empty",
-                            (PyObject*)g_pdict_empty) < 0)
-      return NULL;
-   PyType_Modified(PDictType);
-
-   m = PyModule_Create(&dict_module);
-   if (!m) return NULL;
-
-   Py_INCREF(PDictType);
-   if (PyModule_AddObject(m, "pdict", (PyObject*)PDictType) < 0) {
-      Py_DECREF(PDictType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TDictType);
-   if (PyModule_AddObject(m, "tdict", (PyObject*)TDictType) < 0) {
-      Py_DECREF(TDictType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(PDictKeysType);
-   if (PyModule_AddObject(m, "pdict_keys", (PyObject*)PDictKeysType) < 0) {
-      Py_DECREF(PDictKeysType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(PDictItemsType);
-   if (PyModule_AddObject(m, "pdict_items", (PyObject*)PDictItemsType) < 0) {
-      Py_DECREF(PDictItemsType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(PDictValuesType);
-   if (PyModule_AddObject(m, "pdict_values", (PyObject*)PDictValuesType) < 0) {
-      Py_DECREF(PDictValuesType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TDictKeysType);
-   if (PyModule_AddObject(m, "tdict_keys", (PyObject*)TDictKeysType) < 0) {
-      Py_DECREF(TDictKeysType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TDictItemsType);
-   if (PyModule_AddObject(m, "tdict_items", (PyObject*)TDictItemsType) < 0) {
-      Py_DECREF(TDictItemsType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TDictValuesType);
-   if (PyModule_AddObject(m, "tdict_values", (PyObject*)TDictValuesType) < 0) {
-      Py_DECREF(TDictValuesType); Py_DECREF(m); return NULL;
-   }
-   return m;
+   if (pcoll_module_add(m, "pdict", (PyObject*)st->PDictType) < 0 ||
+       pcoll_module_add(m, "tdict", (PyObject*)st->TDictType) < 0 ||
+       pcoll_module_add(m, "pdict_keys", (PyObject*)st->PDictKeysType) < 0 ||
+       pcoll_module_add(m, "pdict_items", (PyObject*)st->PDictItemsType) < 0 ||
+       pcoll_module_add(m, "pdict_values", (PyObject*)st->PDictValuesType) < 0 ||
+       pcoll_module_add(m, "tdict_keys", (PyObject*)st->TDictKeysType) < 0 ||
+       pcoll_module_add(m, "tdict_items", (PyObject*)st->TDictItemsType) < 0 ||
+       pcoll_module_add(m, "tdict_values", (PyObject*)st->TDictValuesType) < 0)
+      goto done;
+   rc = 0;
+done:
+   Py_XDECREF(pcoll_abc);
+   Py_XDECREF(coll_abc);
+   Py_XDECREF(KeysView_t);
+   Py_XDECREF(ItemsView_t);
+   Py_XDECREF(ValuesView_t);
+   Py_XDECREF(KeysBase);
+   Py_XDECREF(ItemsBase);
+   Py_XDECREF(ValuesBase);
+   return rc;
 }

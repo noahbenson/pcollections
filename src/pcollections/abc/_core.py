@@ -11,7 +11,7 @@ class _PersistentBase:
     """Plain (non-``ABCMeta``) mixin holding ``Persistent``'s concrete method
     bodies, with no abstract base of its own.
 
-    This exists so that C extension types (``pcollections._c.dict.pdict``,
+    This exists so that C extension types (``pcollections._c._core.pdict``,
     ``_c.set.pset``, ``_c.list.plist``, and friends) can inherit these
     methods -- ``__setattr__``/``__delattr__``/``__setitem__``/``__delitem__``
     raising ``TypeError``, and a ``copy()`` that returns ``self`` -- from a
@@ -122,7 +122,7 @@ class Transient:
 
     Unlike ``Persistent``, ``Transient`` was never ``ABCMeta``-based to begin
     with (it doesn't inherit from any ``collections.abc`` class), so it needs
-    no ``_TransientBase``-style split for the C extensions: ``_c/dict.c`` and
+    no ``_TransientBase``-style split for the C extensions: ``_c/dict.c.h`` and
     friends can -- and do -- keep inheriting from ``Transient`` directly.
     """
     # See the matching comment on _PersistentBase.__slots__ above: this keeps

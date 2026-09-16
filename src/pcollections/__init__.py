@@ -6,68 +6,37 @@
 
 """Persistent and Transient Collections for Python
 
-Whenever the compiled `pcollections._c` extension modules (`_c.dict`,
-`_c.list`, `_c.set`, `_c.lazy`) are available, this package uses them as the
-source of every public type and function (`pdict`, `tdict`, `plist`,
-`tlist`, `pset`, `tset`, `lazy`, `ldict`, `tldict`, `llist`, `tllist`,
-`unlazy`, `holdlazy`, `LazyError`, `lazy_error_unwrap`); when they aren't
-available (not built, or built for a different Python version/platform),
-it falls back to the pure-Python reference implementation in
-`pcollections._dict`/`_list`/`_set`/`_lazy`, which provides an identical
-public interface (see `pcollections.test`, which runs the same test suite
-against both backends and checks their interfaces match).
+The public types and functions come from one of two backends, chosen once at
+import time:
 
-This choice is made exactly once at import time, as a single all-or-nothing
-unit -- never a mix of C types and Python types. That's a deliberate
-restriction, not an arbitrary one: `_c/lazy.c`'s C `ldict`/`llist` are
-built as real subclasses of the C `pdict`/`plist` (imported directly from
-`_c.dict`/`_c.list` at the C extension's own init time), while
-`_lazy.py`'s pure-Python `ldict`/`llist` are, likewise, subclasses of the
-pure-Python `pdict`/`plist`. If this module imported, say, C `pdict` but
-pure-Python `ldict`, the result would be two unrelated, incompatible
-notions of "pdict" in the same process (`isinstance(some_ldict, pdict)`
-would be `False` for the C `pdict`), which no amount of interface-matching
-could paper over. Falling back as one unit keeps every type internally
-consistent, at the cost of losing the C speedups for everything if even
-one of the four extension modules can't be built/loaded.
+- the C backend, the compiled extension module ``pcollections._c._core``,
+  used whenever it can be imported; or
+- the pure-Python backend (``pcollections._dict``, ``_list``, ``_set``, and
+  ``_lazy``), which provides the same interface and is used otherwise.
+
+The choice is all-or-nothing, never a mix: the lazy collections subclass the
+persistent collections of their own backend (``ldict`` subclasses ``pdict``,
+and so on), so mixing backends would give two unrelated ``pdict`` types in one
+process.
+
+``using_c_extension`` records which backend is in use.
 """
 
-def _load_c_backend():
-    """Imports and returns the C-extension implementations of every public
-    pcollections type/function, as a dict keyed by public name. Raises
-    ImportError or TypeError (uncaught, by design -- see the module
-    docstring and the try/except around this function's call site) if any
-    of the four extension modules isn't importable or isn't usable on this
-    interpreter.
+_PUBLIC_NAMES = (
+    'pdict', 'tdict', 'plist', 'tlist', 'pset', 'tset',
+    'lazy', 'unlazy', 'holdlazy', 'llist', 'ldict', 'tllist', 'tldict',
+    'LazyError', 'lazy_error_unwrap')
 
-    TypeError is included alongside the obvious ImportError because a
-    *present* extension module can still fail to finish initializing on an
-    interpreter whose C API has moved out from under it: e.g. CPython 3.14
-    tightened PyType_FromSpecWithBases/PyType_FromMetaclass to reject a
-    heap type whose base's metaclass overrides tp_new (which
-    collections.abc.ABCMeta -- the metaclass behind pcollections.abc's
-    PersistentMapping/TransientMapping/etc., which _c/dict.c and friends
-    subclass when building pdict/tdict/etc. -- does), and that shows up as
-    `PyInit_dict()` (etc.) failing with exactly that TypeError instead of
-    an ImportError. Since this is exactly the kind of "unusual...Python
-    implementation" case the module docstring already promises a graceful
-    pure-Python fallback for, and not a sign of a corrupted install, it's
-    caught here rather than left to crash the whole `import pcollections`."""
-    from ._c import dict as _cdict
-    from ._c import list as _clist
-    from ._c import set  as _cset
-    from ._c import lazy as _clazy
-    return {
-        'pdict': _cdict.pdict, 'tdict': _cdict.tdict,
-        'plist': _clist.plist, 'tlist': _clist.tlist,
-        'pset':  _cset.pset,   'tset':  _cset.tset,
-        'lazy': _clazy.lazy, 'unlazy': _clazy.unlazy,
-        'holdlazy': _clazy.holdlazy,
-        'llist': _clazy.llist, 'ldict': _clazy.ldict,
-        'tllist': _clazy.tllist, 'tldict': _clazy.tldict,
-        'LazyError': _clazy.LazyError,
-        'lazy_error_unwrap': _clazy.lazy_error_unwrap,
-    }
+
+def _load_c_backend():
+    """Returns the C backend's public objects, keyed by public name.
+
+    Raises ImportError if the extension is missing, and may raise TypeError
+    if it is present but cannot initialize on this interpreter; the caller
+    falls back to the pure-Python backend in either case.
+    """
+    from ._c import _core
+    return {name: getattr(_core, name) for name in _PUBLIC_NAMES}
 
 
 def _load_python_backend():
@@ -96,17 +65,21 @@ def _load_python_backend():
 
 try:
     _backend = _load_c_backend()
-    #: True if the compiled C extension modules are backing the types in
-    #: this package; False if the pure-Python fallback is in use. Mostly
-    #: useful for diagnostics/tests (see `pcollections.test`), not
-    #: something ordinary user code should need to branch on, since both
-    #: backends are meant to be interface- and behavior-identical.
+    #: True if the C backend is in use; False for the pure-Python backend.
     using_c_extension = True
 except (ImportError, TypeError):
     _backend = _load_python_backend()
     using_c_extension = False
 
 globals().update(_backend)
+if not using_c_extension:
+    # The C types are named pcollections.<name>; give the pure-Python classes
+    # the same module when they are the ones in use, so that pickles always
+    # refer to pcollections.<name> and load under either backend.
+    for _obj in _backend.values():
+        if isinstance(_obj, type):
+            _obj.__module__ = __name__
+    del _obj
 del _backend, _load_c_backend, _load_python_backend
 
 # We don't include the abc types in the __all__; they are probably not as

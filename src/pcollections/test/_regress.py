@@ -22,6 +22,9 @@ import textwrap
 
 from ._backends import make_tests, known_failure
 
+import sysconfig
+_FREE_THREADED = bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
+
 
 _PKG_PARENT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -47,7 +50,8 @@ class _RegressionTests:
         env['PYTHONFAULTHANDLER'] = '1'
         proc = subprocess.run(
             [sys.executable, '-c', src],
-            env=env, capture_output=True, text=True, timeout=timeout)
+            env=env, capture_output=True, text=True, errors='replace',
+            timeout=timeout)
         detail = (f"exit status {proc.returncode}\n"
                   f"--- stdout ---\n{proc.stdout[-2000:]}\n"
                   f"--- stderr ---\n{proc.stderr[-2000:]}")
@@ -103,6 +107,10 @@ class _RegressionTests:
     # object is garbage.
     @known_failure('c')
     def test_gc_shared_nodes_keep_items_alive(self):
+        if _FREE_THREADED and self.backend_name == 'c':
+            # Whether the bug shows up depends on the free-threaded
+            # collector's version; skip rather than guess.
+            self.skipTest("unreliable on free-threaded builds")
         self.run_scenario("""
             def trial(make, selfref, k):
                 gc.collect()
@@ -236,6 +244,20 @@ class _RegressionTests:
                     except RuntimeError:
                         raised += 1
                 assert raised == 20, (make, raised)
+            print('ok')
+        """)
+
+    # Sequence equality must not require orderable elements -----------------
+    # The pure-Python plist/tlist compared elements with `<` to test
+    # equality, so plist([None]) == plist([None]) raised TypeError. The C
+    # tlist inherits the same comparison.
+    @known_failure('c', 'python')
+    def test_sequence_equality_of_unorderable_elements(self):
+        self.run_scenario("""
+            for make in (plist, tlist):
+                assert make([None, {}]) == make([None, {}])
+                assert make([None]) != make([object()])
+                assert make([None]) == [None]
             print('ok')
         """)
 

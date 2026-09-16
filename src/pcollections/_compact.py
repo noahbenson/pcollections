@@ -2,9 +2,9 @@
 ################################################################################
 # pcollections/_compact.py
 # Shared tombstone-based deletion + periodic compaction helpers for pdict/
-# tdict (_dict.py) and pset/tset (_set.py), mirroring pcollections/_c/dict.c's
+# tdict (_dict.py) and pset/tset (_set.py), mirroring pcollections/_c/dict.c.h's
 # `els`/`idx` design (see that file's header comment for the full rationale;
-# _c/set.c follows the identical pattern for sets).
+# _c/set.c.h follows the identical pattern for sets).
 #
 # Both pdict/pset (and their transient counterparts) encode their contents as
 # a pair of tries: `_idx` (an AMT mapping hash(key)/hash(element) -> the
@@ -50,15 +50,15 @@ def is_tombstone(payload):
 
 
 # Compaction thresholds -- identical to DICT_COMPACT_ABS_THRESHOLD/
-# DICT_COMPACT_FRAC_NUM/DEN in pcollections/_c/dict.c (and the matching
-# constants in _c/set.c).
+# DICT_COMPACT_FRAC_NUM/DEN in pcollections/_c/dict.c.h (and the matching
+# constants in _c/set.c.h).
 COMPACT_ABS_THRESHOLD = 1024 * 1024
 COMPACT_FRAC_NUM = 3
 COMPACT_FRAC_DEN = 10
 
 
 def should_compact(count, ndeleted):
-    """Mirrors dict_should_compact()/_c/dict.c: True once enough `_els`
+    """Mirrors dict_should_compact()/_c/dict.c.h: True once enough `_els`
     slots have been burned by deletions (relative to how many live elements
     remain) that a full rebuild is worthwhile."""
     if ndeleted <= 0:

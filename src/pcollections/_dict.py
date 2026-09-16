@@ -173,7 +173,7 @@ class pdict(PersistentMapping):
             # Going through self.items() instead (which already skips
             # tombstones -- see pdict_items/PDictView above) keeps the
             # exact same formula/offset while staying tombstone-safe. This
-            # mirrors why the C implementation (pcollections/_c/dict.c)
+            # mirrors why the C implementation (pcollections/_c/dict.c.h)
             # implements __hash__ natively rather than relying on this same
             # generic default -- see that file's own comment.
             h = hash(frozenset(self.items())) + 2
@@ -692,7 +692,7 @@ class tdict(TransientMapping):
 #===============================================================================
 # Compaction.
 # Rebuilds els/idx from scratch, live entries only, renumbered 0..count-1 in
-# original (insertion) order -- mirrors dict_rebuild_compacted()/_c/dict.c.
+# original (insertion) order -- mirrors dict_rebuild_compacted()/_c/dict.c.h.
 # Implemented by simply replaying every live (key, val) pair, in original
 # order, through tdict.__setitem__'s already-correct chain-building logic,
 # rather than duplicating that logic a second time here.

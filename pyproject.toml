@@ -8,8 +8,8 @@ name = "pcollections"
 # read from there by setup.py, which supplies it to setuptools at build
 # time -- declared dynamic here so pyproject.toml's static metadata and
 # setup.py's setup() call don't both try to set it (setuptools treats that
-# as a conflict). setup.py is also where the optional C extension modules
-# (pcollections._c.dict/list/set/lazy) and the src/ package layout are
+# as a conflict). setup.py is also where the optional C extension
+# (pcollections._c._core) and the src/ package layout are
 # configured, since pyproject.toml's [project] table alone can't express
 # either of those.
 dynamic = ["version"]
@@ -56,7 +56,7 @@ documentation = "https://github.com/noahbenson/pcollections"
 repository = "https://github.com/noahbenson/pcollections"
 
 # Used by `.github/workflows/deploy.yml`'s wheel-building job (pypa/cibuildwheel).
-# pcollections._c's four extension modules are CPython-C-API code, so we only
+# pcollections._c._core is CPython-C-API code, so we only
 # target CPython (skip PyPy/GraalPy: their C-API emulation layers add real
 # risk for hand-written extension code like this for a benefit our pure-Python
 # fallback already covers reasonably well) and 64-bit platforms (skip 32-bit:

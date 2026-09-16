@@ -1,21 +1,21 @@
 # -*- coding: utf-8 -*-
 ################################################################################
 # pcollections/abc/_view.py
-# Plain (non-ABCMeta) mixins backing pcollections._c.dict's six view types
+# Plain (non-ABCMeta) mixins backing pcollections._c._core's six view types
 # (pdict_keys/pdict_items/pdict_values/tdict_keys/tdict_items/tdict_values).
 # By Noah C. Benson
 
 """Plain mixins for the ``dict``-view family (``keys()``/``items()``/
 ``values()``).
 
-``pcollections._c.dict``'s six view heap types used to inherit directly from
+``pcollections._c._core``'s six view heap types used to inherit directly from
 ``collections.abc.KeysView``/``ItemsView``/``ValuesView`` (which is exactly
 what the pure-Python ``pcollections._dict``'s own ``pdict_keys``/``pdict_items``/
 ``pdict_values`` still do -- see that module -- since ordinary Python class
 statements are unaffected by the issue described next).
 
 CPython 3.14 tightened ``PyType_FromSpecWithBases``/``PyType_FromMetaclass``
-(the C API ``_c/dict.c``'s ``build_view_type()`` uses to build these six types
+(the C API ``_c/dict.c.h``'s ``build_view_type()`` uses to build these six types
 as heap types at import time) to unconditionally reject a base whose metaclass
 overrides ``tp_new`` -- which ``ABCMeta`` does, and ``KeysView``/``ItemsView``/
 ``ValuesView`` (via ``MappingView``/``Set``/``Collection``/...) are all
@@ -29,9 +29,9 @@ below are faithful, verbatim ports of ``collections.abc``'s own
 ``MappingView``/``KeysView``/``ItemsView``/``ValuesView`` concrete method
 bodies (and, for the ``Set``-derived Keys/Items views, of ``collections.abc.Set``
 itself), with no ``ABCMeta`` anywhere in their inheritance chain.
-``_c/dict.c`` builds its six view heap types on top of these instead, then
+``_c/dict.c.h`` builds its six view heap types on top of these instead, then
 calls ``.register()`` on the real ``collections.abc.KeysView``/``ItemsView``/
-``ValuesView`` (see ``_c/dict.c``'s ``PyInit_dict()``) so that
+``ValuesView`` (see ``_c/dict.c.h``'s ``pcoll_exec_dict()``) so that
 ``isinstance``/``issubclass`` checks against those stdlib ABCs -- and,
 transitively, against ``collections.abc.Set``/``Collection``/``Iterable``/
 ``Container``/``Sized`` for the Keys/Items views -- keep working exactly as
@@ -43,7 +43,7 @@ never were public ``pcollections.abc.KeysView``-style classes -- the pure
 Python backend uses the real stdlib ABCs directly, and still does), so unlike
 ``_core.py``/``_map.py``/``_set.py``/``_seq.py``'s "base" mixins, there's no
 public counterpart here to keep behaviorally identical; these exist solely
-for ``_c/dict.c`` to build on.
+for ``_c/dict.c.h`` to build on.
 """
 
 from collections.abc import (Set, Iterable)
@@ -58,7 +58,7 @@ class _MappingViewBase:
     Declares the ``_mapping`` slot itself (matching
     ``MappingView.__slots__ = ('_mapping',)``) so that a heap type built
     directly on this class gets exactly the extra storage its C ``dictview_new``
-    (``_c/dict.c``) needs -- see ``_c/dict.c``'s ``build_view_type()``, which
+    (``_c/dict.c.h``) needs -- see ``_c/dict.c.h``'s ``build_view_type()``, which
     reads this class's (dynamically, via ``tp_basicsize``) computed size.
     """
     __slots__ = ('_mapping',)

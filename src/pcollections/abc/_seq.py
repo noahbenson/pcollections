@@ -17,7 +17,7 @@ from ..util import (seqstr, seqcmp)
 
 class _PersistentSequenceBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentSequence``'s concrete
-    method bodies, so that ``pcollections._c.list.plist`` can inherit them
+    method bodies, so that ``pcollections._c._core.plist`` can inherit them
     without inheriting ``ABCMeta`` anywhere in its base chain -- see
     ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
     3.14 rationale.
@@ -25,7 +25,7 @@ class _PersistentSequenceBase(_PersistentBase):
     Like ``PersistentSet``, ``PersistentSequence`` never actually relied on
     any concrete method from ``collections.abc.Sequence`` -- every method
     below was already implemented directly on ``PersistentSequence`` itself,
-    so this is a pure relocation of that existing code (list.c's plist/tlist
+    so this is a pure relocation of that existing code (list.c.h's plist/tlist
     additionally implement their own native ``__eq__``/``__lt__``/etc. via a
     real ``Py_tp_richcompare`` slot, so the comparison methods here are never
     actually reached for the C backend -- but are kept, faithfully, for the
@@ -221,7 +221,9 @@ class _PersistentSequenceBase(_PersistentBase):
         return self.__mul__(value)
     # For pickling:
     def __reduce__(self):
-        return (self.__new__, (type(self), list(self),))
+        # Pickle by class: the class pickles by its qualified name, so a
+        # pickle made with one backend loads with the other.
+        return (type(self), (list(self),))
     def __json__(self):
         from json import dumps
         return dumps(list(self))
@@ -289,7 +291,7 @@ class PersistentSequence(_PersistentSequenceBase, Persistent, Sequence):
 
 class _TransientSequenceBase(Transient):
     """Plain (non-``ABCMeta``) mixin holding ``TransientSequence``'s concrete
-    method bodies, so that ``pcollections._c.list.tlist`` can inherit them
+    method bodies, so that ``pcollections._c._core.tlist`` can inherit them
     without inheriting ``ABCMeta`` anywhere in its base chain -- see
     ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
     3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
@@ -468,7 +470,9 @@ class _TransientSequenceBase(Transient):
         return self.persistent().transient()
     # For pickling.
     def __reduce__(self):
-        return (self.__new__, (type(self), list(self),))
+        # Pickle by class: the class pickles by its qualified name, so a
+        # pickle made with one backend loads with the other.
+        return (type(self), (list(self),))
     def __json__(self):
         from json import dumps
         return dumps(list(self))

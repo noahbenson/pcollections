@@ -41,10 +41,10 @@
 // unless the translation unit is built with /std:c11 or /std:c17, and
 // setup.py deliberately does *not* pass that flag on Windows (see its own
 // comment for why), so `#include <stdatomic.h>` fails outright there. This
-// is exactly the same problem lazy.c's mutex/atomic-flag shim solves for
+// is exactly the same problem core.h's mutex/atomic-flag shim solves for
 // its own <pthread.h>/<stdatomic.h> use (see that file's shim comment for
 // the full rationale) -- this is the same fix, applied here instead of
-// duplicating lazy.c's shim, since every trie node in dict.c/list.c/set.c
+// duplicating core.h's shim, since every trie node in dict.c.h/list.c.h/set.c.h
 // (via amt.h/fat.h) shares this one refcount implementation through this
 // header. `InterlockedExchangeAdd64` is a full-fence (a strictly stronger,
 // and thus safe, superset of the acq_rel ordering the POSIX code below

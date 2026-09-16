@@ -1,15 +1,15 @@
 ///////////////////////////////////////////////////////////////////////////////
-// _c/set.c
+// _c/set.c.h
 // The persistent (pset) and transient (tset) set types, implemented as thin
 // CPython wrappers around a pair of tries: an AMT used as a hash table
 // (hash(elem) -> index) and a FAT used as an insertion-ordered element table
 // (index -> (elem, next_index)).
 //
-// This is deliberately almost the same file as dict.c, with the value half
-// of every (key, value, next) triple removed -- see dict.c's own file header
+// This is deliberately almost the same file as dict.c.h, with the value half
+// of every (key, value, next) triple removed -- see dict.c.h's own file header
 // for the full rationale behind the two-trie design, the tombstone-based
 // deletion scheme, and the compaction policy; only the differences from
-// dict.c are called out in comments here.
+// dict.c.h are called out in comments here.
 //
 //  - `els` (a FAT) is the insertion-ordered element table, dense indices
 //    0, 1, ..., `top`-1. Each leaf is a `SetEntry` (see below): the element
@@ -18,15 +18,15 @@
 //    in ascending index order (fat_firstpath/fat_nextpath) therefore visits
 //    elements in insertion order, exactly like pdict/tdict's own `els`.
 //  - `idx` (an AMT) maps hash(elem) -> the FAT index of the *first* entry in
-//    that hash's collision chain, exactly as in dict.c.
+//    that hash's collision chain, exactly as in dict.c.h.
 //
-// Compaction: identical policy and mechanism to dict.c's -- discard()
+// Compaction: identical policy and mechanism to dict.c.h's -- discard()
 // overwrites the doomed slot with a tombstone (see setentry_is_tombstone()
 // below) rather than actually removing it from `els` (removing a *middle*
 // FAT index would shift every later index down by one, silently
 // invalidating `idx` and every collision-chain `.next` pointer at or past
 // that index -- this is not a hypothetical concern: it is exactly the bug
-// that dict.c's own tombstone scheme was written to fix, confirmed via a
+// that dict.c.h's own tombstone scheme was written to fix, confirmed via a
 // dedicated debug walk during that work). `ndeleted > 1024**2 or
 // ndeleted > 0.3*count` (checked after every mutating op) triggers a
 // from-scratch rebuild of `els`/`idx` with the live elements renumbered
@@ -48,7 +48,7 @@
 // __repr__ -- is inherited for free from PersistentSet/TransientSet (which
 // in turn get their Set-algebra defaults from collections.abc.Set/
 // MutableSet), via the same PyType_FromSpecWithBases heap-type technique
-// dict.c/list.c use. Like pdict/tdict, pset/tset are not subclassable
+// dict.c.h/list.c.h use. Like pdict/tdict, pset/tset are not subclassable
 // (Py_TPFLAGS_BASETYPE left unset) -- note for later: the planned ldict/
 // llist-style lazy subclasses will need BASETYPE added to whichever of
 // these C types they end up inheriting from.
@@ -62,29 +62,7 @@
 
 
 //=============================================================================
-// Initialization.
-
-#include <Python.h>
-#include <string.h>
-#include "uintbits.h"
-// trie.h provides pcoll_atomic_u64_t/PCOLL_ATOMIC_U64_FETCH_*1 (a portable
-// stand-in for <stdatomic.h>, which MSVC doesn't have at all without
-// /std:c11 -- see trie.h's shim comment); this file doesn't call any
-// atomic_* function directly, so it doesn't need its own <stdatomic.h>
-// include (and, on Windows, must not have one).
-#include "trie.h"
-#include "amt.h"
-#include "fat.h"
-
-#ifdef __cplusplus
-#  define EXTC extern "C"
-#else
-#  define EXTC
-#endif
-
-
-//=============================================================================
-// SetEntry: the FAT leaf type for `els`. Mirrors dict.c's DictEntry minus
+// SetEntry: the FAT leaf type for `els`. Mirrors dict.c.h's DictEntry minus
 // the value.
 
 typedef struct {
@@ -97,73 +75,10 @@ typedef struct {
 #define SETIDXLEAFSIZE ((uint8_t)sizeof(trieint_t))
 #define SET_NO_NEXT (~(trieint_t)0)
 
-// Compaction thresholds -- identical to dict.c's.
+// Compaction thresholds -- identical to dict.c.h's.
 #define SET_COMPACT_ABS_THRESHOLD ((Py_ssize_t)1024 * 1024)
 #define SET_COMPACT_FRAC_NUM 3
 #define SET_COMPACT_FRAC_DEN 10
-
-
-//=============================================================================
-// fat_empty()/amt_empty(): see dict.c/list.c for the identical pattern and
-// rationale -- each translation unit that uses these tries defines its own
-// canonical-empty-node singletons, indexed by leafsize.
-
-static Trie_t g_fat_empty_singletons[256];
-static Trie_t g_amt_empty_singletons[256];
-
-Trie_t fat_empty(uint8_t leafsize) {
-   if (!g_fat_empty_singletons[leafsize]) {
-      Trie_t t = fatnode_new(0, leafsize, FAT_MAX_DEPTH, false);
-      t->header.bits = 0;
-      trienode_incref(t);
-      g_fat_empty_singletons[leafsize] = t;
-   }
-   trienode_incref(g_fat_empty_singletons[leafsize]);
-   return g_fat_empty_singletons[leafsize];
-}
-Trie_t amt_empty(uint8_t leafsize) {
-   if (!g_amt_empty_singletons[leafsize]) {
-      // Must go through amtnode_new() (which calls amtnode_init()), not a
-      // bare amtnode_alloc() -- see dict.c's identical comment; an early
-      // version of dict.c's own amt_empty() got this wrong and it was
-      // caught immediately by ASAN as a stack-buffer-overflow the first
-      // time a mutating op was ever exercised.
-      Trie_t t = amtnode_new(0, leafsize, AMT_MAX_DEPTH, 0, false);
-      t->header.bits = 0;
-      trienode_incref(t);
-      g_amt_empty_singletons[leafsize] = t;
-   }
-   trienode_incref(g_amt_empty_singletons[leafsize]);
-   return g_amt_empty_singletons[leafsize];
-}
-
-
-//=============================================================================
-// fat_freeze()/amt_freeze(): recursively mark `a` and every transient node
-// reachable from it as persistent -- see dict.c/list.c for the rationale.
-
-static void fat_freeze(Trie_t a) {
-   if (!trie_is_transient(a))
-      return;
-   trienode_set_transient(a, false);
-   if (!fatnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < FAT_CELLS;
-           bi = trienode_next_bitindex(a, bi))
-         fat_freeze(trienode_subt(a, bi));
-   }
-}
-static void amt_freeze(Trie_t a) {
-   if (!trie_is_transient(a))
-      return;
-   trienode_set_transient(a, false);
-   if (!amtnode_is_twig(a)) {
-      triebits_t bi;
-      for (bi = trienode_first_bitindex(a); bi < TRIEBITS_WIDTH;
-           bi = trienode_next_bitindex(a, bi))
-         amt_freeze(trienode_subt(a, amtnode_bit2cellindex(a, bi)));
-   }
-}
 
 
 //=============================================================================
@@ -171,55 +86,26 @@ static void amt_freeze(Trie_t a) {
 
 // els leaves (SetEntry) own a reference to their key. idx leaves are raw
 // FAT indices -- nothing to refcount.
+// A tombstone's key is NULL.
 static void setentry_incref(void* v) {
    SetEntry* e = (SetEntry*)v;
-   Py_INCREF(e->key);
+   Py_XINCREF(e->key);
 }
 static void setentry_decref(void* v) {
    SetEntry* e = (SetEntry*)v;
-   Py_DECREF(e->key);
+   Py_XDECREF(e->key);
 }
-static void noop_incref(void* v) { (void)v; }
-static void noop_decref(void* v) { (void)v; }
 
 //=============================================================================
-// Tombstones -- see dict.c's much longer comment (near dictentry_is_
+// Tombstones -- see dict.c.h's much longer comment (near dictentry_is_
 // tombstone()) for the full rationale for why deletion must overwrite
-// rather than remove a FAT slot. Identical scheme here, just for SetEntry.
-static PyObject* g_set_dummy = NULL;
-
-// pcollections.util.seqstr -- the real reference string-formatting helper
-// (imported once at PyInit_set time), used by pset_repr/pset_str/
-// tset_repr/tset_str below so they match abc/_set.py's PersistentSet.
-// __str__/__repr__ and TransientSet.__str__/__repr__ exactly.
-static PyObject* g_seqstr = NULL;
-
-// Calls the real pcollections.util.seqstr(seq, maxlen=maxlen) (or plain
-// seqstr(seq) when has_maxlen is false, matching the reference's
-// maxlen=None default); tostr is always left at its default (repr).
-static PyObject* call_seqstr(PyObject* seq, long maxlen, int has_maxlen) {
-   PyObject* args; PyObject* kwargs; PyObject* result;
-   args = PyTuple_Pack(1, seq);
-   if (!args) return NULL;
-   kwargs = PyDict_New();
-   if (!kwargs) { Py_DECREF(args); return NULL; }
-   if (has_maxlen) {
-      PyObject* ml = PyLong_FromLong(maxlen);
-      if (!ml || PyDict_SetItemString(kwargs, "maxlen", ml) < 0) {
-         Py_XDECREF(ml); Py_DECREF(args); Py_DECREF(kwargs); return NULL;
-      }
-      Py_DECREF(ml);
-   }
-   result = PyObject_Call(g_seqstr, args, kwargs);
-   Py_DECREF(args); Py_DECREF(kwargs);
-   return result;
-}
-
+// rather than remove a FAT slot. Identical scheme here, just for SetEntry: a
+// tombstone is an entry whose key is NULL.
 static int setentry_is_tombstone(const SetEntry* e) {
-   return e->key == g_set_dummy;
+   return e->key == NULL;
 }
 static void set_make_tombstone(SetEntry* out) {
-   out->key = g_set_dummy;
+   out->key = NULL;
    out->next = SET_NO_NEXT;
 }
 
@@ -248,7 +134,7 @@ static int set_gc_traverse(Trie_t node, visitproc visit, void* arg) {
 
 
 //=============================================================================
-// Hash-key conversion -- identical to dict.c's dict_hash_key().
+// Hash-key conversion -- identical to dict.c.h's dict_hash_key().
 static int set_hash_key(PyObject* key, trieint_t* out) {
    Py_hash_t h = PyObject_Hash(key);
    if (h == -1 && PyErr_Occurred()) return -1;
@@ -258,9 +144,9 @@ static int set_hash_key(PyObject* key, trieint_t* out) {
 
 
 //=============================================================================
-// Core chain-walking primitive shared by pset and tset. Mirrors dict.c's
+// Core chain-walking primitive shared by pset and tset. Mirrors dict.c.h's
 // dict_chain_find() exactly (including *out_prev being set on BOTH the
-// found and not-found paths -- dict.c's very first version of this function
+// found and not-found paths -- dict.c.h's very first version of this function
 // only set it on the not-found path, which was the root cause of a nasty,
 // near-100%-reproducible corruption bug in pdict_drop()/tdict's __delitem__
 // reading uninitialized stack garbage whenever the target was actually
@@ -301,7 +187,7 @@ static int set_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
 //=============================================================================
 // pset
 
-typedef struct {
+typedef struct PSetObject {
    PyObject_HEAD
    Trie_t idx;           // AMT: hash -> first FAT index. Persistent.
    Trie_t els;           // FAT: index -> SetEntry. Persistent.
@@ -311,21 +197,11 @@ typedef struct {
    Py_hash_t hashcode;    // -1 == not yet computed.
 } PSetObject;
 
-// PSetType/TSetType are heap types (see list.c's PListType for the full
-// rationale): pset/tset need to inherit from the Python-level
-// PersistentSet/TransientSet ABC mixins, and CPython refuses to let a
-// statically allocated type derive from a dynamically allocated one.
-static PyTypeObject* PSetType = NULL;
-static PyTypeObject* TSetType = NULL;
-// The iterator type (for pset/tset's own __iter__) is, by contrast, an
-// ordinary static type: it doesn't need to isinstance() as anything in
-// particular, so there's no reason to pay for the heap-type machinery.
-static PyTypeObject PSetIterType;
-static PyTypeObject TSetIterType;
-static PSetObject* g_pset_empty = NULL;
+// The types and the empty pset live in the module state (core.h).
 
 static int pset_traverse(PSetObject* self, visitproc visit, void* arg) {
-   return set_gc_traverse(self->els, visit, arg);
+   PCOLL_VISIT_TYPE(self);
+   return self->els ? set_gc_traverse(self->els, visit, arg) : 0;
 }
 static int pset_clear(PSetObject* self) {
    Trie_t els = self->els, idx = self->idx;
@@ -335,9 +211,12 @@ static int pset_clear(PSetObject* self) {
    return 0;
 }
 static void pset_dealloc(PSetObject* self) {
+   // Heap-type instances own a reference to their type.
+   PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    pset_clear(self);
    PyObject_GC_Del(self);
+   Py_DECREF(tp);
 }
 static Py_ssize_t pset_length(PSetObject* self) {
    return self->count;
@@ -346,17 +225,17 @@ static Py_ssize_t pset_length(PSetObject* self) {
 // Takes ownership of the one reference to `els`/`idx` that callers already
 // hold, wrapping them in a new pset -- EXCEPT that a 0-element result
 // always collapses to the canonical empty pset singleton instead (mirrors
-// pdict_wrap()'s identical convention in dict.c).
+// pdict_wrap()'s identical convention in dict.c.h).
 static PyObject* pset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
                             Py_ssize_t count, Py_ssize_t ndeleted) {
    PSetObject* self;
    if (count == 0) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
-      Py_INCREF(g_pset_empty);
-      return (PyObject*)g_pset_empty;
+      Py_INCREF(ST(g_pset_empty));
+      return (PyObject*)ST(g_pset_empty);
    }
-   self = PyObject_GC_New(PSetObject, PSetType);
+   self = PyObject_GC_New(PSetObject, ST(PSetType));
    if (!self) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
@@ -375,7 +254,7 @@ static PyObject* pset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
 // Rebuilds a fresh, fully transient (els, idx) pair containing exactly the
 // live entries currently in (els, idx), renumbered 0..count-1 in their
 // original insertion-order sequence. Consumes neither input. Mirrors
-// dict.c's dict_rebuild_compacted() exactly, minus the value half.
+// dict.c.h's dict_rebuild_compacted() exactly, minus the value half.
 static int set_rebuild_compacted(Trie_t els, Trie_t idx,
                                   Trie_t* out_els, Trie_t* out_idx,
                                   Py_ssize_t* out_top) {
@@ -448,8 +327,8 @@ static PyObject* pset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       return NULL;
    }
    if (n == 0) {
-      Py_INCREF(g_pset_empty);
-      return (PyObject*)g_pset_empty;
+      Py_INCREF(ST(g_pset_empty));
+      return (PyObject*)ST(g_pset_empty);
    } else if (n == 1) {
       return pset_new_dispatch(PyTuple_GET_ITEM(args, 0));
    } else {
@@ -482,7 +361,7 @@ static Py_hash_t pset_hash(PSetObject* self) {
    Py_DECREF(h);
    if (result == -1) return -1;
    // Matches PersistentSet.__hash__'s `hash(frozenset(self)) + 1` exactly
-   // (dict.c's analogous pdict_hash uses +2, matching PersistentMapping's
+   // (dict.c.h's analogous pdict_hash uses +2, matching PersistentMapping's
    // own convention -- these offsets exist upstream so that, e.g., an empty
    // pset and an empty pdict don't collide with frozenset() itself).
    result += 1;
@@ -527,7 +406,7 @@ static PyObject* pset_add(PSetObject* self, PyObject* obj) {
          // fat_anditem() is non-consuming (leaves its input tree untouched
          // and independently valid), so the intermediate `prev_els` result
          // from the append above must be explicitly decref'd once we're
-         // done reading from it -- see dict.c's pdict_set() for the
+         // done reading from it -- see dict.c.h's pdict_set() for the
          // identical concern.
          prev_els = new_els;
          new_els = fat_anditem(prev_els, prev, &patched, setentry_incref);
@@ -620,8 +499,8 @@ have_new_els:
 
 static PyObject* pset_clear_method(PSetObject* self, PyObject* Py_UNUSED(ignored)) {
    (void)self;
-   Py_INCREF(g_pset_empty);
-   return (PyObject*)g_pset_empty;
+   Py_INCREF(ST(g_pset_empty));
+   return (PyObject*)ST(g_pset_empty);
 }
 
 static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored));
@@ -632,7 +511,7 @@ static PyObject* pset_iter(PSetObject* self);
 // only by content, since seqstr on a non-Mapping just joins repr()s with no
 // ": "), __str__ truncated at 60 chars, __repr__ not.
 static PyObject* pset_repr(PSetObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 0, 0);
+   PyObject* s = call_seqstr((PyObject*)self, 0, 0, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{|%U|}", s);
@@ -640,7 +519,7 @@ static PyObject* pset_repr(PSetObject* self) {
    return result;
 }
 static PyObject* pset_str(PSetObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 60, 1);
+   PyObject* s = call_seqstr((PyObject*)self, 60, 1, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{|%U|}", s);
@@ -678,7 +557,7 @@ static PyType_Slot pset_slots[] = {
    {0, NULL}
 };
 static PyType_Spec pset_spec = {
-   .name = "pcollections._c.set.pset",
+   .name = "pcollections.pset",
    .basicsize = sizeof(PSetObject),
    .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
@@ -697,13 +576,14 @@ typedef struct {
    Py_ssize_t count;
    Py_ssize_t ndeleted;
    PyObject* orig;          // cached pset (owned ref), or NULL -- see
-                            // TDictObject's matching field in dict.c for the
+                            // TDictObject's matching field in dict.c.h for the
                             // exact caching/invalidation convention.
 } TSetObject;
 
 static int tset_traverse(TSetObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->orig);
-   return set_gc_traverse(self->els, visit, arg);
+   return self->els ? set_gc_traverse(self->els, visit, arg) : 0;
 }
 static int tset_clear(TSetObject* self) {
    Trie_t els = self->els, idx = self->idx;
@@ -715,9 +595,11 @@ static int tset_clear(TSetObject* self) {
    return 0;
 }
 static void tset_dealloc(TSetObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    tset_clear(self);
    PyObject_GC_Del(self);
+   Py_DECREF(tp);
 }
 static Py_ssize_t tset_length(TSetObject* self) {
    return self->count;
@@ -725,7 +607,7 @@ static Py_ssize_t tset_length(TSetObject* self) {
 static PyObject* tset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
                             Py_ssize_t count, Py_ssize_t ndeleted,
                             PyObject* orig) {
-   TSetObject* self = PyObject_GC_New(TSetObject, TSetType);
+   TSetObject* self = PyObject_GC_New(TSetObject, ST(TSetType));
    if (!self) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
@@ -748,7 +630,7 @@ static PyObject* tset_empty(void) {
    return tset_wrap(fat_empty(SETELSLEAFSIZE), amt_empty(SETIDXLEAFSIZE), 0, 0, 0, NULL);
 }
 
-// Maybe-compact a tset in place after a mutation -- mirrors dict.c's
+// Maybe-compact a tset in place after a mutation -- mirrors dict.c.h's
 // tdict_maybe_compact() exactly.
 static int tset_maybe_compact(TSetObject* self) {
    Trie_t c_els, c_idx; Py_ssize_t c_top;
@@ -888,14 +770,14 @@ static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       return NULL;
    }
    arg = PyTuple_GET_ITEM(args, 0);
-   if (Py_TYPE(arg) == TSetType) {
+   if (Py_TYPE(arg) == ST(TSetType)) {
       // tset(some_tset): share a frozen snapshot of that tset's current
       // (els, idx) -- not the tset's own live, still-mutable trees -- as
       // the starting point for a brand-new, independent transient session.
-      // Also propagates `orig`, exactly mirroring dict.c's tdict_new().
+      // Also propagates `orig`, exactly mirroring dict.c.h's tdict_new().
       // (Note: the reference _set.py's tset.__new__ doesn't special-case a
       // tset argument at all -- it just falls through to addall(), an O(n)
-      // rebuild -- but dict.c's tdict.__new__ DOES have this fast path,
+      // rebuild -- but dict.c.h's tdict.__new__ DOES have this fast path,
       // matching _dict.py's own tdict.__new__ exactly. Adding it here too
       // keeps pset/tset "mostly identical to the dict types" as asked.)
       TSetObject* t = (TSetObject*)arg;
@@ -908,7 +790,7 @@ static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       Py_XINCREF(orig);
       return tset_wrap(els, idx, t->top, t->count, t->ndeleted, orig);
    }
-   if (Py_TYPE(arg) == PSetType) {
+   if (Py_TYPE(arg) == ST(PSetType)) {
       // tset(some_pset): exactly pset.transient()'s own O(1) sharing logic.
       return pset_transient((PSetObject*)arg, NULL);
    }
@@ -918,8 +800,8 @@ static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
 static PyObject* tset_persistent(TSetObject* self, PyObject* Py_UNUSED(ignored)) {
    Trie_t els, idx;
    if (self->count == 0) {
-      Py_INCREF(g_pset_empty);
-      return (PyObject*)g_pset_empty;
+      Py_INCREF(ST(g_pset_empty));
+      return (PyObject*)ST(g_pset_empty);
    }
    if (self->orig) {
       Py_INCREF(self->orig);
@@ -938,7 +820,7 @@ static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored)) 
    trienode_incref(self->idx);
    // tset_wrap()'s `orig` parameter takes ownership of (does not itself
    // incref) the reference it's handed -- self must be incref'd here,
-   // exactly as pdict_transient() does in dict.c, or the returned tset ends
+   // exactly as pdict_transient() does in dict.c.h, or the returned tset ends
    // up holding an unowned pointer to self (a use-after-free/double-free on
    // `self` once the tset is later deallocated).
    Py_INCREF(self);
@@ -963,9 +845,9 @@ static PyObject* tset_iter(TSetObject* self);
 
 // Matches abc/_set.py's TransientSet.__repr__/__str__: both use the
 // "{<...>}" delimiter (no repr/str asymmetry here, unlike TransientMapping
-// in dict.c).
+// in dict.c.h).
 static PyObject* tset_repr(TSetObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 0, 0);
+   PyObject* s = call_seqstr((PyObject*)self, 0, 0, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{<%U>}", s);
@@ -973,7 +855,7 @@ static PyObject* tset_repr(TSetObject* self) {
    return result;
 }
 static PyObject* tset_str(TSetObject* self) {
-   PyObject* s = call_seqstr((PyObject*)self, 60, 1);
+   PyObject* s = call_seqstr((PyObject*)self, 60, 1, NULL);
    PyObject* result;
    if (!s) return NULL;
    result = PyUnicode_FromFormat("{<%U>}", s);
@@ -982,7 +864,7 @@ static PyObject* tset_str(TSetObject* self) {
 }
 
 // Matches abc/_set.py's tset.empty being a *classmethod* (same pattern as
-// tdict_empty_classmethod in dict.c). pset/tset don't support subclassing
+// tdict_empty_classmethod in dict.c.h). pset/tset don't support subclassing
 // (no Py_TPFLAGS_BASETYPE on their specs), so `cls` here is always exactly
 // TSetType and this is equivalent to just calling tset_empty() -- but it's
 // written to take `cls` anyway for parity with tdict/tlist's classmethod
@@ -1024,7 +906,7 @@ static PyType_Slot tset_slots[] = {
    {0, NULL}
 };
 static PyType_Spec tset_spec = {
-   .name = "pcollections._c.set.tset",
+   .name = "pcollections.tset",
    .basicsize = sizeof(TSetObject),
    .itemsize = 0,
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
@@ -1032,12 +914,12 @@ static PyType_Spec tset_spec = {
 };
 
 // pset_new_dispatch()'s general-argument routing is defined down here, now
-// that tset_new()/tset_persistent() both exist -- mirrors dict.c's
+// that tset_new()/tset_persistent() both exist -- mirrors dict.c.h's
 // pdict_new_dispatch() exactly.
 static PyObject* pset_new_dispatch(PyObject* arg) {
    PyObject* t;
    PyObject* result;
-   if (Py_TYPE(arg) == TSetType) {
+   if (Py_TYPE(arg) == ST(TSetType)) {
       // pset(some_tset): efficiently take a persistent snapshot -- reuses
       // tset_persistent() directly (rather than duplicating its `orig`-
       // cache-check logic) so the cache benefit applies here too, which is
@@ -1045,7 +927,7 @@ static PyObject* pset_new_dispatch(PyObject* arg) {
       // bypasses `tset.persistent()`'s cache and always rebuilds).
       return tset_persistent((TSetObject*)arg, NULL);
    }
-   if (Py_TYPE(arg) == PSetType) {
+   if (Py_TYPE(arg) == ST(PSetType)) {
       // pset(some_pset): already the right (immutable) type -- psets are
       // never subclassed (Py_TPFLAGS_BASETYPE is unset), so this is always
       // exactly a no-op copy.
@@ -1063,7 +945,7 @@ static PyObject* pset_new_dispatch(PyObject* arg) {
 
 //=============================================================================
 // Iterator type. Both pset and tset walk `els` directly via fat_firstpath/
-// fat_nextpath, skipping tombstones -- mirrors dict.c's DictIterObject,
+// fat_nextpath, skipping tombstones -- mirrors dict.c.h's DictIterObject,
 // with no "mode" needed since sets only ever iterate their elements.
 
 typedef struct {
@@ -1075,16 +957,19 @@ typedef struct {
 } SetIterObject;
 
 static void setiter_dealloc(SetIterObject* self) {
+   PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    Py_XDECREF(self->owner);
    PyObject_GC_Del(self);
+   Py_DECREF(tp);
 }
 static int setiter_traverse(SetIterObject* self, visitproc visit, void* arg) {
+   PCOLL_VISIT_TYPE(self);
    Py_VISIT(self->owner);
    return 0;
 }
 static Trie_t setiter_owner_els(SetIterObject* self) {
-   if (Py_TYPE(self->owner) == PSetType)
+   if (PyObject_TypeCheck(self->owner, ST(PSetType)))
       return ((PSetObject*)self->owner)->els;
    else
       return ((TSetObject*)self->owner)->els;
@@ -1118,179 +1003,61 @@ static PyObject* make_setiter(PyTypeObject* itertype, PyObject* owner_set) {
    return (PyObject*)it;
 }
 
-static PyTypeObject PSetIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.set.pset_iterator",
-   .tp_basicsize = sizeof(SetIterObject),
-   .tp_dealloc = (destructor)setiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)setiter_traverse,
-   .tp_iter = setiter_self,
-   .tp_iternext = (iternextfunc)setiter_next,
+static PyType_Slot setiter_slots[] = {
+   {Py_tp_dealloc, (void*)setiter_dealloc},
+   {Py_tp_traverse, (void*)setiter_traverse},
+   {Py_tp_iter, (void*)setiter_self},
+   {Py_tp_iternext, (void*)setiter_next},
+   {0, NULL}
 };
-static PyTypeObject TSetIterType = {
-   PyVarObject_HEAD_INIT(NULL, 0)
-   .tp_name = "pcollections._c.set.tset_iterator",
-   .tp_basicsize = sizeof(SetIterObject),
-   .tp_dealloc = (destructor)setiter_dealloc,
-   .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
-   .tp_traverse = (traverseproc)setiter_traverse,
-   .tp_iter = setiter_self,
-   .tp_iternext = (iternextfunc)setiter_next,
+static PyType_Spec psetiter_spec = {
+   .name = "pcollections._c._core.pset_iterator",
+   .basicsize = sizeof(SetIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = setiter_slots,
+};
+static PyType_Spec tsetiter_spec = {
+   .name = "pcollections._c._core.tset_iterator",
+   .basicsize = sizeof(SetIterObject),
+   .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | PCOLL_TPFLAGS_INTERNAL,
+   .slots = setiter_slots,
 };
 
 static PyObject* pset_iter(PSetObject* self) {
-   return make_setiter(&PSetIterType, (PyObject*)self);
+   return make_setiter(ST(PSetIterType), (PyObject*)self);
 }
 static PyObject* tset_iter(TSetObject* self) {
-   return make_setiter(&TSetIterType, (PyObject*)self);
+   return make_setiter(ST(TSetIterType), (PyObject*)self);
 }
 
 
 //=============================================================================
-// Module definition.
+// Module execution.
 
-static PyModuleDef set_module = {
-   PyModuleDef_HEAD_INIT,
-   "pcollections._c.set",
-   "C implementations of pset and tset, backed by an AMT hash table and a"
-   " FAT element table.",
-   -1,
-   NULL, NULL, NULL, NULL, NULL
-};
-
-// Builds the heap type described by `spec`, inheriting from the Python-level
-// PersistentSet/TransientSet ABC mixin class named `base_name` (looked up on
-// `abc_module`) -- see dict.c's build_abc_subtype() for the full rationale;
-// duplicated here (rather than shared) since this is a separate translation
-// unit/module. Returns a new reference, or NULL (with an exception set) on
-// failure.
-static PyTypeObject* build_abc_subtype(PyType_Spec* spec, PyObject* abc_module,
-                                        const char* base_name) {
-   PyObject* base;
-   PyObject* bases;
-   PyObject* result;
-   PyTypeObject* base_t;
-   PyTypeObject* result_t;
-   base = PyObject_GetAttrString(abc_module, base_name);
-   if (!base) return NULL;
-   if (!PyType_Check(base)) {
-      Py_DECREF(base);
-      PyErr_Format(PyExc_TypeError, "pcollections.abc.%s is not a type",
-                   base_name);
-      return NULL;
-   }
-   base_t = (PyTypeObject*)base;
-   bases = PyTuple_Pack(1, base);
-   Py_DECREF(base);
-   if (!bases) return NULL;
-   result = PyType_FromSpecWithBases(spec, bases);
-   Py_DECREF(bases);
-   if (!result) return NULL;
-   result_t = (PyTypeObject*)result;
-   // pset/tset both rely on PersistentSet/TransientSet's own tp_richcompare
-   // (== collections.abc.Set's __eq__/__lt__/etc.) being inherited, without
-   // providing it natively. See dict.c's build_abc_subtype() for the full
-   // explanation of why this MUST be a direct field assignment here, after
-   // construction, rather than an entry in `spec`'s slots list: listing
-   // Py_tp_richcompare there causes CPython to also synthesize a matching
-   // __eq__/__ne__/... wrapper descriptor directly in this new type's own
-   // tp_dict, and since the generic slot_tp_richcompare dispatcher looks up
-   // __eq__ via the *instance's actual type* MRO, it finds that newly
-   // synthesized wrapper first and calls straight back into tp_richcompare
-   // -- infinite C-level recursion with no Python frames ever created.
-   //
-   // tp_hash is NOT touched here: pset provides its own native tp_hash
-   // (pset_hash, via a real Py_tp_hash slot in pset_spec -- a concrete
-   // function, not a generic MRO-dispatching one, so it's in no danger of
-   // this same self-reference loop and must not be overwritten), while tset
-   // provides none of its own and needs TransientSet's tp_hash patched in
-   // separately -- see PyInit_set()'s explicit fixup for that, right after
-   // this function builds TSetType. NOTE (confirmed by reading abc/_set.py
-   // directly): unlike TransientMapping -- which relies on MutableMapping's
-   // `__hash__ = None` to stay unhashable, exactly like a plain dict --
-   // TransientSet.__hash__ is a real, concrete function (the same
-   // `hash(frozenset(self)) + 1` formula as PersistentSet.__hash__, fully
-   // generic over just __iter__). So this patch actually makes tset
-   // *hashable*, with a hash equal to the corresponding pset's -- that
-   // asymmetry with tdict is intentional in the given Python reference, not
-   // a bug here, and set_unit.py has a regression test pinning it down.
-   result_t->tp_richcompare = base_t->tp_richcompare;
-   return result_t;
-}
-
-// Registers `concrete` as a virtual subclass (via .register()) of the type
-// named `attr_name` on `module`. See dict.c's twin of this function for the
-// full rationale (isinstance()/issubclass() compatibility after pset/tset
-// switched from inheriting PersistentSet/TransientSet directly to inheriting
-// their plain, non-ABCMeta _PersistentSetBase/_TransientSetBase mixins --
-// necessary on CPython 3.14, see pcollections.abc._core's _PersistentBase
-// docstring). Returns 0 on success, -1 (with an exception set) on failure.
-static int register_virtual_subclass(PyObject* module, const char* attr_name,
-                                      PyTypeObject* concrete) {
-   PyObject* abc_cls;
-   PyObject* result;
-   abc_cls = PyObject_GetAttrString(module, attr_name);
-   if (!abc_cls) return -1;
-   result = PyObject_CallMethod(abc_cls, "register", "O", (PyObject*)concrete);
-   Py_DECREF(abc_cls);
-   if (!result) return -1;
-   Py_DECREF(result);
-   return 0;
-}
-
-PyMODINIT_FUNC PyInit_set(void) {
-   PyObject* m;
-   PyObject* pcoll_abc_module;
+// Creates pset, tset, their iterators, and the empty pset, and adds the
+// public types to module `m`.
+static int pcoll_exec_set(PyObject* m, pcoll_state* st) {
+   PyObject* abc = NULL;
    PSetObject* empty;
+   int rc = -1;
 
-   // The tombstone sentinel -- see the comment near setentry_is_tombstone()
-   // above. A plain object() instance works fine: it's never exposed to
-   // Python code and is compared only by identity.
-   g_set_dummy = PyObject_CallObject((PyObject*)&PyBaseObject_Type, NULL);
-   if (!g_set_dummy) return NULL;
+   abc = PyImport_ImportModule("pcollections.abc");
+   if (!abc) goto done;
+   st->PSetType = build_abc_subtype(m, &pset_spec, abc, "_PersistentSetBase", 1);
+   if (!st->PSetType) goto done;
+   st->TSetType = build_abc_subtype(m, &tset_spec, abc, "_TransientSetBase", 1);
+   if (!st->TSetType) goto done;
+   if (register_virtual_subclass(abc, "PersistentSet", st->PSetType) < 0 ||
+       register_virtual_subclass(abc, "TransientSet", st->TSetType) < 0)
+      goto done;
+   // tset is unhashable, like its base.
+   st->TSetType->tp_hash = st->TSetType->tp_base->tp_hash;
+   if (!(st->PSetIterType = pcoll_new_internal_type(m, &psetiter_spec)) ||
+       !(st->TSetIterType = pcoll_new_internal_type(m, &tsetiter_spec)))
+      goto done;
 
-   // pset/tset are built on top of pcollections.abc's plain (non-ABCMeta)
-   // _PersistentSetBase/_TransientSetBase mixins, then .register()'ed as
-   // virtual subclasses of the real PersistentSet/TransientSet -- see
-   // dict.c's PyInit_dict() for the fuller version of this same comment;
-   // the CPython 3.14 rationale is identical here.
-   pcoll_abc_module = PyImport_ImportModule("pcollections.abc");
-   if (!pcoll_abc_module) return NULL;
-   PSetType = build_abc_subtype(&pset_spec, pcoll_abc_module, "_PersistentSetBase");
-   TSetType = build_abc_subtype(&tset_spec, pcoll_abc_module, "_TransientSetBase");
-   if (!PSetType || !TSetType) { Py_DECREF(pcoll_abc_module); return NULL; }
-   if (register_virtual_subclass(pcoll_abc_module, "PersistentSet", PSetType) < 0 ||
-       register_virtual_subclass(pcoll_abc_module, "TransientSet", TSetType) < 0) {
-      Py_DECREF(pcoll_abc_module); return NULL;
-   }
-   Py_DECREF(pcoll_abc_module);
-   // tset provides no tp_hash of its own at all (unlike pset) -- patch in
-   // TransientSet's own tp_hash directly, the same safe way
-   // build_abc_subtype() patches tp_richcompare (a concrete function, not a
-   // generic MRO-dispatching one, so this isn't at risk of that
-   // self-reference loop, but going through spec slots isn't needed either
-   // way). Note this makes tset *hashable* (see the longer comment in
-   // build_abc_subtype() above) -- TransientSet.__hash__ is a real function
-   // in abc/_set.py, not the `None` that MutableMapping-style unhashability
-   // would give it.
-   TSetType->tp_hash = ((PyTypeObject*)TSetType)->tp_base->tp_hash;
-
-   {
-      PyObject* util_module = PyImport_ImportModule("pcollections.util");
-      if (!util_module) return NULL;
-      g_seqstr = PyObject_GetAttrString(util_module, "seqstr");
-      Py_DECREF(util_module);
-      if (!g_seqstr) return NULL;
-   }
-
-   if (PyType_Ready(&PSetIterType) < 0) return NULL;
-   if (PyType_Ready(&TSetIterType) < 0) return NULL;
-
-   // Build the canonical empty pset singleton by hand (pset_wrap() itself
-   // depends on it already existing, so it can't be used here).
-   empty = PyObject_GC_New(PSetObject, PSetType);
-   if (!empty) return NULL;
+   empty = PyObject_GC_New(PSetObject, st->PSetType);
+   if (!empty) goto done;
    empty->els = fat_empty(SETELSLEAFSIZE);
    empty->idx = amt_empty(SETIDXLEAFSIZE);
    empty->top = 0;
@@ -1298,23 +1065,15 @@ PyMODINIT_FUNC PyInit_set(void) {
    empty->ndeleted = 0;
    empty->hashcode = -1;
    PyObject_GC_Track(empty);
-   g_pset_empty = empty;
+   st->g_pset_empty = empty;
+   if (pcoll_type_setattr(st->PSetType, "empty", (PyObject*)empty) < 0)
+      goto done;
 
-   if (PyDict_SetItemString(PSetType->tp_dict, "empty",
-                            (PyObject*)g_pset_empty) < 0)
-      return NULL;
-   PyType_Modified(PSetType);
-
-   m = PyModule_Create(&set_module);
-   if (!m) return NULL;
-
-   Py_INCREF(PSetType);
-   if (PyModule_AddObject(m, "pset", (PyObject*)PSetType) < 0) {
-      Py_DECREF(PSetType); Py_DECREF(m); return NULL;
-   }
-   Py_INCREF(TSetType);
-   if (PyModule_AddObject(m, "tset", (PyObject*)TSetType) < 0) {
-      Py_DECREF(TSetType); Py_DECREF(m); return NULL;
-   }
-   return m;
+   if (pcoll_module_add(m, "pset", (PyObject*)st->PSetType) < 0 ||
+       pcoll_module_add(m, "tset", (PyObject*)st->TSetType) < 0)
+      goto done;
+   rc = 0;
+done:
+   Py_XDECREF(abc);
+   return rc;
 }

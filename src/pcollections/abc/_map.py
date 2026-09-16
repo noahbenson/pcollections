@@ -15,7 +15,7 @@ from ..util import (seqstr)
 
 class _PersistentMappingBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentMapping``'s concrete
-    method bodies, so that ``pcollections._c.dict.pdict`` can inherit them
+    method bodies, so that ``pcollections._c._core.pdict`` can inherit them
     without inheriting ``ABCMeta`` anywhere in its base chain -- see
     ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
     3.14 rationale.
@@ -172,7 +172,9 @@ class _PersistentMappingBase(_PersistentBase):
             t[k] = v
         return type(self)(t)
     def __reduce__(self):
-        return (self.__new__, (type(self), list(self.items()),))
+        # Pickle by class: the class pickles by its qualified name, so a
+        # pickle made with one backend loads with the other.
+        return (type(self), (list(self.items()),))
     def __json__(self):
         from json import dumps
         return dumps(dict(self))
@@ -241,7 +243,7 @@ class PersistentMapping(_PersistentMappingBase, Mapping, Persistent):
 
 class _TransientMappingBase(Transient):
     """Plain (non-``ABCMeta``) mixin holding ``TransientMapping``'s concrete
-    method bodies, so that ``pcollections._c.dict.tdict`` can inherit them
+    method bodies, so that ``pcollections._c._core.tdict`` can inherit them
     without inheriting ``ABCMeta`` anywhere in its base chain -- see
     ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
     3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
@@ -341,7 +343,9 @@ class _TransientMappingBase(Transient):
         return self.persistent().transient()
     # The below handle pickling cases.
     def __reduce__(self):
-        return (self.__new__, (type(self), list(self.items()),))
+        # Pickle by class: the class pickles by its qualified name, so a
+        # pickle made with one backend loads with the other.
+        return (type(self), (list(self.items()),))
     def __json__(self):
         from json import dumps
         return dumps(dict(self))

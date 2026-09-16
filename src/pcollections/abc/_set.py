@@ -15,7 +15,7 @@ from ..util import (setcmp, seqstr)
 
 class _PersistentSetBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentSet``'s concrete
-    method bodies, so that ``pcollections._c.set.pset`` can inherit them
+    method bodies, so that ``pcollections._c._core.pset`` can inherit them
     without inheriting ``ABCMeta`` anywhere in its base chain -- see
     ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
     3.14 rationale.
@@ -242,7 +242,9 @@ class _PersistentSetBase(_PersistentBase):
         else:
             return type(self)(t)
     def __reduce__(self):
-        return (self.__new__, (type(self), list(self),))
+        # Pickle by class: the class pickles by its qualified name, so a
+        # pickle made with one backend loads with the other.
+        return (type(self), (list(self),))
 
 
 #===============================================================================
@@ -308,7 +310,7 @@ class PersistentSet(_PersistentSetBase, Set, Persistent):
 
 class _TransientSetBase(Transient):
     """Plain (non-``ABCMeta``) mixin holding ``TransientSet``'s concrete
-    method bodies, so that ``pcollections._c.set.tset`` can inherit them
+    method bodies, so that ``pcollections._c._core.tset`` can inherit them
     without inheriting ``ABCMeta`` anywhere in its base chain -- see
     ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
     3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
@@ -537,7 +539,9 @@ class _TransientSetBase(Transient):
         """Returns a copy of the transient set."""
         return self.persistent().transient()
     def __reduce__(self):
-        return (self.__new__, (type(self), list(self),))
+        # Pickle by class: the class pickles by its qualified name, so a
+        # pickle made with one backend loads with the other.
+        return (type(self), (list(self),))
 
 
 #===============================================================================

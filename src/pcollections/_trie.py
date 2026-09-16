@@ -60,7 +60,7 @@
 # The one place AMT and FAT still differ, deliberately, is key normalization
 # (see AMT._normalize_key()/FAT._normalize_key() below) -- kept as a real,
 # distinct hook (not just a naming difference) so the two remain genuinely
-# separate types, matching dict.c's own `idx` (AMT) vs `els` (FAT) roles,
+# separate types, matching dict.c.h's own `idx` (AMT) vs `els` (FAT) roles,
 # and so a future divergence in behavior (if one is ever needed) has
 # somewhere to live without disturbing the other.
 #

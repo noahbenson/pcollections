@@ -41,15 +41,15 @@ def _load_python():
 
 
 def _load_c():
-    from .._c import dict as dm, list as lm, set as sm, lazy as zm
+    from .._c import _core as c
     return {
-        'pdict': dm.pdict, 'tdict': dm.tdict,
-        'plist': lm.plist, 'tlist': lm.tlist,
-        'pset': sm.pset, 'tset': sm.tset,
-        'lazy': zm.lazy, 'ldict': zm.ldict, 'tldict': zm.tldict,
-        'llist': zm.llist, 'tllist': zm.tllist,
-        'LazyError': zm.LazyError, 'lazy_error_unwrap': zm.lazy_error_unwrap,
-        'unlazy': zm.unlazy, 'holdlazy': zm.holdlazy,
+        'pdict': c.pdict, 'tdict': c.tdict,
+        'plist': c.plist, 'tlist': c.tlist,
+        'pset': c.pset, 'tset': c.tset,
+        'lazy': c.lazy, 'ldict': c.ldict, 'tldict': c.tldict,
+        'llist': c.llist, 'tllist': c.tllist,
+        'LazyError': c.LazyError, 'lazy_error_unwrap': c.lazy_error_unwrap,
+        'unlazy': c.unlazy, 'holdlazy': c.holdlazy,
     }
 
 
@@ -58,15 +58,8 @@ def _discover():
     try:
         backends['c'] = _load_c()
     except (ImportError, TypeError):
-        # The compiled extension modules aren't available in this
-        # environment (not built, or built for a different Python/platform),
-        # or are built but unusable on this interpreter -- e.g. CPython
-        # 3.14 raises TypeError (not ImportError) from PyInit_dict() and
-        # friends, since it now rejects the heap types _c/dict.c (etc.)
-        # build on top of pcollections.abc's ABCMeta-based mixins; see
-        # pcollections/__init__.py's _load_c_backend() docstring for the
-        # full explanation -- either way, the suite simply runs python-only
-        # in that case, matching pcollections/__init__.py's own fallback.
+        # No usable C backend (see pcollections/__init__.py); test the
+        # pure-Python backend alone.
         pass
     return backends
 

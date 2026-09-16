@@ -386,7 +386,7 @@ class TestTrieThreadStress(unittest.TestCase):
 class TestDictSetCompaction(unittest.TestCase):
     """Directly exercises pdict/tdict's and pset/tset's tombstone-based
     deletion + periodic compaction (pcollections/_compact.py), mirroring
-    dict_should_compact()/dict_rebuild_compacted() in _c/dict.c -- see that
+    dict_should_compact()/dict_rebuild_compacted() in _c/dict.c.h -- see that
     file's header comment and _compact.py's own docstring. This targets the
     pure-Python implementation specifically (via pcollections._dict/_set
     directly, bypassing pcollections/__init__.py's C-first-if-available
