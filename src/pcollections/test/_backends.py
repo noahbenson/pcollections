@@ -74,6 +74,28 @@ def _discover():
 BACKENDS = _discover()
 
 
+def known_failure(*backend_names):
+    """Marks a test method as a known failure for the named backends.
+
+    ``make_tests`` wraps the method in ``unittest.expectedFailure`` for each
+    listed backend, so the suite stays green while a bug is open. When the
+    bug is fixed the test reports an "unexpected success", which fails the
+    run and signals that the marker should be removed.
+    """
+    def _mark(fn):
+        fn._known_failures = frozenset(backend_names)
+        return fn
+    return _mark
+
+
+def _copy_function(fn):
+    import functools
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return _wrapper
+
+
 def make_tests(base_name, mixin_cls, module_globals):
     """Builds one ``unittest.TestCase`` subclass of ``mixin_cls`` per
     available backend, named ``f"{base_name}_{backend}"``, with the
@@ -83,7 +105,7 @@ def make_tests(base_name, mixin_cls, module_globals):
     that ``unittest`` discovery picks them up.
     """
     import inspect
-    from unittest import TestCase
+    from unittest import TestCase, expectedFailure
     made = {}
     for name, backend in BACKENDS.items():
         cls_name = f"{base_name}_{name}"
@@ -97,6 +119,14 @@ def make_tests(base_name, mixin_cls, module_globals):
             k: (staticmethod(v) if inspect.isfunction(v) else v)
             for (k, v) in backend.items()
         }
+        attrs['backend_name'] = name
+        for attr in dir(mixin_cls):
+            fn = getattr(mixin_cls, attr)
+            if name in getattr(fn, '_known_failures', ()):
+                # expectedFailure() marks the function object it is given,
+                # so wrap first: the mixin's function is shared by every
+                # backend's class.
+                attrs[attr] = expectedFailure(_copy_function(fn))
         cls = type(cls_name, (mixin_cls, TestCase), attrs)
         cls.__module__ = module_globals.get('__name__', mixin_cls.__module__)
         module_globals[cls_name] = cls

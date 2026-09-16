@@ -462,11 +462,27 @@ static inline Trie_t fatnode_set(Trie_t a,
    // There's always room for `bi` -- every FAT node has all FAT_CELLS cells
    // physically present from the moment it's allocated.
    if (a->header.bits & bit) {
-      // We're overwriting an existing cell; deref whatever was there first.
-      if (!is_twig)
+      // We're overwriting an existing cell.
+      if (!is_twig) {
          fatnode_decref(trienode_subt(a, bi), leaf_decref);
-      else if (leaf_decref)
-         (*leaf_decref)(trienode_leaf(a, bi));
+         trienode_set_subt(a, bi, (Trie_t)val);
+      } else {
+      // Overwrite a twig leaf. The new leaf's references are taken *before*
+      // the old leaf's are released, and the old leaf is released only after
+      // the cell already holds the new one: the two leaves may share
+      // referents (tdict/tset rewrite an entry by copying it and changing one
+      // field, so the key object is in both), and releasing first can free an
+      // object the new leaf still needs. Releasing last also means any
+      // finalizer the release triggers sees a consistent node.
+         char old[256];  // leafsize is a uint8_t, so this always fits.
+         memcpy(old, trienode_leaf(a, bi), a->header.leafsize);
+         if (leaf_incref)
+            (*leaf_incref)(val);
+         trienode_set_leaf(a, bi, val);
+         if (leaf_decref)
+            (*leaf_decref)(old);
+      }
+      return a;
    } else {
       a->header.bits |= bit;
    }

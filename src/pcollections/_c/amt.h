@@ -353,11 +353,27 @@ static inline Trie_t amtnode_set(Trie_t a,
    }
    // a is already transient and therefore uniquely owned: mutate in place.
    if (bits & (TRIEBITS_1 << bi)) {
-      // We're overwriting an existing cell; deref whatever was there first.
-      if (!is_twig)
+      // We're overwriting an existing cell.
+      if (!is_twig) {
          amtnode_decref(trienode_subt(a, ci), leaf_decref);
-      else if (leaf_decref)
-         (*leaf_decref)(trienode_leaf(a, ci));
+         trienode_set_subt(a, ci, (Trie_t)val);
+      } else {
+      // Overwrite a twig leaf. The new leaf's references are taken *before*
+      // the old leaf's are released, and the old leaf is released only after
+      // the cell already holds the new one: the two leaves may share
+      // referents (tdict/tset rewrite an entry by copying it and changing one
+      // field, so the key object is in both), and releasing first can free an
+      // object the new leaf still needs. Releasing last also means any
+      // finalizer the release triggers sees a consistent node.
+         char old[256];  // leafsize is a uint8_t, so this always fits.
+         memcpy(old, trienode_leaf(a, ci), a->header.leafsize);
+         if (leaf_incref)
+            (*leaf_incref)(val);
+         trienode_set_leaf(a, ci, val);
+         if (leaf_decref)
+            (*leaf_decref)(old);
+      }
+      return a;
    } else {
       // We're adding a new cell.
       if (a->header.ncells > nocc) {
