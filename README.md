@@ -57,7 +57,8 @@ these lazy functions to be safe from mutation.
   original exception, and whose message says where the `lazy` was created.
   Set `lazy.trace = True` (or the environment variable
   `PCOLLECTIONS_LAZY_TRACE=1`) to also record the full stack at creation.
-  `with lazy_error_unwrap:` re-raises the original exception instead.
+  `with lazy_error_unwrap:` re-raises the original exception instead, even
+  when the failure started in a lazy value that this one depends on.
 - A lazy value whose computation requests its own value raises `LazyError`.
   Two threads that each compute a lazy value needed by the other deadlock;
   this can't happen when lazy values are built from immutable data, because a

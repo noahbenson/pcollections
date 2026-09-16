@@ -122,7 +122,10 @@ If a computation raises an exception, the failure is remembered: every
 request for the value raises a new `LazyError` whose `__cause__` is the
 original exception. The message says where the `lazy` was created, and the
 error's `func`, `func_args`, `func_kwargs`, and `origin` attributes describe
-the computation.
+the computation. The error is a new `LazyError` rather than the original
+exception so that a failed computation can't be mistaken for the
+collection's own errors: a `KeyError` raised by a computation, for example,
+would otherwise make `ld.get(key, default)` return `default`.
 
 ```python
 >>> from pcollections import LazyError, lazy_error_unwrap
@@ -139,6 +142,33 @@ ZeroDivisionError
 ...     print('unwrapped')
 unwrapped
 ```
+
+A lazy value can fail because a lazy value it depends on failed. Its
+`LazyError` then names that dependency, and its cause is the dependency's
+`LazyError`, so the chain of causes (which a traceback shows) follows the
+dependencies down to the exception that started the failure. That exception
+is the error's `root_cause`, and it is what `lazy_error_unwrap` raises:
+
+```python
+>>> base = ldict(v=lazy(lambda: 1 / 0))
+>>> derived = ldict(w=lazy(lambda: base['v'] + 1))
+>>> try:
+...     derived['w']
+... except LazyError as e:
+...     print(type(e.cause).__name__, type(e.root_cause).__name__)
+LazyError ZeroDivisionError
+>>> try:
+...     with lazy_error_unwrap:
+...         derived['w']
+... except ZeroDivisionError:
+...     print('unwrapped')
+unwrapped
+```
+
+`lazy_error_unwrap(e)` also works as a function, returning the root cause of
+the `LazyError` `e`. The lazy value doesn't run its computation again, so a
+failure that might not happen on a second try (a network error, say) needs a
+new `lazy` object.
 
 Set `lazy.trace = True`, or the environment variable
 `PCOLLECTIONS_LAZY_TRACE=1`, to also record the full stack at each `lazy`'s

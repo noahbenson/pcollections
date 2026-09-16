@@ -94,4 +94,5 @@ def lazies() -> None:
             ld['a']
     except LazyError as e:
         assert_type(e.cause, 'BaseException | None')
+        assert_type(e.root_cause, 'BaseException | None')
         assert_type(lazy_error_unwrap(e), BaseException)

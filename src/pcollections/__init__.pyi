@@ -349,6 +349,8 @@ class LazyError(RuntimeError):
     """The error raised when computing a `lazy` value fails."""
     @property
     def cause(self) -> BaseException | None: ...
+    @property
+    def root_cause(self) -> BaseException | None: ...
     func: Callable[..., Any] | None
     func_args: tuple[Any, ...] | None
     func_kwargs: dict[str, Any] | None

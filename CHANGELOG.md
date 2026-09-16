@@ -79,13 +79,18 @@ not backward compatible; they are marked **(breaking)**.
 - A failed computation is remembered: every later request raises a new
   `LazyError` whose `__cause__` is the original exception and whose message
   says where the `lazy` was created. `LazyError` has the attributes `func`,
-  `func_args`, `func_kwargs`, `origin`, `origin_stack`, and `cause`.
+  `func_args`, `func_kwargs`, `origin`, `origin_stack`, `cause`, and
+  `root_cause`.
   **(breaking)**
 - `lazy.trace = True`, or the environment variable
   `PCOLLECTIONS_LAZY_TRACE=1`, records the stack where each `lazy` is
   created.
-- `lazy_error_unwrap` returns the cause of a `LazyError`, and, as a context
-  manager, re-raises the cause in place of the `LazyError`.
+- A lazy value that fails because a lazy value it depends on failed raises a
+  `LazyError` that names the dependency and the original exception; its
+  cause is the dependency's `LazyError`. `LazyError.root_cause` is the
+  exception that started the failure.
+- `lazy_error_unwrap` returns the root cause of a `LazyError`, and, as a
+  context manager, re-raises the root cause in place of the `LazyError`.
 - A lazy value whose computation requests its own value raises `LazyError`.
 - `lazy` can be subclassed, and a subclass's `__call__` is used by the lazy
   collections and by `unlazy`.

@@ -54,10 +54,19 @@ class LazyError(RuntimeError):
     again. A lazy value whose computation requests the value itself raises a
     `LazyError` with no cause.
 
+    When a computation fails because a lazy value it depends on failed, its
+    cause is that value's `LazyError`, so the chain of causes follows the
+    dependencies down to the original exception, which is `root_cause`.
+
     Attributes
     ----------
     cause : BaseException or None
         The exception raised by the computation.
+    root_cause : BaseException or None
+        The first exception in the chain of causes that is not a
+        `LazyError`: the exception that started the failure. It is `None`
+        if the chain ends in a `LazyError` with no cause (a lazy value that
+        depends on itself).
     func, func_args, func_kwargs
         The function of the lazy value and the arguments it was called with.
     origin : tuple or None
@@ -80,17 +89,41 @@ class LazyError(RuntimeError):
         """The exception that caused this error, or None."""
         return self.__cause__
 
+    @property
+    def root_cause(self):
+        """The exception that started the failure, or None (see the class
+        documentation)."""
+        return _root_of(self)[0]
+
+
+def _root_of(err):
+    """Follows the causes of `err` through `LazyError`s. Returns
+    `(root, last)`: the first cause that is not a `LazyError` (or None), and
+    the last `LazyError` in the chain."""
+    seen = set()
+    last = err
+    cause = err.__cause__
+    while isinstance(cause, LazyError) and id(cause) not in seen:
+        seen.add(id(cause))
+        last = cause
+        cause = cause.__cause__
+    if isinstance(cause, LazyError):
+        cause = None
+    return (cause, last)
+
 LazyError.__module__ = 'pcollections'
 
 
 class LazyErrorUnwrapper:
     """A function and context manager for unwrapping `LazyError` exceptions.
 
-    `lazy_error_unwrap(error)` returns the cause of `error` if `error` is a
-    `LazyError` with a cause; otherwise it returns `error` unchanged.
+    `lazy_error_unwrap(error)` returns the `root_cause` of `error` if
+    `error` is a `LazyError` with one; otherwise it returns `error`
+    unchanged. For a lazy value that failed because a lazy value it depends
+    on failed, the root cause is the exception that started the failure.
 
-    Used as a context manager, `lazy_error_unwrap` raises the cause of any
-    `LazyError` that propagates out of its block in place of the
+    Used as a context manager, `lazy_error_unwrap` raises the root cause of
+    any `LazyError` that propagates out of its block in place of the
     `LazyError`.
 
     Examples
@@ -110,24 +143,30 @@ class LazyErrorUnwrapper:
     __slots__ = ()
 
     def __call__(self, err):
-        if isinstance(err, LazyError) and err.__cause__ is not None:
-            return err.__cause__
+        if isinstance(err, LazyError):
+            root = _root_of(err)[0]
+            if root is not None:
+                return root
         return err
 
     def __enter__(self):
         return self
 
     def __exit__(self, ex_type, ex_val, tb):
-        if not isinstance(ex_val, LazyError) or ex_val.__cause__ is None:
+        if not isinstance(ex_val, LazyError):
             return False
-        cause = ex_val.__cause__
-        # The cause is shared by every LazyError raised for the same lazy
-        # value (possibly in several threads). Raising it here would grow its
-        # traceback and set its __context__, so restore both: the traceback
-        # to the one it had when the computation failed.
+        (cause, last) = _root_of(ex_val)
+        if cause is None:
+            return False
+        # The root cause is shared by every LazyError raised for the same
+        # failure (possibly in several threads). Raising it here would grow
+        # its traceback and set its __context__, so restore both: the
+        # traceback to the one it had when the computation failed.
         context = cause.__context__
         suppress = cause.__suppress_context__
-        saved_tb = ex_val._cause_traceback
+        saved_tb = last._cause_traceback
+        if saved_tb is None:
+            saved_tb = cause.__traceback__
         try:
             raise cause.with_traceback(saved_tb)
         finally:
@@ -179,6 +218,18 @@ def _describe_origin(origin):
     return f"at {base}:{lineno} in {funcname}()"
 
 
+def _truncate(text):
+    if len(text) > _MAX_CAUSE_LEN:
+        text = text[:_MAX_CAUSE_LEN - 3] + '...'
+    return text
+
+
+def _describe_exception(exc):
+    what = _truncate(_safe(str, exc, ''))
+    name = type(exc).__name__
+    return f"{name}: {what}" if what else name
+
+
 def make_error(kind, func, args, kwargs, origin_code, origin_line,
                origin_stack, cause=None, cause_tb=None):
     """Returns a new `LazyError` for a lazy value.
@@ -195,13 +246,20 @@ def make_error(kind, func, args, kwargs, origin_code, origin_line,
     where = _describe_origin(origin)
     if kind == 'recursive':
         msg = f"lazy value created {where} depends on itself (calling {call})"
+    elif isinstance(cause, LazyError):
+        # A lazy value this one depends on failed. Name that value and the
+        # exception that started the failure, rather than repeating the
+        # messages of every value in between.
+        (root, last) = _root_of(cause)
+        dep_where = _describe_origin(cause.origin)
+        what = _describe_exception(root) if root is not None else \
+            _truncate(_safe(str, last, 'LazyError'))
+        msg = (f"lazy value created {where} failed calling {call}: it "
+               f"depends on a lazy value (created {dep_where}) that failed: "
+               f"{what}")
     else:
-        what = _safe(str, cause, '')
-        if len(what) > _MAX_CAUSE_LEN:
-            what = what[:_MAX_CAUSE_LEN - 3] + '...'
-        what = f"{type(cause).__name__}: {what}" if what else \
-            type(cause).__name__
-        msg = f"lazy value created {where} failed calling {call}: {what}"
+        msg = (f"lazy value created {where} failed calling {call}: "
+               f"{_describe_exception(cause)}")
     err = LazyError(msg)
     err.func = func
     err.func_args = args

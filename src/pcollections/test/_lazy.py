@@ -256,6 +256,92 @@ class _LazyTests:
         self.assertIs(LazyError, pcollections.LazyError)
         self.assertIs(unwrap, pcollections.lazy_error_unwrap)
 
+    def test_dependency_failure(self):
+        LazyError = self.LazyError
+        unwrap = self.lazy_error_unwrap
+        def load(name):
+            raise FileNotFoundError(f"no such file: {name}")
+        base = self.ldict(v=self.lazy(load, 'c.csv'))
+        mid = self.ldict(m=self.lazy(lambda: base['v'] * 2))
+        top = self.ldict(t=self.lazy(lambda: mid['m'] + 1))
+        with self.assertRaises(LazyError) as cm:
+            top['t']
+        err = cm.exception
+        # The causes follow the dependencies down to the original exception.
+        self.assertIsInstance(err.cause, LazyError)
+        self.assertIsInstance(err.cause.cause, LazyError)
+        self.assertIsInstance(err.root_cause, FileNotFoundError)
+        self.assertIs(err.cause.cause.cause, err.root_cause)
+        self.assertIs(err.cause.root_cause, err.root_cause)
+        # The message names the failed dependency and the root cause once.
+        msg = str(err)
+        self.assertIn('depends on a lazy value', msg)
+        self.assertEqual(msg.count('no such file: c.csv'), 1)
+        self.assertEqual(msg.count('LazyError'), 0)
+        # Unwrapping gives the root cause, as a function and as a context
+        # manager, with the traceback of the original failure.
+        self.assertIs(unwrap(err), err.root_cause)
+        lengths = []
+        for _ in range(3):
+            try:
+                with unwrap:
+                    top['t']
+            except FileNotFoundError as e:
+                self.assertIs(e, err.root_cause)
+                self.assertIsNone(e.__context__)
+                tb, n = e.__traceback__, 0
+                while tb is not None:
+                    tb, n = tb.tb_next, n + 1
+                lengths.append(n)
+        self.assertEqual(len(lengths), 3)
+        self.assertEqual(len(set(lengths)), 1, lengths)
+
+    def test_deep_dependency_message(self):
+        def fail():
+            raise ValueError('bad input')
+        prev = self.lazy(fail)
+        for _ in range(30):
+            prev = self.lazy(lambda p=prev: p() + 1)
+        with self.assertRaises(self.LazyError) as cm:
+            prev()
+        err = cm.exception
+        self.assertLess(len(str(err)), 800)
+        self.assertEqual(str(err).count('bad input'), 1)
+        self.assertIsInstance(err.root_cause, ValueError)
+        self.assertIsInstance(self.lazy_error_unwrap(err), ValueError)
+
+    def test_root_cause_without_root(self):
+        LazyError = self.LazyError
+        unwrap = self.lazy_error_unwrap
+        box = []
+        l = self.lazy(lambda: box[0]() + 1)
+        box.append(l)
+        dep = self.lazy(lambda: l() * 2)
+        with self.assertRaises(LazyError) as cm:
+            dep()
+        err = cm.exception
+        # The chain ends in the "depends on itself" error, which has no cause.
+        self.assertIsNone(err.root_cause)
+        self.assertIn('depends on itself', str(err))
+        self.assertIs(unwrap(err), err)
+        with self.assertRaises(LazyError):
+            with unwrap:
+                dep()
+        # LazyErrors raised by other code work too.
+        plain = LazyError('plain')
+        self.assertIsNone(plain.root_cause)
+        try:
+            try:
+                raise KeyError('k')
+            except KeyError as e:
+                raise LazyError('wrapped') from e
+        except LazyError as e:
+            self.assertIsInstance(e.root_cause, KeyError)
+            self.assertIsInstance(unwrap(e), KeyError)
+            with self.assertRaises(KeyError):
+                with unwrap:
+                    raise e
+
     def test_subclass(self):
         lazy = self.lazy
         Logged = _logged_class(lazy, self.backend_name)
