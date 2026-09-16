@@ -129,4 +129,4 @@ __all__ = (
     "lazy", "unlazy", "holdlazy",
     "LazyError", "lazy_error_unwrap")
 
-__version__ = "1.0.0"
+__version__ = "1.0.0rc1"
