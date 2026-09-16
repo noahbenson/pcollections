@@ -15,6 +15,12 @@ def _held(mapping):
     method = getattr(type(mapping), '__holdlazy__', None)
     return mapping if method is None else method(mapping)
 
+def _last_key(mapping):
+    """The mapping's last key: `mapping._last()` for the pcollections types,
+    and otherwise the first key of `reversed(mapping)`."""
+    last = getattr(mapping, '_last', None)
+    return last() if last is not None else next(reversed(mapping))
+
 
 #===============================================================================
 # _PersistentMappingBase
@@ -131,15 +137,17 @@ class _PersistentMappingBase(_PersistentBase):
         return self if key in self else self.set(key, default)
     def popitem(self):
         """Returns a 2-tuple whose first element is itself a 2-tuple, `(key,
-        value)` from the persistent mapping, and whose second element is a copy
-        of the mapping with the key-value pair removed.
+        value)`, of the last item in the persistent mapping, and whose second
+        element is a copy of the mapping with that item removed.
 
-        Raises `KeyError` if the persistent mapping is empty.
+        As with `dict.popitem`, the last item is the one most recently
+        inserted. Raises `KeyError` if the persistent mapping is empty.
         """
         if len(self) == 0:
             raise KeyError("popitem(): persistent mapping is empty")
-        kv = next(iter(self.items()))
-        return (kv, self.drop(kv[0]))
+        key = _last_key(self)
+        (val, new) = self.pop(key)
+        return ((key, val), new)
     def pop(self, key, *args):
         """Returns a tuple of the value mapped to the given key and a copy of
         the persistent mapping with that key removed.
@@ -318,15 +326,16 @@ class _TransientMappingBase(Transient):
         self[key] = default
         return default
     def popitem(self):
-        """Remove and return a (key, value) pair as a 2-tuple.
+        """Removes the last item from the transient mapping and returns it as a
+        `(key, value)` 2-tuple.
 
-        Raises `KeyError` if the persistent mapping is empty.
+        As with `dict.popitem`, the last item is the one most recently
+        inserted. Raises `KeyError` if the transient mapping is empty.
         """
         if len(self) == 0:
             raise KeyError("popitem(): transient mapping is empty")
-        kv = next(iter(self.items()))
-        del self[kv[0]]
-        return kv
+        key = _last_key(self)
+        return (key, self.pop(key))
     def pop(self, key, *args):
         """Removes the specified key and returns the corresponding value.
 

@@ -24,6 +24,9 @@
 # crossed should_compact()'s threshold, and if so rebuilds `_els`/`_idx` with
 # the live entries renumbered 0..count-1 in insertion order (see
 # _compact_els() in _dict.py and _set.py).
+#
+# Deleting the entry in the last slot instead removes that slot and any
+# tombstones just before it, lowering `top` (see trim_tail() below).
 
 # The tombstone sentinel. A dead `_els` slot's `payload` (the first element
 # of its `(payload, next_index)` value) is overwritten with this shared
@@ -57,6 +60,41 @@ def should_compact(count, ndeleted):
     if ndeleted > COMPACT_ABS_THRESHOLD:
         return True
     return ndeleted * COMPACT_FRAC_DEN > count * COMPACT_FRAC_NUM
+
+
+def trim_tail(els, top, ndeleted):
+    """Removes the tombstones at the end of the persistent FAT `els`, whose
+    indices are 0..top-1, and returns `(els, top, ndeleted)` with `top` and
+    `ndeleted` lowered to match. A deletion of the entry in the last slot
+    calls this after tombstoning it, so the slot `top - 1` always holds a live
+    entry (unless `top` is 0): the last entry can be found directly (see
+    `last_payload()`), and repeatedly removing the last entry leaves no
+    tombstones. (See tail trimming in pcollections/_c/dict.c.h.)"""
+    while top > 0 and els[top - 1][0] is TOMBSTONE:
+        top -= 1
+        ndeleted -= 1
+        els = els.dissoc(top)
+    return (els, top, ndeleted)
+
+
+def trim_tail_transient(t):
+    """Like `trim_tail()`, for a transient `t` (a tdict or tset), in place."""
+    (els, top, ndeleted) = (t._els, t._top, t._ndeleted)
+    while top > 0 and els[top - 1][0] is TOMBSTONE:
+        top -= 1
+        ndeleted -= 1
+        del els[top]
+    object.__setattr__(t, '_top', top)
+    object.__setattr__(t, '_ndeleted', ndeleted)
+
+
+def last_payload(coll):
+    """The `payload` of the last live slot of `coll` (a pdict, tdict, pset, or
+    tset), which is slot `coll._top - 1` (see `trim_tail()`), or raises
+    `KeyError` if `coll` is empty."""
+    if coll._count == 0:
+        raise KeyError(f"{type(coll).__name__} is empty")
+    return coll._els[coll._top - 1][0]
 
 
 def live_payloads(els):

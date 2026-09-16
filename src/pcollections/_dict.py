@@ -23,6 +23,9 @@ from ._trie import (
 )
 from ._compact import (
     TOMBSTONE,
+    last_payload,
+    trim_tail,
+    trim_tail_transient,
     is_tombstone,
     should_compact
 )
@@ -37,7 +40,8 @@ from ._guard import (
     new_busy_flag,
     begin_update,
     end_update,
-    changed_during_lookup
+    changed_during_lookup,
+    check_readable
 )
 
 
@@ -191,6 +195,9 @@ class pdict(PersistentMapping):
             if kk is k or k == kk:
                 return True
         return False
+    def _last(self):
+        """Returns the last key in the pdict."""
+        return last_payload(self)[0]
     def __iter__(self):
         return (
             kv[0]
@@ -291,9 +298,13 @@ class pdict(PersistentMapping):
                     new_idx = self._idx
                     new_els = self._els.assoc(ii_prev, (kv_prev, ii_next))
                 new_els = new_els.assoc(ii, (TOMBSTONE, None))
+                (new_top, new_ndeleted) = (self._top, self._ndeleted + 1)
+                if ii == new_top - 1:
+                    (new_els, new_top, new_ndeleted) = trim_tail(
+                        new_els, new_top, new_ndeleted)
                 return self._maybe_compacted(
-                    new_els, new_idx, self._top,
-                    self._count - 1, self._ndeleted + 1)
+                    new_els, new_idx, new_top,
+                    self._count - 1, new_ndeleted)
             ii_prev = ii
             kv_prev = kv
             ii = ii_next
@@ -530,6 +541,10 @@ class tdict(TransientMapping):
     def get(self, key, default=None):
         (ii, kv) = self._chain(hash(key), key)[:2]
         return default if ii is None else kv[1]
+    def _last(self):
+        """Returns the last key in the tdict."""
+        check_readable(self)
+        return last_payload(self)[0]
     def __iter__(self):
         return TransientIter(self, _kv_key)
     def _remove(self, h, ii, ii_next, ii_prev, kv_prev):
@@ -548,6 +563,8 @@ class tdict(TransientMapping):
         self._els[ii] = (TOMBSTONE, None)
         object.__setattr__(self, '_count', self._count - 1)
         object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
+        if ii == self._top - 1:
+            trim_tail_transient(self)
         self._maybe_compact()
     def __delitem__(self, key):
         self.pop(key)

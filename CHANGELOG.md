@@ -69,6 +69,9 @@ not backward compatible; they are marked **(breaking)**.
   `set` do. `isdisjoint` is true when either set is empty, and
   `pset.symmetric_difference` no longer returns the original set when the
   result has the same size.
+- `popitem()` (on `pdict` and `tdict`) removes the last item, as
+  `dict.popitem()` does, and `pop()` (on `pset` and `tset`) removes the last
+  element; both used to remove the first. **(breaking)**
 
 ### Persistent collections
 

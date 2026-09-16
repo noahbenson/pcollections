@@ -13,8 +13,8 @@
 //  - `idx` (an AMT) maps hash(elem) to the index of the first entry in that
 //    hash's collision chain.
 //
-// Deletion tombstones the entry's slot, and compaction uses the same policy
-// as dict.c.h.
+// Deletion tombstones the entry's slot (or trims the end of `els`; see
+// set_trim_tail()), and compaction uses the same policy as dict.c.h.
 //
 // Every FAT node here has leafsize == sizeof(SetEntry); every AMT node has
 // leafsize == sizeof(trieint_t).
@@ -290,6 +290,27 @@ static int set_should_compact(Py_ssize_t count, Py_ssize_t ndeleted) {
    return ndeleted * SET_COMPACT_FRAC_DEN > count * SET_COMPACT_FRAC_NUM;
 }
 
+// Tail trimming. Deleting the entry in the last slot of `els` removes that
+// slot, and the tombstones just before it, rather than tombstoning it, and
+// lowers `top` and `ndeleted` to match. So slot top-1 always holds a live
+// entry (unless top == 0): the last element can be found directly (see
+// pset_last()), and repeatedly removing the last element leaves no tombstones.
+// Takes the caller's reference to the persistent tree `els` and returns the
+// trimmed tree, updating *top and *ndeleted.
+static Trie_t set_trim_tail(Trie_t els, Py_ssize_t* top, Py_ssize_t* ndeleted) {
+   void* ep;
+   while (*top > 0
+          && fat_lookup(els, (trieint_t)(*top - 1), &ep)
+          && setentry_is_tombstone((SetEntry*)ep)) {
+      Trie_t trimmed = fat_butitem(els, (trieint_t)(*top - 1), setentry_incref);
+      fatnode_decref(els, setentry_decref);
+      els = trimmed;
+      *top -= 1;
+      *ndeleted -= 1;
+   }
+   return els;
+}
+
 static PyObject* pset_new_dispatch(PyTypeObject* type, PyObject* arg);
 
 static PyObject* pset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
@@ -416,7 +437,7 @@ static PyObject* pset_discard(PSetObject* self, PyObject* obj) {
    trieint_t found_index, prev;
    int found;
    Trie_t new_els, new_idx;
-   Py_ssize_t new_count, new_ndeleted;
+   Py_ssize_t new_top, new_count, new_ndeleted;
    if (set_hash_key(obj, &hkey) < 0) return NULL;
    found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev,
                           NULL, NULL, 0);
@@ -457,6 +478,9 @@ static PyObject* pset_discard(PSetObject* self, PyObject* obj) {
 have_new_els:
    new_count = self->count - 1;
    new_ndeleted = self->ndeleted + 1;
+   new_top = self->top;
+   if (found_index + 1 == (trieint_t)new_top)
+      new_els = set_trim_tail(new_els, &new_top, &new_ndeleted);
    if (set_should_compact(new_count, new_ndeleted)) {
       Trie_t c_els, c_idx; Py_ssize_t c_top;
       if (set_rebuild_compacted(new_els, new_idx, &c_els, &c_idx, &c_top) < 0) {
@@ -470,7 +494,7 @@ have_new_els:
       amtnode_decref(new_idx, noop_decref);
       return pset_wrap_astype(Py_TYPE(self), c_els, c_idx, c_top, new_count, 0);
    }
-   return pset_wrap_astype(Py_TYPE(self), new_els, new_idx, self->top,
+   return pset_wrap_astype(Py_TYPE(self), new_els, new_idx, new_top,
                            new_count, new_ndeleted);
 }
 
@@ -500,6 +524,25 @@ static PyObject* pset_str(PSetObject* self) {
    return result;
 }
 
+// The last element's key (see set_trim_tail()), for popitem()/pop() in
+// pcollections.abc.
+static PyObject* set_last_key(Trie_t els, Py_ssize_t top, Py_ssize_t count,
+                              const char* tp_name) {
+   void* ep;
+   PyObject* key;
+   if (count == 0) {
+      PyErr_Format(PyExc_KeyError, "%.200s is empty", tp_name);
+      return NULL;
+   }
+   fat_lookup(els, (trieint_t)(top - 1), &ep);
+   key = ((SetEntry*)ep)->key;
+   Py_INCREF(key);
+   return key;
+}
+static PyObject* pset_last(PSetObject* self, PyObject* Py_UNUSED(ignored)) {
+   return set_last_key(self->els, self->top, self->count, Py_TYPE(self)->tp_name);
+}
+
 static PyMethodDef pset_methods[] = {
    {"add", (PyCFunction)pset_add, METH_O,
     "add($self, obj, /)\n--\n\nReturns a copy of the pset that includes the given object."},
@@ -509,6 +552,8 @@ static PyMethodDef pset_methods[] = {
     "clear($self, /)\n--\n\nReturns the empty pset."},
    {"transient", (PyCFunction)pset_transient, METH_NOARGS,
     "transient($self, /)\n--\n\nEfficiently copies the pset into a tset and returns the tset."},
+   {"_last", (PyCFunction)pset_last, METH_NOARGS,
+    "_last($self, /)\n--\n\nReturns the last element in the pset."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
@@ -619,6 +664,19 @@ static PyObject* tset_empty_astype(PyTypeObject* type) {
                            amt_empty(SETIDXLEAFSIZE), 0, 0, 0, NULL);
 }
 
+// Tail trimming for a tset (see set_trim_tail()).
+static void tset_trim_tail(TSetObject* self) {
+   void* ep;
+   while (self->top > 0
+          && fat_lookup(self->els, (trieint_t)(self->top - 1), &ep)
+          && setentry_is_tombstone((SetEntry*)ep)) {
+      tfat_delitem_at(&self->els, (trieint_t)(self->top - 1),
+                      setentry_incref, setentry_decref);
+      self->top -= 1;
+      self->ndeleted -= 1;
+   }
+}
+
 // Compacts the tset in place if needed (see tdict_maybe_compact()).
 static int tset_maybe_compact(TSetObject* self) {
    Trie_t c_els, c_idx; Py_ssize_t c_top;
@@ -689,6 +747,8 @@ static int tset_discard_guarded(TSetObject* self, trieint_t hkey, PyObject* obj)
    // Tombstone the deleted slot.
    tfat_setitem_at(&self->els, found_index, &tombstone,
                    setentry_incref, setentry_decref);
+   if (found_index + 1 == (trieint_t)self->top)
+      tset_trim_tail(self);
    tset_invalidate_orig(self);
    if (tset_maybe_compact(self) < 0) return -1;
    return 1;
@@ -908,6 +968,15 @@ static PyObject* tset_empty_classmethod(PyObject* cls, PyObject* Py_UNUSED(ignor
    return tset_empty_astype((PyTypeObject*)cls);
 }
 
+static PyObject* tset_last_impl(TSetObject* self) {
+   if (tguard_read(&self->guard, (PyObject*)self, "a lookup") < 0) return NULL;
+   return set_last_key(self->els, self->top, self->count, Py_TYPE(self)->tp_name);
+}
+PCOLL_LOCKED0(PyObject*, tset_last_locked, tset_last_impl, TSetObject*)
+static PyObject* tset_last(TSetObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tset_last_locked(self);
+}
+
 static PyMethodDef tset_methods[] = {
    {"empty", (PyCFunction)tset_empty_classmethod, METH_NOARGS | METH_CLASS,
     "empty($type, /)\n--\n\nReturns a new, empty tset."},
@@ -919,6 +988,8 @@ static PyMethodDef tset_methods[] = {
     "clear($self, /)\n--\n\nClears all elements from the tset."},
    {"persistent", (PyCFunction)tset_persistent, METH_NOARGS,
     "persistent($self, /)\n--\n\nEfficiently copies the tset into a pset and returns the pset."},
+   {"_last", (PyCFunction)tset_last, METH_NOARGS,
+    "_last($self, /)\n--\n\nReturns the last element in the tset."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };

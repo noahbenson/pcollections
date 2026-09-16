@@ -422,6 +422,71 @@ class _ApiTests:
         self.assertEqual(s.union([4]), {1, 2, 3, 4})
         self.assertEqual(s.difference('a'), s)
 
+    def test_popitem_and_pop_remove_the_last_item(self):
+        # pdict/tdict.popitem and pset/tset.pop remove the most recently
+        # inserted item, as dict.popitem does, including after deletions
+        # (which may leave tombstones before the last item) and re-insertions.
+        ref = dict.fromkeys(range(40))
+        p = self.pdict(ref)
+        t = self.tdict(ref)
+        ps = self.pset(ref)
+        ts = self.tset(ref)
+        order = dict(ref)
+        for k in (39, 5, 38, 37, 20, 36):
+            del ref[k], order[k]
+            p = p.delete(k)
+            del t[k]
+            ps = ps.discard(k)
+            ts.discard(k)
+        for step in range(60):
+            if step % 7 == 3:
+                for k in (100 + step, 3):
+                    ref.pop(k, None), order.pop(k, None)
+                    ref[k] = order[k] = step
+                    p = p.drop(k).set(k, step)
+                    t.pop(k, None)
+                    t[k] = step
+                    ps = ps.discard(k).add(k)
+                    ts.discard(k)
+                    ts.add(k)
+            if not ref:
+                break
+            item = ref.popitem()
+            (pitem, p) = p.popitem()
+            self.assertEqual(pitem, item)
+            self.assertEqual(t.popitem(), item)
+            el = next(reversed(order))
+            del order[el]
+            (pel, ps) = ps.pop()
+            self.assertEqual(pel, el)
+            self.assertEqual(ts.pop(), el)
+            self.assertEqual(list(p.items()), list(ref.items()))
+            self.assertEqual(list(t.items()), list(ref.items()))
+            self.assertEqual(list(ps), list(order))
+            self.assertEqual(list(ts), list(order))
+        self.assertEqual(len(ref), 0)
+        for obj in (p, t, ps, ts):
+            self.assertEqual(len(obj), 0)
+            self.assertEqual(list(obj), [])
+        self.assertEqual(_exc(p.popitem)[0], KeyError)
+        self.assertEqual(_exc(t.popitem)[0], KeyError)
+        self.assertEqual(_exc(ps.pop)[0], KeyError)
+        self.assertEqual(_exc(ts.pop)[0], KeyError)
+        # The emptied collections work as usual.
+        self.assertEqual(p.set('a', 1).set('b', 2).popitem(),
+                         (('b', 2), self.pdict(a=1)))
+        t.update(a=1, b=2)
+        self.assertEqual(t.popitem(), ('b', 2))
+        self.assertEqual(ps.add('a').add('b').pop(), ('b', self.pset('a')))
+        ts.update('ab')
+        self.assertEqual(ts.pop(), 'b')
+        # Lazy mappings compute the popped value.
+        f = lambda: 10
+        ((k, v), ld) = self.ldict(a=1, b=self.lazy(f)).popitem()
+        self.assertEqual((k, v, dict(ld)), ('b', 10, {'a': 1}))
+        tld = self.tldict(a=1, b=self.lazy(f))
+        self.assertEqual(tld.popitem(), ('b', 10))
+
     def test_set_methods_accept_iterables(self):
         # The named set methods take any iterable, as set's do.
         makers = [lambda: [3, 1, 9], lambda: (x for x in [3, 9]),

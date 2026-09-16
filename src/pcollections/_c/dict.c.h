@@ -16,9 +16,10 @@
 //
 // Deletion and compaction: a deleted entry is unlinked from its chain and
 // its slot in `els` is overwritten with a tombstone (see
-// dictentry_is_tombstone()). `top` never decreases, so indices are not
-// reused; `ndeleted` counts the tombstones. When a modification leaves
-// `ndeleted` above 1024**2 or above 30% of `count`, `els` and `idx` are
+// dictentry_is_tombstone()), except that deleting the entry in the last slot
+// removes that slot and the tombstones before it, lowering `top` (see
+// dict_trim_tail()). `ndeleted` counts the tombstones. When a modification
+// leaves `ndeleted` above 1024**2 or above 30% of `count`, `els` and `idx` are
 // rebuilt with the live entries renumbered 0..count-1 (see
 // dict_rebuild_compacted()): as new tries for a pdict, in place for a
 // tdict. The Python backend uses the same scheme (pcollections/_compact.py).
@@ -339,6 +340,27 @@ static int dict_should_compact(Py_ssize_t count, Py_ssize_t ndeleted) {
    return ndeleted * DICT_COMPACT_FRAC_DEN > count * DICT_COMPACT_FRAC_NUM;
 }
 
+// Tail trimming. Deleting the entry in the last slot of `els` removes that
+// slot, and the tombstones just before it, rather than tombstoning it, and
+// lowers `top` and `ndeleted` to match. So slot top-1 always holds a live
+// entry (unless top == 0): the last item can be found directly (see
+// pdict_last()), and repeatedly removing the last item leaves no tombstones.
+// Takes the caller's reference to the persistent tree `els` and returns the
+// trimmed tree, updating *top and *ndeleted.
+static Trie_t dict_trim_tail(Trie_t els, Py_ssize_t* top, Py_ssize_t* ndeleted) {
+   void* ep;
+   while (*top > 0
+          && fat_lookup(els, (trieint_t)(*top - 1), &ep)
+          && dictentry_is_tombstone((DictEntry*)ep)) {
+      Trie_t trimmed = fat_butitem(els, (trieint_t)(*top - 1), dictentry_incref);
+      fatnode_decref(els, dictentry_decref);
+      els = trimmed;
+      *top -= 1;
+      *ndeleted -= 1;
+   }
+   return els;
+}
+
 // Defined after tdict, which it uses for the general case.
 static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject* kw);
 
@@ -526,7 +548,7 @@ static PyObject* pdict_drop_key(PDictObject* self, PyObject* key, int error) {
    trieint_t found_index, prev;
    int found;
    Trie_t new_els, new_idx;
-   Py_ssize_t new_count, new_ndeleted;
+   Py_ssize_t new_top, new_count, new_ndeleted;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
    found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
                            NULL, &prev, NULL, NULL, 0);
@@ -572,6 +594,9 @@ static PyObject* pdict_drop_key(PDictObject* self, PyObject* key, int error) {
 have_new_els:
    new_count = self->count - 1;
    new_ndeleted = self->ndeleted + 1;
+   new_top = self->top;
+   if (found_index + 1 == (trieint_t)new_top)
+      new_els = dict_trim_tail(new_els, &new_top, &new_ndeleted);
    if (dict_should_compact(new_count, new_ndeleted)) {
       Trie_t c_els, c_idx; Py_ssize_t c_top;
       if (dict_rebuild_compacted(new_els, new_idx, &c_els, &c_idx, &c_top) < 0) {
@@ -585,7 +610,7 @@ have_new_els:
       amtnode_decref(new_idx, noop_decref);
       return pdict_wrap_astype(Py_TYPE(self), c_els, c_idx, c_top, new_count, 0);
    }
-   return pdict_wrap_astype(Py_TYPE(self), new_els, new_idx, self->top,
+   return pdict_wrap_astype(Py_TYPE(self), new_els, new_idx, new_top,
                               new_count, new_ndeleted);
 }
 
@@ -605,6 +630,25 @@ static PyObject* pdict_clear_method(PDictObject* self, PyObject* Py_UNUSED(ignor
 
 static PyObject* pdict_transient(PDictObject* self, PyObject* Py_UNUSED(ignored));
 
+// The last item's key (see dict_trim_tail()), for popitem()/pop() in
+// pcollections.abc.
+static PyObject* dict_last_key(Trie_t els, Py_ssize_t top, Py_ssize_t count,
+                              const char* tp_name) {
+   void* ep;
+   PyObject* key;
+   if (count == 0) {
+      PyErr_Format(PyExc_KeyError, "%.200s is empty", tp_name);
+      return NULL;
+   }
+   fat_lookup(els, (trieint_t)(top - 1), &ep);
+   key = ((DictEntry*)ep)->key;
+   Py_INCREF(key);
+   return key;
+}
+static PyObject* pdict_last(PDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   return dict_last_key(self->els, self->top, self->count, Py_TYPE(self)->tp_name);
+}
+
 static PyMethodDef pdict_methods[] = {
    {"set", (PyCFunction)pdict_set, METH_VARARGS,
     "set($self, key, val, /)\n--\n\nReturns a copy of the pdict that maps the given key to the given value."},
@@ -620,6 +664,8 @@ static PyMethodDef pdict_methods[] = {
    {"keys", (PyCFunction)pdict_keys, METH_NOARGS, "keys($self, /)\n--\n\nReturns a view of the keys."},
    {"items", (PyCFunction)pdict_items, METH_NOARGS, "items($self, /)\n--\n\nReturns a view of the items."},
    {"values", (PyCFunction)pdict_values, METH_NOARGS, "values($self, /)\n--\n\nReturns a view of the values."},
+   {"_last", (PyCFunction)pdict_last, METH_NOARGS,
+    "_last($self, /)\n--\n\nReturns the last key in the pdict."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
@@ -944,6 +990,19 @@ static int tdict_contains_impl(TDictObject* self, PyObject* key) {
 }
 PCOLL_LOCKED1(int, tdict_contains, tdict_contains_impl, TDictObject*, PyObject*)
 
+// Tail trimming for a tdict (see dict_trim_tail()).
+static void tdict_trim_tail(TDictObject* self) {
+   void* ep;
+   while (self->top > 0
+          && fat_lookup(self->els, (trieint_t)(self->top - 1), &ep)
+          && dictentry_is_tombstone((DictEntry*)ep)) {
+      tfat_delitem_at(&self->els, (trieint_t)(self->top - 1),
+                      dictentry_incref, dictentry_decref);
+      self->top -= 1;
+      self->ndeleted -= 1;
+   }
+}
+
 // Compacts the tdict in place if it has enough tombstones. Fails only if
 // hashing a key fails (see dict_rebuild_compacted()).
 static int tdict_maybe_compact(TDictObject* self) {
@@ -999,6 +1058,8 @@ static int tdict_ass_subscript_guarded(TDictObject* self, trieint_t hkey,
       // Tombstone the deleted slot (see dictentry_is_tombstone()).
       tfat_setitem_at(&self->els, found_index, &tombstone,
                       dictentry_incref, dictentry_decref);
+      if (found_index + 1 == (trieint_t)self->top)
+         tdict_trim_tail(self);
       tdict_invalidate_orig(self);
       return tdict_maybe_compact(self);
    }
@@ -1145,6 +1206,15 @@ static PyObject* tdict_empty_classmethod(PyObject* cls, PyObject* Py_UNUSED(igno
    return tdict_empty_astype((PyTypeObject*)cls);
 }
 
+static PyObject* tdict_last_impl(TDictObject* self) {
+   if (tguard_read(&self->guard, (PyObject*)self, "a lookup") < 0) return NULL;
+   return dict_last_key(self->els, self->top, self->count, Py_TYPE(self)->tp_name);
+}
+PCOLL_LOCKED0(PyObject*, tdict_last_locked, tdict_last_impl, TDictObject*)
+static PyObject* tdict_last(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tdict_last_locked(self);
+}
+
 static PyMethodDef tdict_methods[] = {
    {"empty", (PyCFunction)tdict_empty_classmethod, METH_NOARGS | METH_CLASS,
     "empty($type, /)\n--\n\nReturns a new, empty tdict."},
@@ -1157,6 +1227,8 @@ static PyMethodDef tdict_methods[] = {
    {"keys", (PyCFunction)tdict_keys, METH_NOARGS, "keys($self, /)\n--\n\nReturns a view of the keys."},
    {"items", (PyCFunction)tdict_items, METH_NOARGS, "items($self, /)\n--\n\nReturns a view of the items."},
    {"values", (PyCFunction)tdict_values, METH_NOARGS, "values($self, /)\n--\n\nReturns a view of the values."},
+   {"_last", (PyCFunction)tdict_last, METH_NOARGS,
+    "_last($self, /)\n--\n\nReturns the last key in the tdict."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };

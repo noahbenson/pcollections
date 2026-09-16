@@ -12,6 +12,9 @@ from ._trie import (
 )
 from ._compact import (
     TOMBSTONE,
+    last_payload,
+    trim_tail,
+    trim_tail_transient,
     is_tombstone,
     should_compact
 )
@@ -19,7 +22,7 @@ from ._compact import (
 from .abc  import (PersistentSet, TransientSet)
 from .abc._core import _type_empty, _partner_type
 from ._guard import (TransientIter, new_busy_flag, begin_update, end_update,
-                     changed_during_lookup)
+                     changed_during_lookup, check_readable)
 from .util import (setcmp)
 
 
@@ -89,6 +92,9 @@ class pset(PersistentSet):
             if x is el or el == x:
                 return True
         return False
+    def _last(self):
+        """Returns the last element in the pset."""
+        return last_payload(self)
     def __iter__(self):
         return (
             x
@@ -172,9 +178,13 @@ class pset(PersistentSet):
                     new_idx = self._idx
                     new_els = self._els.assoc(ii_prev, (x_prev, ii_next))
                 new_els = new_els.assoc(ii, (TOMBSTONE, None))
+                (new_top, new_ndeleted) = (self._top, self._ndeleted + 1)
+                if ii == new_top - 1:
+                    (new_els, new_top, new_ndeleted) = trim_tail(
+                        new_els, new_top, new_ndeleted)
                 return self._maybe_compacted(
-                    new_els, new_idx, self._top,
-                    self._count - 1, self._ndeleted + 1)
+                    new_els, new_idx, new_top,
+                    self._count - 1, new_ndeleted)
             ii_prev = ii
             x_prev = x
             ii = ii_next
@@ -283,6 +293,10 @@ class tset(TransientSet):
         return (None, None, ii_prev, x_prev)
     def __contains__(self, el):
         return self._chain(hash(el), el)[0] is not None
+    def _last(self):
+        """Returns the last element in the tset."""
+        check_readable(self)
+        return last_payload(self)
     def __iter__(self):
         return TransientIter(self, _identity)
     def add(self, obj):
@@ -345,6 +359,8 @@ class tset(TransientSet):
         self._els[ii] = (TOMBSTONE, None)
         object.__setattr__(self, '_count', self._count - 1)
         object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
+        if ii == self._top - 1:
+            trim_tail_transient(self)
         self._maybe_compact()
         return None
     def clear(self):

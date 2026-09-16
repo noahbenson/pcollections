@@ -20,6 +20,16 @@ def _isdisjoint(s, other):
     (small, large) = (s, other) if len(s) <= len(other) else (other, s)
     return not any(el in large for el in small)
 
+def _last_element(s):
+    """The set's last element: `s._last()` for the pcollections types, and
+    otherwise the last element that iterating over `s` yields."""
+    last = getattr(s, '_last', None)
+    if last is not None:
+        return last()
+    for el in s:
+        pass
+    return el
+
 
 #===============================================================================
 # _PersistentSetBase
@@ -198,16 +208,16 @@ class _PersistentSetBase(_PersistentBase):
         else:
             return type(self)(t)
     def pop(self):
-        """Returns a tuple of an arbitrary element from the persistent set and a
-        copy of the set with that element removed.
+        """Returns a tuple of the last element of the persistent set and a copy
+        of the set with that element removed.
 
-        Raises `KeyError` if the set is empty.
+        The last element is the one most recently added (the last one that
+        iteration yields). Raises `KeyError` if the set is empty.
         """
         if len(self) == 0:
             raise KeyError("pop from an empty set")
-        el = next(iter(self))
-        newset = self.discard(el)
-        return (el, newset)
+        el = _last_element(self)
+        return (el, self.discard(el))
     def remove(self, element):
         """Removes an element from the persistent set; it must be a member.
 
@@ -502,13 +512,14 @@ class _TransientSetBase(Transient):
             self.discard(el)
         return self
     def pop(self):
-        """Removes an arbitrary element from the transient set and returns it.
+        """Removes the last element from the transient set and returns it.
 
-        Raises `KeyError` if the set is empty.
+        The last element is the one most recently added (the last one that
+        iteration yields). Raises `KeyError` if the set is empty.
         """
         if len(self) == 0:
             raise KeyError("pop from an empty set")
-        el = next(iter(self))
+        el = _last_element(self)
         self.discard(el)
         return el
     def remove(self, element):

@@ -31,10 +31,6 @@ Persistent collections also have methods that the builtins lack:
 `pdict.setall`, `pdict.dropall`, and `pdict.deleteall`. The transient types
 have `tlist.prepend`, `tset.addall`, `tset.discardall`, and `tset.removeall`.
 
-`popitem()` (on `pdict` and `tdict`) removes the *first* item, where
-`dict.popitem()` removes the last one; `pop()` on `pset` and `tset` also
-removes the first element.
-
 `drop` and `delete` differ only when the key (or index) isn't present:
 `delete` raises `KeyError` (or `IndexError`), and `drop` returns the
 collection unchanged, or raises if its `error` argument is true.
@@ -70,8 +66,12 @@ The persistent types have no in-place operators; `p += x` rebinds `p` to
 
 ## Order
 
-`pdict` and `pset` iterate in the order in which their elements were added.
-(`set` and `frozenset` don't guarantee an order.)
+`pdict`, `tdict`, `pset`, and `tset` iterate in the order in which their
+elements were added. (`set` and `frozenset` don't guarantee an order.)
+
+`popitem()` (on `pdict` and `tdict`) removes the last item, the one most
+recently added, as `dict.popitem()` does. `pop()` (on `pset` and `tset`)
+also removes the last element, where `set.pop()` removes an arbitrary one.
 
 ## Printing
 

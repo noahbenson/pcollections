@@ -133,7 +133,7 @@ class _DictMachine(_Machine):
 
     def ops(self):
         return [('set', 30), ('delete', 10), ('drop', 4), ('pop', 6),
-                ('popitem', 2), ('setdefault', 4), ('get', 6),
+                ('popitem', 4), ('setdefault', 4), ('get', 6),
                 ('getitem', 6), ('contains', 4), ('update', 3), ('ior', 2),
                 ('or', 2), ('setall', 2), ('dropall', 2), ('clear', 0.05),
                 ('roundtrip', 1), ('copy', 1), ('views', 2), ('fromkeys', 0.5)]
@@ -209,12 +209,8 @@ class _DictMachine(_Machine):
                 self.same(ref, out)
 
     def op_popitem(self):
-        # The pcollections mappings remove their first item.
-        if self.ref:
-            k = next(iter(self.ref))
-            ref = ('ok', (k, self.ref.pop(k)))
-        else:
-            ref = ('err', KeyError)
+        # As dict does, the pcollections mappings remove their last item.
+        ref = _outcome(self.ref.popitem)
         self.same(ref, _outcome(self.t.popitem), _outcome(self.lt.popitem))
         for name in ('p', 'lp'):
             out = _outcome(getattr(self, name).popitem)
@@ -701,7 +697,7 @@ class _SetMachine(_Machine):
 
     def ops(self):
         return [('add', 30), ('discard', 12), ('remove', 5), ('drop', 3),
-                ('pop', 3), ('contains', 6), ('update', 4),
+                ('pop', 5), ('contains', 6), ('update', 4),
                 ('difference_update', 3), ('intersection_update', 2),
                 ('symmetric_difference_update', 2), ('operators', 3),
                 ('methods', 3), ('relations', 3), ('clear', 0.05),
@@ -768,9 +764,9 @@ class _SetMachine(_Machine):
             self.fail("drop(error=True) of a missing element")
 
     def op_pop(self):
-        # The pcollections sets remove their first element.
+        # The pcollections sets remove their last element.
         if self.ref:
-            x = next(iter(self.order))
+            x = next(reversed(self.order))
             self.ref_discard(x)
             ref = ('ok', x)
         else:
