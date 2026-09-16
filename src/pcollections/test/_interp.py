@@ -157,6 +157,12 @@ class TestSubinterpreters(unittest.TestCase):
             print('ok')
         """)
 
+    # On Python 3.12, creating and destroying subinterpreters from several
+    # threads at once corrupts memory inside CPython (in the import system
+    # and the collector, with or without pcollections), so this test only
+    # runs on other versions.
+    @unittest.skipIf(sys.version_info[:2] == (3, 12),
+                     "concurrent subinterpreters are unreliable in Python 3.12")
     def test_concurrent_subinterpreters(self):
         # Several threads, each running its own interpreters, at once.
         self.run_script("""
