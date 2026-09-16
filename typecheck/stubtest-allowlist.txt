@@ -1,0 +1,5 @@
+# Only the public interface in src/pcollections/__init__.pyi is checked; the
+# submodules have no stubs.
+pcollections\.(_\w+|abc|util|test)(\..*)?
+# lazy.__call__ accepts and rejects arguments at runtime.
+pcollections.lazy.__call__
