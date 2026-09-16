@@ -16,8 +16,8 @@ Documentation: <https://nben.net/pcollections/>
 
 Version 1.0 and later of `pcollections` was written in collaboration with
 Claude Code, using models Sonnet 5 and Opus 5. All code prior to and including
-commit [`c83db2e`](
-https://github.com/noahbenson/pcollections/tree/c83db2efd90764fdb8daa1681135c04a55d046d2)
+commit [`94dbf84`](
+https://github.com/noahbenson/pcollections/tree/94dbf847e01e567f6830d90f9b7ff86c3e54b38b)
 (version 0.4 and earlier) were written by humans. This includes most of the
 entire original first implementation of the library and its API as well as most
 of the header files and critical performance code for the version 1.0 rewrite.
