@@ -10,10 +10,9 @@ from threading import Lock, get_ident
 from . import _lazybase
 from ._lazybase import LazyError, lazy_error_unwrap
 
-# See _list.py's import comment: llist/tllist reuse plist/tlist's FAT-backed
-# value-table encoding directly (self._phamt), and tldict wraps tdict's
-# already-FAT/AMT-typed self._els/self._idx -- so, as in _list.py, these are
-# imported under the PHAMT/THAMT names this file already uses throughout.
+# llist/tllist reuse plist/tlist's FAT-backed encoding (self._phamt), and
+# tldict wraps tdict's FAT/AMT-typed self._els/self._idx. As in _list.py,
+# FAT/TFAT are also used under the names PHAMT/THAMT.
 from ._trie import (
     AMT,
     TAMT,

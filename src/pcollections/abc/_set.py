@@ -16,16 +16,12 @@ from ..util import (setcmp, seqstr, frozenset_hash)
 class _PersistentSetBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentSet``'s concrete
     method bodies, so that ``pcollections._c._core.pset`` can inherit them
-    without inheriting ``ABCMeta`` anywhere in its base chain -- see
-    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
-    3.14 rationale.
+    without ``ABCMeta`` in its bases; see ``_PersistentBase``'s docstring
+    (``abc/_core.py``).
 
-    Unlike the Mapping family (``_map.py``), ``PersistentSet`` never actually
-    relied on any concrete method from ``collections.abc.Set`` -- every method
-    below (comparisons, ``__and__``/``__or__``/``__sub__``/``__xor__`` and
-    their reflected forms, ``isdisjoint``, etc.) was already implemented
-    directly on ``PersistentSet`` itself, so this is a pure relocation of
-    that existing code, not a new port from stdlib.
+    Unlike the mapping mixins, this defines all of its methods itself
+    (comparisons, set algebra, ``isdisjoint``, etc.) rather than copying any
+    from ``collections.abc.Set``.
     """
     __slots__ = ()
     # Methods which must be implemented in the children.
@@ -304,7 +300,7 @@ class PersistentSet(_PersistentSetBase, Set, Persistent):
      * `removeall(values)`
      * `__reduce__` (for pickling)
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()
@@ -316,14 +312,9 @@ class PersistentSet(_PersistentSetBase, Set, Persistent):
 class _TransientSetBase(Transient):
     """Plain (non-``ABCMeta``) mixin holding ``TransientSet``'s concrete
     method bodies, so that ``pcollections._c._core.tset`` can inherit them
-    without inheriting ``ABCMeta`` anywhere in its base chain -- see
-    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
-    3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
-    can subclass it directly.)
-
-    As with ``_PersistentSetBase``, this is a pure relocation of
-    ``TransientSet``'s already-self-contained methods -- nothing here is a new
-    port from stdlib ``collections.abc.Set``/``MutableSet``.
+    without ``ABCMeta`` in its bases; see ``_PersistentBase``'s docstring
+    (``abc/_core.py``). ``Transient`` is not ``ABCMeta``-based, so this
+    subclasses it directly.
     """
     __slots__ = ()
     # Methods which must be implemented in the children.
@@ -607,7 +598,7 @@ class TransientSet(_TransientSetBase, MutableSet, Transient):
      * `discardall(values)`
      * `removeall(values)`
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()

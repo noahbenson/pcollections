@@ -2,16 +2,8 @@
 ################################################################################
 # pcollections/test/__main__.py
 # Entry point for `python -m pcollections.test` (used by
-# .github/workflows/tests.yml's "Run Tests" step).
-#
-# Without this file, `python -m pcollections.test` fails outright with
-# "No module named pcollections.test.__main__; 'pcollections.test' is a
-# package and cannot be directly executed" -- `python -m <package>` always
-# requires a `__main__.py`, `unittest.suite()`/`_TestModuleNamespace` alone
-# aren't enough. (Discovered while re-verifying the test suite end to end
-# during the phamt-removal work: the CI workflow's "Run Tests" step was
-# already spelled this way, so this was silently broken before this file
-# existed -- every previous CI run of this exact command would have failed.)
+# .github/workflows/tests.yml's "Run Tests" step); `python -m` on a package
+# requires a `__main__.py`.
 # By Noah C. Benson
 
 import sys

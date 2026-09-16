@@ -3,70 +3,30 @@
 // The persistent (plist) and transient (tlist) list types, implemented as
 // thin CPython wrappers around a FAT node tree (see fat.h/trie.h).
 //
-// A list's elements are just the values of a FAT tree whose keys are a run
-// of consecutive trieint_t (unsigned) integers: `start`, `start+1`, ...,
-// `start+length-1`. `start` is allowed to "wrap" below 0 the way an unsigned
-// integer wraps (prepending decrements it, exactly mirroring the reference
-// Python implementation's use of an arbitrary-precision, possibly-negative
-// `_start`) -- since FAT's efficiency comes from keys being densely
-// clustered (sharing common high bits), not from being near zero, a run of
-// keys sitting near the top of the unsigned range is exactly as cheap to
-// store as one sitting near 0. Wrapping all the way around trieint_t's
-// range would take on the order of 2**64 net prepends, which is not a
-// real-world concern.
+// A list's elements are the leaves of a FAT whose keys are the consecutive
+// integers start, start+1, ..., start+length-1. Prepending decrements
+// `start`; a new list starts at LIST_START_MID (see below). FAT storage
+// depends on keys being clustered, not on their size, so the position of
+// the run in the key range does not matter.
 //
-// Every FAT node used here has leafsize == sizeof(PyObject*): a leaf cell
-// holds the bytes of a PyObject* pointer, never a raw value. `leaf_incref`/
-// `leaf_decref` callbacks (`pyobj_incref`/`pyobj_decref` below) always see a
-// pointer to a stored PyObject* (a PyObject**), per fat.h's own convention:
-// dereference once to get the actual object pointer.
+// Every FAT node here has leafsize == sizeof(PyObject*); the leaf callbacks
+// (pyobj_incref/pyobj_decref) receive a PyObject**.
 //
-// The reference Python implementation of plist/tlist (pcollections/_list.py)
-// is the interface spec this file follows: same method names, same
-// semantics, translated onto our own FAT tree instead of the external
-// `phamt` package's PHAMT/THAMT types.
-//
-// Scope note: plist/tlist implement the "must implement" core of
-// PersistentSequence/TransientSequence (see pcollections/abc/_seq.py's own
-// docstrings for that list) natively in C -- set/delete/append/prepend/
-// insert/clear/transient/persistent/__iter__/__len__/__getitem__/
-// __setitem__/__delitem__/__reduce__ -- plus __repr__/__hash__/__eq__/
-// ordering and cyclic-GC support. PListType/TListType are built as HEAP
-// types at import time (see pcoll_exec_list, and the comment on PListType's
-// declaration below) specifically so they can set PersistentSequence/
-// TransientSequence (imported from pcollections.abc at runtime) as their
-// tp_base: this means everything else -- count/index/extend/sort/reverse/
-// __add__/__radd__/__iadd__/__mul__/__rmul__/__imul__/pop/remove/copy/
-// __json__/isinstance(..., collections.abc.Sequence)/etc. -- comes for free
-// via ordinary Python-level method inheritance, exactly as if `plist`/
-// `tlist` had been declared in Python as subclasses of those ABC mixins,
-// rather than being reimplemented here. plist/tlist ARE subclassable in C
-// (Py_TPFLAGS_BASETYPE is set on both -- see the note on their PyType_Spec
-// flags below): pcollections._c._core's `llist`/`tllist` subclass them
-// directly, so every construction site that the reference's plist/tlist
-// route through `self._new(...)`/`cls._new(...)`/`cls.empty` now threads
-// `Py_TYPE(self)`/`type` through instead of hardcoding PListType/TListType,
-// mirroring dict.c.h's identical pdict/tdict subclassing support (see that
-// file's header comment for the fuller rationale, including the
-// tp_alloc-vs-PyObject_GC_New memory-safety subtlety that a subclass with
-// auto-added __dict__/__weakref__ slots requires).
+// plist and tlist implement the core sequence methods natively (set,
+// delete, append, prepend, insert, clear, transient/persistent, indexing,
+// slicing, iteration, len), plus repr, hashing, and comparison. The rest of
+// the sequence API (count, index, extend, sort, +, *, pop, ...) is inherited
+// from their pcollections.abc bases (see pcoll_exec_list()). Both types can
+// be subclassed (llist and tllist in lazy.c.h are subclasses), and
+// operations that return a new list build an instance of type(self), or of
+// the type being constructed, so subclasses are preserved.
 
 
 #define PYLEAFSIZE ((uint8_t)sizeof(PyObject*))
 
-// The `start` value used for every freshly-constructed (not derived from an
-// existing list) plist/tlist: the midpoint of the unsigned trieint_t range,
-// rather than 0. A list's elements live at keys start, start+1, ...,
-// start+length-1, and `start` is allowed to wrap (see the file header
-// comment above) -- but fat_firstpath/fat_nextpath iterate in strictly
-// ascending *numeric* key order, not a wraparound-aware "logical" order. If
-// a fresh list started at start==0, a single prepend would underflow start
-// to SIZE_MAX, and that element would then sort *last* instead of *first*
-// during iteration (__iter__/__repr__/list()/__hash__/etc.), even though
-// direct indexing (which computes start+idx explicitly) would still be
-// correct. Starting at the midpoint instead gives symmetric headroom in
-// both directions: reaching real wraparound would take on the order of
-// 2**63 net prepends or appends, which is not a real-world concern.
+// The `start` of a new list: the midpoint of the key range. Iteration visits
+// keys in numeric order, so `start` must not wrap past zero; starting in the
+// middle leaves room for about 2**63 prepends or appends.
 #define LIST_START_MID ((trieint_t)1 << (TRIEINT_WIDTH - 1))
 
 
@@ -96,34 +56,18 @@ static int normalize_index(Py_ssize_t idx, Py_ssize_t n, const char* what,
 
 typedef struct PListObject {
    PyObject_HEAD
-   Trie_t root;         // owned ref; always fully persistent.
-   trieint_t start;      // logical key of element 0 (wraps mod 2**64).
-   Py_ssize_t length;    // cached element count (kept O(1) -- FAT nodes
-                         // don't track a subtree element count themselves).
-   Py_hash_t hashcode;   // -1 == not yet computed (matches CPython's usual
-                         // cached-hash convention; a genuine hash of -1 is
-                         // remapped to -2, same as tuple/str do).
+   Trie_t root;         // owned; always persistent.
+   trieint_t start;      // key of element 0.
+   Py_ssize_t length;    // element count (FAT nodes do not track counts).
+   Py_hash_t hashcode;   // cached hash, or -1 if not yet computed.
    PyObject* weaklist;
 } PListObject;
 
 // The types, the empty plist, and seqstr live in the module state (core.h).
 
-// Takes ownership of the one reference to `root` that callers already hold
-// (per this file's fat_anditem/fat_butitem/tfat_* usage convention) and
-// wraps it in a new plist, EXCEPT that a 0-length result always collapses to
-// the canonical empty plist singleton instead (mirroring FAT's own "0
-// occupants iff canonical empty node" invariant one layer up, and the
-// reference implementation's habit of returning `plist.empty` rather than a
-// fresh 0-length instance).
-// `type` must be PListType or a subtype of it (layout-compatible as a
-// PListObject -- true for any subclass adding no new slots, the only kind
-// this Py_TPFLAGS_BASETYPE-enabled subclassing supports; see pdict_wrap_
-// astype's identical note in dict.c.h). The 0-length collapse to the
-// canonical empty singleton is, per that same file's convention, a pure
-// optimization applied *only* when `type` is exactly PListType -- for any
-// other (necessarily subclass, e.g. llist) target type we always build a
-// fresh, correctly-typed instance instead, since collapsing to the
-// unrelated g_plist_empty would silently lose the subclass.
+// Wraps `root` (whose reference is consumed) in a new instance of `type`,
+// which must be PListType or a subtype of it. An empty result is type's
+// empty instance instead (see plist_type_empty()).
 static PyObject* plist_type_empty(PyTypeObject* type);
 static PyObject* plist_wrap_astype(PyTypeObject* type, Trie_t root,
                                     trieint_t start, Py_ssize_t length) {
@@ -132,11 +76,7 @@ static PyObject* plist_wrap_astype(PyTypeObject* type, Trie_t root,
       fatnode_decref(root, pyobj_decref);
       return plist_type_empty(type);
    }
-   // tp_alloc (not PyObject_GC_New) so a subclass's auto-added trailing
-   // fields (__dict__/__weakref__) are zero-initialized -- see dict.c.h's
-   // pdict_wrap_astype comment for the full rationale. tp_alloc already
-   // GC-tracks + INCREFs the type, so no manual PyObject_GC_Track here;
-   // plist_dealloc balances the INCREF with Py_DECREF(Py_TYPE(self)).
+   // See pdict_wrap_astype() (dict.c.h) on tp_alloc.
    self = (PListObject*)type->tp_alloc(type, 0);
    if (!self) {
       fatnode_decref(root, pyobj_decref);
@@ -192,8 +132,7 @@ static int plist_clear(PListObject* self) {
    return 0;
 }
 static void plist_dealloc(PListObject* self) {
-   // Standard CPython heap-type dealloc idiom, balancing tp_alloc's
-   // Py_INCREF(type) -- see pdict_dealloc's comment in dict.c.h.
+   // See pdict_dealloc() (dict.c.h).
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    PCOLL_CLEAR_WEAKREFS(self);
@@ -206,10 +145,8 @@ static Py_ssize_t plist_length(PListObject* self) {
    return self->length;
 }
 
-// Builds a plist out of a general Python iterable, key 0, 1, 2, ..., as an
-// instance of `type` -- mirrors plist.__new__'s final fallback branch
-// (build a THAMT, then `cls._new(phamt, 0)` unless it's empty, in which case
-// `cls.empty`). Returns NULL (with an exception set) on failure.
+// Builds an instance of `type` holding the elements of `iterable`. Returns
+// NULL with an exception set on failure.
 static PyObject* plist_from_iterable_astype(PyTypeObject* type, PyObject* iterable) {
    PyObject* iterator = PyObject_GetIter(iterable);
    Trie_t root;
@@ -229,10 +166,6 @@ static PyObject* plist_from_iterable_astype(PyTypeObject* type, PyObject* iterab
    }
    fat_freeze(root);
    if (n == 0) {
-      // Explicit collapse-to-cls.empty, matching the reference's own
-      // explicit `if len(phamt) == 0: return cls.empty` check here (plist_
-      // wrap_astype's *implicit* collapse only ever applies when `type` is
-      // exactly PListType, so a subclass target needs this spelled out).
       fatnode_decref(root, pyobj_decref);
       return plist_type_empty(type);
    }
@@ -257,15 +190,12 @@ static PyObject* plist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       return NULL;
    }
    arg = PyTuple_GET_ITEM(args, 0);
-   // (tlist support is wired in further down, once TListType exists --
-   // see plist_new_dispatch() below.)
+   // plist_new_dispatch() is defined after tlist.
    return plist_new_dispatch(type, arg);
 }
 
-// Shared repr/str helper for both types: calls the real
-// pcollections.util.seqstr on `self` (so ordering/formatting/truncation
-// come from the actual reference implementation, not a hand-rolled copy)
-// and wraps the result in the type's delimiter pair.
+// repr/str helper for both types: pcollections.util.seqstr(self), wrapped
+// in the type's delimiters, truncated at 60 characters if `truncate`.
 static PyObject* seq_str(PyObject* self, const char* open, const char* close,
                           int truncate) {
    PyObject* s = call_seqstr(self, 60, truncate, NULL);
@@ -321,9 +251,7 @@ static PyObject* plist_item(PListObject* self, Py_ssize_t i) {
    if (normalize_index(i, self->length, "plist", &idx) < 0) return NULL;
    found = fat_lookup(self->root, self->start + (trieint_t)idx, &valptr);
    if (!found) {
-      // Should be unreachable given the invariant that every logical index
-      // in [0, length) has a real stored key -- but never trust that from
-      // deep inside a C extension without a real check.
+      // Unreachable: every index in [0, length) has a key.
       PyErr_SetString(PyExc_RuntimeError, "plist: internal lookup failure");
       return NULL;
    }
@@ -332,10 +260,9 @@ static PyObject* plist_item(PListObject* self, Py_ssize_t i) {
    return val;
 }
 
-// Shared slice-fetch implementation for plist/tlist: builds a fresh
-// transient tree (keys 0..slicelen-1) out of the elements
-// self->root[self->start + start_i + k*step_i] for k in [0, slicelen), then
-// freezes it. Used by both plist.__getitem__ and tlist.__getitem__.
+// Slicing for plist and tlist: returns a new persistent tree holding the
+// elements root[start + start_i + k*step_i] for k in [0, slicelen), at keys
+// LIST_START_MID + k, and sets *out_n to slicelen.
 static Trie_t fat_getslice(Trie_t root, trieint_t start, Py_ssize_t length,
                            Py_ssize_t start_i, Py_ssize_t stop_i,
                            Py_ssize_t step_i, Py_ssize_t* out_n) {
@@ -365,9 +292,6 @@ static PyObject* plist_subscript(PListObject* self, PyObject* key) {
       if (PySlice_Unpack(key, &a, &b, &c) < 0) return NULL;
       work = fat_getslice(self->root, self->start, self->length, a, b, c, &n);
       if (!work) return NULL;
-      // Matches reference __getitem__'s slice branch: `self._new(...)` --
-      // subclass-preserving (unlike e.g. plist.clear(), which hardcodes the
-      // base plist.empty; see each method's own comment for which case it is).
       return plist_wrap_astype(Py_TYPE(self), work, LIST_START_MID, n);
    } else {
       Py_ssize_t i;
@@ -395,13 +319,9 @@ static PyObject* plist_set(PListObject* self, PyObject* args) {
       Py_INCREF(self);
       return (PyObject*)self;
    }
-   // fat_anditem() is the non-mutating persistent API: it never touches or
-   // consumes a reference to its input tree (unlike tfat_setitem()), so no
-   // incref of self->root is needed here -- self keeps its own reference,
-   // completely unaffected, and new_root is an independently-owned result.
+   // fat_anditem() does not consume its input; new_root is a new reference.
    new_root = fat_anditem(self->root, self->start + (trieint_t)idx, &obj,
                           pyobj_incref);
-   // Matches reference set()'s `self._new(...)` -- subclass-preserving.
    return plist_wrap_astype(Py_TYPE(self), new_root, self->start, self->length);
 }
 
@@ -417,35 +337,25 @@ static PyObject* plist_delete(PListObject* self, PyObject* args) {
    }
    if (normalize_index(index, n, "plist.delete", &idx) < 0) return NULL;
    st = self->start;
-   // NOTE on subclass preservation in delete(): the reference _list.py's
-   // delete() has a genuine, deliberate asymmetry -- these first two "easy"
-   // branches (removing the first or last element directly) call the
-   // hardcoded base `plist._new`/`plist.empty`, NOT `self._new`/`cls.empty`,
-   // so they do NOT preserve a subclass; only the general "moving elements
-   // around" branch below (which the reference spells `self._new(...)`)
-   // does. plist_wrap (hardcoded to PListType) and g_plist_empty here match
-   // that exactly -- this is intentional fidelity to the reference, not an
-   // oversight.
+   // Removing the first or last element is a single trie removal; any other
+   // index shifts the elements on the shorter side by one.
    if (idx == 0) {
       if (n == 1) return plist_type_empty(Py_TYPE(self));
-      // fat_butitem(), like fat_anditem(), never touches or consumes a
-      // reference to its input -- no incref of self->root needed here.
+      // fat_butitem() does not consume its input.
       work = fat_butitem(self->root, st, pyobj_incref);
       return plist_wrap_astype(Py_TYPE(self), work, st + 1, n - 1);
    } else if (idx == n - 1) {
       work = fat_butitem(self->root, st + (trieint_t)idx, pyobj_incref);
       return plist_wrap_astype(Py_TYPE(self), work, st, n - 1);
    }
-   // From here on, `work` is fed through tfat_setitem()/tfat_delitem() (the
-   // *transient*, reference-consuming mutators), so it does need its own,
-   // separately-owned starting reference -- hence the incref self keeps its
-   // own self->root reference throughout, fully unaffected.
+   // The transient mutators consume their input, so `work` starts with its
+   // own reference to the root.
    trienode_incref(self->root);
    work = self->root;
    if (n - idx <= idx) {
       Py_ssize_t ii;
       for (ii = idx; ii < n - 1; ++ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t key = st + (trieint_t)ii;
          fat_lookup(self->root, key + 1, &valptr);
          val = *(PyObject**)valptr;
@@ -456,7 +366,7 @@ static PyObject* plist_delete(PListObject* self, PyObject* args) {
    } else {
       Py_ssize_t ii;
       for (ii = 0; ii < idx; ++ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t key = st + (trieint_t)ii;
          fat_lookup(self->root, key, &valptr);
          val = *(PyObject**)valptr;
@@ -466,17 +376,13 @@ static PyObject* plist_delete(PListObject* self, PyObject* args) {
       st += 1;
    }
    fat_freeze(work);
-   // Unlike the two branches above, this general "moving elements around"
-   // path DOES preserve subclass in the reference (`self._new(...)`).
    return plist_wrap_astype(Py_TYPE(self), work, st, n - 1);
 }
 
 static PyObject* plist_append(PListObject* self, PyObject* obj) {
    Trie_t new_root;
-   // fat_anditem() doesn't touch/consume self->root -- no incref needed.
    new_root = fat_anditem(self->root, self->start + (trieint_t)self->length,
                           &obj, pyobj_incref);
-   // Matches reference append()'s `self._new(...)` -- subclass-preserving.
    return plist_wrap_astype(Py_TYPE(self), new_root, self->start, self->length + 1);
 }
 
@@ -484,7 +390,6 @@ static PyObject* plist_prepend(PListObject* self, PyObject* obj) {
    trieint_t new_start = self->start - 1;
    Trie_t new_root;
    new_root = fat_anditem(self->root, new_start, &obj, pyobj_incref);
-   // Matches reference prepend()'s `self._new(...)` -- subclass-preserving.
    return plist_wrap_astype(Py_TYPE(self), new_root, new_start, self->length + 1);
 }
 
@@ -506,7 +411,7 @@ static PyObject* plist_insert(PListObject* self, PyObject* args) {
    if (n - index <= index) {
       Py_ssize_t ii;
       for (ii = n - 1; ii >= index; --ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t key = st + (trieint_t)ii;
          fat_lookup(self->root, key, &valptr);
          val = *(PyObject**)valptr;
@@ -517,7 +422,7 @@ static PyObject* plist_insert(PListObject* self, PyObject* args) {
    } else {
       Py_ssize_t ii;
       for (ii = 0; ii < index; ++ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t key = st + (trieint_t)ii;
          fat_lookup(self->root, key, &valptr);
          val = *(PyObject**)valptr;
@@ -528,9 +433,6 @@ static PyObject* plist_insert(PListObject* self, PyObject* args) {
                           pyobj_decref);
    }
    fat_freeze(work);
-   // Matches reference insert()'s final `self._new(...)` -- subclass-
-   // preserving (its index==0/index==n edge cases already delegate to
-   // plist_prepend/plist_append above, which are themselves preserving).
    return plist_wrap_astype(Py_TYPE(self), work, st, n + 1);
 }
 
@@ -544,29 +446,25 @@ static PyObject* plist_richcompare(PListObject* self, PyObject* other, int op);
 
 static PyMethodDef plist_methods[] = {
    {"set", (PyCFunction)plist_set, METH_VARARGS,
-    "Returns a copy of the list with the given index set to the given object."},
+    "set($self, index, obj, /)\n--\n\nReturns a copy of the list with the given index set to the given object."},
    {"delete", (PyCFunction)plist_delete, METH_VARARGS,
-    "Returns a copy of the plist with the item at index removed (default: last)."},
+    "delete($self, index=-1, /)\n--\n\nReturns a copy of the plist with the item at index removed (default: last)."},
    {"append", (PyCFunction)plist_append, METH_O,
-    "Returns a new list with object appended."},
+    "append($self, obj, /)\n--\n\nReturns a new list with object appended."},
    {"prepend", (PyCFunction)plist_prepend, METH_O,
-    "Returns a new list with object prepended."},
+    "prepend($self, obj, /)\n--\n\nReturns a new list with object prepended."},
    {"insert", (PyCFunction)plist_insert, METH_VARARGS,
-    "Returns a new plist with object inserted before index."},
+    "insert($self, index, obj, /)\n--\n\nReturns a new plist with object inserted before index."},
    {"clear", (PyCFunction)plist_clear_method, METH_NOARGS,
-    "Returns the empty plist."},
+    "clear($self, /)\n--\n\nReturns the empty plist."},
    {"transient", (PyCFunction)plist_transient, METH_NOARGS,
-    "Efficiently copies the plist into a tlist and returns the tlist."},
+    "transient($self, /)\n--\n\nEfficiently copies the plist into a tlist and returns the tlist."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
 
-// PListType is built as a HEAP type (see the note on its declaration above),
-// via PyType_FromSpecWithBases() in pcoll_exec_list -- so what used to be a
-// single static PyTypeObject initializer is a PyType_Spec/PyType_Slot pair
-// instead; the actual PyTypeObject* is constructed at import time, once
-// PersistentSequence (fetched at runtime from pcollections.abc) is on hand
-// to pass as the base.
+// PListType is a heap type created in pcoll_exec_list() with a
+// pcollections.abc base.
 static PyType_Slot plist_slots[] = {
    {Py_tp_dealloc, (void*)plist_dealloc},
    {Py_tp_repr, (void*)plist_repr},
@@ -576,8 +474,18 @@ static PyType_Slot plist_slots[] = {
    {Py_mp_length, (void*)plist_length},
    {Py_mp_subscript, (void*)plist_subscript},
    {Py_tp_hash, (void*)plist_hash},
-   {Py_tp_doc,
-    (void*)"A persistent list type similar to `list`, backed by a FAT tree."},
+   {Py_tp_doc, (void*)PyDoc_STR(
+      "A persistent (immutable) list.\n"
+      "\n"
+      "Usage::\n"
+      "\n"
+      "    plist() -> an empty plist\n"
+      "    plist(iterable) -> a plist of the elements of iterable\n"
+      "\n"
+      "Methods that would change a list instead return a new plist (set, append,\n"
+      "prepend, extend, insert, delete, drop, remove, pop, sort, reverse, clear).\n"
+      "A plist is hashable if its elements are. transient() returns a tlist copy in\n"
+      "constant time.")},
    {Py_tp_traverse, (void*)plist_traverse},
    {Py_tp_clear, (void*)plist_clear},
    {Py_tp_richcompare, (void*)plist_richcompare},
@@ -590,9 +498,7 @@ static PyType_Spec plist_spec = {
    .name = "pcollections.plist",
    .basicsize = sizeof(PListObject),
    .itemsize = 0,
-   // Py_TPFLAGS_BASETYPE: plist is subclassable (pcollections._c._core's
-   // `llist` subclasses it directly) -- see the file header comment and
-   // dict.c.h's identical note on pdict_spec/tdict_spec's flags.
+   // Subclassable; llist (lazy.c.h) is a subclass.
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = plist_slots,
 };
@@ -603,28 +509,22 @@ static PyType_Spec plist_spec = {
 
 typedef struct {
    PyObject_HEAD
-   Trie_t root;          // owned ref; may be transient or persistent.
+   Trie_t root;          // owned; may be transient or persistent.
    trieint_t start;
    Py_ssize_t length;
-   PyObject* orig;        // cached plist (owned ref), or NULL. Set only by
-                          // plist.transient(); invalidated (decref'd and
-                          // reset to NULL) by every mutation, exactly as the
-                          // reference implementation does. Never set by the
-                          // tlist(plist_instance) constructor path -- see
-                          // that constructor's comment.
+   PyObject* orig;        // the plist this was made from by transient()
+                          // (owned), or NULL; dropped on any change.
    pcoll_tguard guard;    // see core.h.
    PyObject* weaklist;
 } TListObject;
 
-// `type` must be TListType or a subtype of it (see the analogous note on
-// plist_wrap_astype above); `tlist_wrap()` below is the TListType-only
-// convenience wrapper used at call sites that (per the reference _list.py)
-// are never meant to be subclass-aware -- see each call site's own comment.
+// Wraps `root` in a new instance of `type` (TListType or a subtype),
+// consuming the references to `root` and `orig`. tlist_wrap() always makes
+// a plain tlist.
 static PyObject* tlist_wrap_astype(PyTypeObject* type, Trie_t root,
                                    trieint_t start, Py_ssize_t length,
-                                   PyObject* orig /* borrowed; NULL for none */) {
-   // tp_alloc (not PyObject_GC_New) -- see plist_wrap_astype's comment;
-   // tlist_dealloc balances the heap-type INCREF it performs.
+                                   PyObject* orig /* owned; or NULL */) {
+   // See pdict_wrap_astype() (dict.c.h) on tp_alloc.
    TListObject* self = (TListObject*)type->tp_alloc(type, 0);
    if (!self) {
       fatnode_decref(root, pyobj_decref);
@@ -634,11 +534,11 @@ static PyObject* tlist_wrap_astype(PyTypeObject* type, Trie_t root,
    self->root = root;
    self->start = start;
    self->length = length;
-   self->orig = orig;  // ownership transferred in from caller
+   self->orig = orig;
    return (PyObject*)self;
 }
 static PyObject* tlist_wrap(Trie_t root, trieint_t start, Py_ssize_t length,
-                            PyObject* orig /* borrowed; NULL for none */) {
+                            PyObject* orig /* owned; or NULL */) {
    return tlist_wrap_astype(ST(TListType), root, start, length, orig);
 }
 
@@ -658,7 +558,7 @@ static int tlist_clear(TListObject* self) {
    return 0;
 }
 static void tlist_dealloc(TListObject* self) {
-   // See plist_dealloc's comment: balances tp_alloc's Py_INCREF(type).
+   // See pdict_dealloc() (dict.c.h).
    PyTypeObject* tp = Py_TYPE(self);
    PyObject_GC_UnTrack(self);
    PCOLL_CLEAR_WEAKREFS(self);
@@ -672,19 +572,14 @@ static Py_ssize_t tlist_length_impl(TListObject* self) {
 }
 PCOLL_LOCKED0(Py_ssize_t, tlist_length, tlist_length_impl, TListObject*)
 
-// Every real mutation invalidates any cached `_orig` plist -- see this
-// file's header comment on the `orig` field.
+// Drops the cached original; called on every change.
 static void tlist_invalidate_orig(TListObject* self) {
    PyObject* orig = self->orig;
    self->orig = NULL;
    Py_XDECREF(orig);
 }
 
-// `tlist.empty` is a *classmethod* in the reference (unlike plist.empty,
-// which is a plain stored attribute) -- it always builds a fresh instance
-// rather than looking up a cached one, so `tlist_empty_astype` mirrors that
-// directly instead of going through a `pdict_type_empty`-style `.empty`
-// attribute lookup for subclasses.
+// A new empty instance of `type` (tlist.empty() is a classmethod).
 static PyObject* tlist_empty_astype(PyTypeObject* type) {
    return tlist_wrap_astype(type, fat_empty(PYLEAFSIZE), LIST_START_MID, 0, NULL);
 }
@@ -724,24 +619,11 @@ static PyObject* tlist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       return NULL;
    }
    arg = PyTuple_GET_ITEM(args, 0);
-   // isinstance(arg, plist) -- a real isinstance check, matching the
-   // reference exactly (tlist.__new__ has no "isinstance(arg, cls)" or
-   // "isinstance(arg, tlist)" fast path of its own; passing an existing
-   // tlist/subclass instance here falls through to the generic iterable
-   // path below, making an independent copy -- matches the reference's own
-   // asymmetry between `tlist(p)` sharing a plist's root and `tlist(t)`
-   // rebuilding from iteration). Deliberately also matches any future plist
-   // subclass (e.g. llist), sharing its root raw/undereferenced -- see
-   // dict.c.h's analogous comment on tdict_new's pdict-argument branch.
+   // A plist (or subclass) that is not lazy shares its root; the new tlist
+   // copies nodes as it changes them. Unlike plist.transient(), this does
+   // not cache the plist as `orig`. Anything else, including a tlist, is
+   // copied by iteration.
    if (PyObject_TypeCheck(arg, ST(PListType)) && !pcoll_holds_lazy(arg)) {
-      // Direct constructor call: shares the plist's (already fully
-      // persistent) root immediately -- no copying, no freezing needed.
-      // Lazily claimed/copied node-by-node the moment any mutation actually
-      // touches it, exactly as fatnode_set()/fatnode_del() already handle.
-      // Deliberately does NOT cache `_orig` -- only plist.transient() does
-      // that (see tlist's `orig` field comment and plist_transient() below);
-      // this mirrors the reference implementation's own asymmetry between
-      // `tlist(p)` and `p.transient()`.
       PListObject* p = (PListObject*)arg;
       trienode_incref(p->root);
       return tlist_wrap_astype(type, p->root, p->start, p->length, NULL);
@@ -750,8 +632,7 @@ static PyObject* tlist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
 }
 
 // Matches abc/_seq.py's TransientSequence.__repr__/__str__: both use the
-// "[<...>]" delimiter (no repr/str asymmetry here, unlike TransientMapping
-// in dict.c.h), __str__ truncated at 60 chars, __repr__ not.
+// "[<...>]" delimiter, __str__ truncated at 60 chars, __repr__ not.
 static PyObject* tlist_repr(TListObject* self) {
    return seq_str((PyObject*)self, "[<", ">]", 0);
 }
@@ -815,7 +696,7 @@ static void tlist_delete_guarded(TListObject* self, Py_ssize_t idx) {
    // Shift whichever side of idx is shorter over the deleted element.
    if (self->length - idx <= idx) {
       for (ii = idx; ii < self->length - 1; ++ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t k = self->start + (trieint_t)ii;
          fat_lookup(self->root, k + 1, &valptr);
          val = *(PyObject**)valptr;
@@ -826,7 +707,7 @@ static void tlist_delete_guarded(TListObject* self, Py_ssize_t idx) {
                       pyobj_incref, pyobj_decref);
    } else {
       for (ii = idx; ii > 0; --ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t k = self->start + (trieint_t)ii;
          fat_lookup(self->root, k - 1, &valptr);
          val = *(PyObject**)valptr;
@@ -844,7 +725,7 @@ static void tlist_insert_guarded(TListObject* self, Py_ssize_t index,
    tguard_keys_changed(&self->guard);
    if (n - index <= index) {
       for (ii = n; ii > index; --ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t k = self->start + (trieint_t)(ii - 1);
          fat_lookup(self->root, k, &valptr);
          val = *(PyObject**)valptr;
@@ -852,7 +733,7 @@ static void tlist_insert_guarded(TListObject* self, Py_ssize_t index,
       }
    } else {
       for (ii = 0; ii < index; ++ii) {
-         void* valptr; PyObject* val;
+         void* valptr = NULL; PyObject* val;
          trieint_t k = self->start + (trieint_t)ii;
          fat_lookup(self->root, k, &valptr);
          val = *(PyObject**)valptr;
@@ -1103,28 +984,26 @@ static PyObject* plist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)
    return result;
 }
 
-// Matches _list.py's tlist.empty being a *classmethod* (see
-// tdict_empty_classmethod's comment in dict.c.h for the fuller rationale --
-// same pattern here). Previously unexposed to Python at all.
+// tlist.empty() is a classmethod that returns a new empty instance of cls.
 static PyObject* tlist_empty_classmethod(PyObject* cls, PyObject* Py_UNUSED(ignored)) {
    return tlist_empty_astype((PyTypeObject*)cls);
 }
 
 static PyMethodDef tlist_methods[] = {
    {"empty", (PyCFunction)tlist_empty_classmethod, METH_NOARGS | METH_CLASS,
-    "Returns a new, empty tlist."},
+    "empty($type, /)\n--\n\nReturns a new, empty tlist."},
    {"append", (PyCFunction)tlist_append, METH_O,
-    "Appends object to the end of the list."},
+    "append($self, obj, /)\n--\n\nAppends object to the end of the list."},
    {"prepend", (PyCFunction)tlist_prepend, METH_O,
-    "Prepends object to the beginning of the tlist."},
+    "prepend($self, obj, /)\n--\n\nPrepends object to the beginning of the tlist."},
    {"insert", (PyCFunction)tlist_insert, METH_VARARGS,
-    "Inserts the given object before the given index."},
+    "insert($self, index, obj, /)\n--\n\nInserts the given object before the given index."},
    {"clear", (PyCFunction)tlist_clear_method, METH_NOARGS,
-    "Clears all elements from the tlist."},
+    "clear($self, /)\n--\n\nClears all elements from the tlist."},
    {"persistent", (PyCFunction)tlist_persistent, METH_NOARGS,
-    "Efficiently copies the tlist into a plist and returns the plist."},
+    "persistent($self, /)\n--\n\nEfficiently copies the tlist into a plist and returns the plist."},
    {"pop", (PyCFunction)tlist_pop, METH_VARARGS,
-    "Removes and returns the item at index (default last)."},
+    "pop($self, index=-1, /)\n--\n\nRemoves and returns the item at index (default last)."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
@@ -1132,9 +1011,7 @@ static PyMethodDef tlist_methods[] = {
 static PyObject* tlist_richcompare(TListObject* self, PyObject* other, int op);
 static PyObject* tlist_iter(TListObject* self);
 
-// TListType, like PListType above, is built as a heap type via
-// PyType_FromSpecWithBases() in pcoll_exec_list, so it can inherit from
-// TransientSequence.
+// TListType, like PListType, is a heap type created in pcoll_exec_list().
 static PyType_Slot tlist_slots[] = {
    {Py_tp_dealloc, (void*)tlist_dealloc},
    {Py_tp_repr, (void*)tlist_repr},
@@ -1145,9 +1022,17 @@ static PyType_Slot tlist_slots[] = {
    {Py_mp_length, (void*)tlist_length},
    {Py_mp_subscript, (void*)tlist_subscript},
    {Py_mp_ass_subscript, (void*)tlist_ass_subscript},
-   {Py_tp_doc,
-    (void*)"A transient (mutable) list type similar to `list`, backed by a"
-           " FAT tree."},
+   {Py_tp_doc, (void*)PyDoc_STR(
+      "A transient (mutable) list.\n"
+      "\n"
+      "Usage::\n"
+      "\n"
+      "    tlist() -> an empty tlist\n"
+      "    tlist(iterable) -> a tlist of the elements of iterable\n"
+      "\n"
+      "A tlist has the interface of list, plus prepend. persistent() returns a plist\n"
+      "copy in constant time. A tlist is meant to be used by one thread at a time;\n"
+      "a modification that overlaps another modification raises RuntimeError.")},
    {Py_tp_traverse, (void*)tlist_traverse},
    {Py_tp_clear, (void*)tlist_clear},
    {Py_tp_richcompare, (void*)tlist_richcompare},
@@ -1160,9 +1045,7 @@ static PyType_Spec tlist_spec = {
    .name = "pcollections.tlist",
    .basicsize = sizeof(TListObject),
    .itemsize = 0,
-   // Py_TPFLAGS_BASETYPE: tlist is subclassable (pcollections._c._core's
-   // `tllist` subclasses it directly) -- see the file header comment and
-   // dict.c.h's identical note on pdict_spec/tdict_spec's flags.
+   // Subclassable; tllist (lazy.c.h) is a subclass.
    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_BASETYPE,
    .slots = tlist_slots,
 };
@@ -1241,17 +1124,12 @@ static PyObject* tlist_richcompare(TListObject* self, PyObject* other, int op) {
 
 //=============================================================================
 // Iterators.
-// One iterator type per container type (a plist_iterator can't outlive
-// mutation concerns the way a tlist_iterator must eventually care about --
-// see this file's header comment on the "no mutation during iteration of a
-// transient" assumption, enforced later at the Python layer, not here).
-// Both share the same walk (fat_firstpath()/fat_nextpath()); only the owner
-// field's static type differs.
+// One iterator type for plist and one for tlist; they share an
+// implementation (see seqiter_next_impl()).
 
 typedef struct {
    PyObject_HEAD
-   PyObject* owner;   // strong ref to the plist/tlist being iterated; keeps
-                      // root alive.
+   PyObject* owner;   // the plist/tlist being iterated; owned.
    TriePath path;
    int state;         // 0 = not yet started, 1 = active, 2 = exhausted.
    bool transient;    // whether owner is a tlist.
@@ -1367,17 +1245,15 @@ static PyObject* tlist_iter(TListObject* self) {
 
 
 //=============================================================================
-// plist_new()'s tlist-argument case is defined down here, after TListType
-// exists, and dispatched to from plist_new() above via this forward-declared
-// helper. Mirrors plist.__new__'s dispatch chain exactly:
-//   isinstance(arg, tlist)  -> cls.empty or cls._new(frozen root, arg._start)
-//   isinstance(arg, cls)    -> arg, unchanged
-//   isinstance(arg, plist)  -> cls.empty or cls._new(arg's root, arg._start)
-//   else                    -> build fresh from a general iterable
+// plist construction from an argument (defined here because it uses tlist):
+//   type(arg) is the requested type -> arg
+//   lazy collection                 -> copied by iteration
+//   tlist (or subclass)             -> shares its frozen root
+//   plist (or subclass)             -> shares its root
+//   anything else                   -> copied by iteration
 static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
-   // An object of exactly the requested type is returned as-is. Otherwise,
-   // storage is shared only with a list that is not lazy: reading from a
-   // lazy collection computes its values (see _lazy.py).
+   // Storage is not shared with a lazy collection: reading from it computes
+   // its values.
    if (Py_TYPE(arg) == type) {
       Py_INCREF(arg);
       return arg;

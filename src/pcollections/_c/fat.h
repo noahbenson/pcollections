@@ -2,7 +2,7 @@
 // _c/fat.h
 // FAT node construction, update primitives, and per-item operations.
 //
-// See trie.h for the node layout. Every FAT node has exactly FAT_CELLS cells
+// See trie.h for the node layout. Every FAT node has FAT_CELLS cells
 // and a cell's index equals its bit index, so setting or clearing a cell
 // never moves any other cell and a node never needs to grow.
 //
@@ -23,7 +23,7 @@
 //
 // Invariants:
 //  - Dense tree: every occupied cell of a branch at depth d holds a child at
-//    exactly depth d+1 (a branch may have a single child). Only a tree's
+//    depth d+1 (a branch may have a single child). Only a tree's
 //    root may start below depth 0.
 //  - A node has no occupied cells only if it is the canonical empty node
 //    returned by fat_empty().

@@ -176,17 +176,8 @@ class pdict(PersistentMapping):
             t._ndeleted)
     def __hash__(self):
         if self._hashcode is None:
-            # NB: we deliberately do NOT delegate to
-            # PersistentMapping.__hash__ here: that generic default reads
-            # self._els directly (`hash(frozenset(map(lambda u: u[1][0],
-            # self._els))) + 2`), which would include tombstoned slots (see
-            # pcollections/_compact.py) as bogus, bare TOMBSTONE "pairs".
-            # Going through self.items() instead (which already skips
-            # tombstones -- see pdict_items/PDictView above) keeps the
-            # exact same formula/offset while staying tombstone-safe. This
-            # mirrors why the C implementation (pcollections/_c/dict.c.h)
-            # implements __hash__ natively rather than relying on this same
-            # generic default -- see that file's own comment.
+            # Same formula as PersistentMapping.__hash__, cached. items()
+            # skips tombstones (see pcollections/_compact.py).
             h = hash(frozenset(self.items())) + 2
             object.__setattr__(self, '_hashcode', h)
         return self._hashcode
@@ -243,23 +234,16 @@ class pdict(PersistentMapping):
         else:
             # First make sure it's not already in the dict, tracking the
             # previous link (index and value) as we walk the chain so that,
-            # if we reach the end without finding `key`, we know exactly
-            # which slot's `next` pointer to patch in order to append.
-            # (An earlier version of this loop never advanced `ii` here --
-            # a copy-paste omission that both infinite-looped on any hash
-            # collision between unequal keys, and, even fixed to terminate,
-            # would have patched the wrong slot's `next` pointer, since it
-            # never tracked the previous link either. Confirmed against
-            # tdict.__setitem__/pset.add() below, both of which already get
-            # this right.)
+            # if we reach the end without finding `key`, we know which
+            # slot's `next` pointer to patch in order to append.
             ii_prev = None
             kv_prev = None
             while ii is not None:
                 (kv,ii_next) = self._els[ii]
                 (k,v) = kv
                 if k is key or key == k:
-                    # It is in the dict; either it's exactly in the dict or we
-                    # replace it.
+                    # It is in the dict; either the value is already
+                    # identical or we replace it.
                     if val is v:
                         return self
                     else:
@@ -292,10 +276,9 @@ class pdict(PersistentMapping):
             (kv,ii_next) = self._els[ii]
             (k,v) = kv
             if k is key or key == k:
-                # We remove this entry! Unlink it from its collision chain
-                # (exactly as a real removal would) but overwrite its els
-                # slot with a tombstone rather than actually removing it --
-                # see pcollections/_compact.py for why.
+                # We remove this entry: unlink it from its collision chain
+                # and overwrite its els slot with a tombstone rather than
+                # removing the slot (see pcollections/_compact.py).
                 if ii_prev is None:
                     # We're removing from the front of the list.
                     if ii_next is None:
@@ -346,7 +329,7 @@ pdict.empty = pdict._new(FAT.empty, AMT.empty, 0, 0, 0)
 
 #===============================================================================
 # tdict
-# The transient set type.
+# The transient dict type.
 
 class tdict_view(Set):
     def __new__(cls, d):
@@ -643,10 +626,9 @@ class tdict(TransientMapping):
 #===============================================================================
 # Compaction.
 # Rebuilds els/idx from scratch, live entries only, renumbered 0..count-1 in
-# original (insertion) order -- mirrors dict_rebuild_compacted()/_c/dict.c.h.
-# Implemented by simply replaying every live (key, val) pair, in original
-# order, through tdict.__setitem__'s already-correct chain-building logic,
-# rather than duplicating that logic a second time here.
+# original (insertion) order, as dict_rebuild_compacted() in _c/dict.c.h
+# does. Replays every live (key, val) pair, in order, through
+# tdict.__setitem__ to reuse its chain-building logic.
 
 def _kv_key(kv):
     return kv[0]

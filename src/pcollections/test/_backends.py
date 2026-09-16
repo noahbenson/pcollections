@@ -3,7 +3,7 @@
 # pcollections/test/_backends.py
 # Collects the pure-Python and (if available) C implementations of the
 # pcollections types into a single BACKENDS dict, keyed by backend name, so
-# the rest of the test suite can run the exact same test logic against both
+# the rest of the test suite can run the same test logic against both
 # and can compare the two for interface/behavior parity.
 # By Noah C. Benson
 
@@ -102,12 +102,8 @@ def make_tests(base_name, mixin_cls, module_globals):
     made = {}
     for name, backend in BACKENDS.items():
         cls_name = f"{base_name}_{name}"
-        # Plain functions (unlike classes/instances) are descriptors: stored
-        # as a class attribute and accessed via `self.holdlazy`, a bare
-        # `def holdlazy(obj): ...` would be bound as an instance method
-        # (silently swallowing `self` as its first argument) instead of
-        # being called as the free function the test bodies expect --
-        # staticmethod() suppresses that binding.
+        # Plain functions are descriptors, so `self.holdlazy` would bind a
+        # stored function as a method; staticmethod() prevents that.
         attrs = {
             k: (staticmethod(v) if inspect.isfunction(v) else v)
             for (k, v) in backend.items()

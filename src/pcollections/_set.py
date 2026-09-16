@@ -97,11 +97,8 @@ class pset(PersistentSet):
         )
     def __hash__(self):
         if self._hashcode is None:
-            # PersistentSet.__hash__ (`hash(frozenset(self)) + 1`) already
-            # goes through __iter__ (fixed above to skip tombstones), unlike
-            # PersistentMapping.__hash__ in _dict.py -- so, unlike pdict,
-            # there's nothing tombstone-unsafe to work around here; this
-            # override exists purely to cache the result, exactly as before.
+            # PersistentSet.__hash__ goes through __iter__, which skips
+            # tombstones; this override caches the result.
             h = PersistentSet.__hash__(self)
             object.__setattr__(self, '_hashcode', h)
         return self._hashcode
@@ -160,10 +157,9 @@ class pset(PersistentSet):
         while ii is not None:
             (x,ii_next) = self._els[ii]
             if x is obj or obj == x:
-                # We remove this object! Unlink it from its collision chain
-                # but overwrite its els slot with a tombstone rather than
-                # actually removing it -- see pcollections/_compact.py, and
-                # pdict.drop()'s matching comment in _dict.py, for why.
+                # We remove this object: unlink it from its collision chain
+                # and overwrite its els slot with a tombstone rather than
+                # removing the slot (see pcollections/_compact.py).
                 if ii_prev is None:
                     # We're removing from the front of the list.
                     if ii_next is None:

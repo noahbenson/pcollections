@@ -63,18 +63,12 @@ def _seq_index(seq, value, start, stop):
 class _PersistentSequenceBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentSequence``'s concrete
     method bodies, so that ``pcollections._c._core.plist`` can inherit them
-    without inheriting ``ABCMeta`` anywhere in its base chain -- see
-    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
-    3.14 rationale.
+    without ``ABCMeta`` in its bases; see ``_PersistentBase``'s docstring
+    (``abc/_core.py``).
 
-    Like ``PersistentSet``, ``PersistentSequence`` never actually relied on
-    any concrete method from ``collections.abc.Sequence`` -- every method
-    below was already implemented directly on ``PersistentSequence`` itself,
-    so this is a pure relocation of that existing code (list.c.h's plist/tlist
-    additionally implement their own native ``__eq__``/``__lt__``/etc. via a
-    real ``Py_tp_richcompare`` slot, so the comparison methods here are never
-    actually reached for the C backend -- but are kept, faithfully, for the
-    pure-Python backend and any other subclass that doesn't override them).
+    The C plist/tlist implement comparisons in their own
+    ``Py_tp_richcompare`` slot, so the comparison methods here serve the
+    pure-Python backend and other subclasses that don't override them.
     """
     __slots__ = ()
     # Methods which must be implemented in the children.
@@ -84,7 +78,7 @@ class _PersistentSequenceBase(_PersistentBase):
         """
         raise NotImplementedError()
     def delete(self, index=-1):
-        """"Returns a copy of the persistent sequence with the item at index
+        """Returns a copy of the persistent sequence with the item at index
         removed (default index: last)."""
         raise NotImplementedError()
     def append(self, obj):
@@ -172,7 +166,7 @@ class _PersistentSequenceBase(_PersistentBase):
         n = len(self)
         return map(self.__getitem__, range(n - 1, -1, -1))
     def count(self, value):
-        """Returns the number of occurences of value."""
+        """Returns the number of occurrences of value."""
         return _seq_count(self, value)
     def extend(self, iterable):
         """Returns a copy of the persistent sequence with the iterable's
@@ -281,7 +275,7 @@ class PersistentSequence(_PersistentSequenceBase, Persistent, Sequence):
      * ``__json__`` (for the ``json_fix`` module)
 
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()
@@ -293,16 +287,11 @@ class PersistentSequence(_PersistentSequenceBase, Persistent, Sequence):
 class _TransientSequenceBase(Transient):
     """Plain (non-``ABCMeta``) mixin holding ``TransientSequence``'s concrete
     method bodies, so that ``pcollections._c._core.tlist`` can inherit them
-    without inheriting ``ABCMeta`` anywhere in its base chain -- see
-    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
-    3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
-    can subclass it directly.)
-
-    As with ``_PersistentSequenceBase``, this is a pure relocation of
-    ``TransientSequence``'s already-self-contained methods -- nothing here is
-    a new port from stdlib ``collections.abc.Sequence``/``MutableSequence``.
+    without ``ABCMeta`` in its bases; see ``_PersistentBase``'s docstring
+    (``abc/_core.py``). ``Transient`` is not ``ABCMeta``-based, so this
+    subclasses it directly.
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()
@@ -344,7 +333,7 @@ class _TransientSequenceBase(Transient):
         for (ii,el) in enumerate(sorted(self, key=key, reverse=reverse)):
             self[ii] = el
     def count(self, value):
-        """Returns the number of occurences of value."""
+        """Returns the number of occurrences of value."""
         return _seq_count(self, value)
     def extend(self, iterable):
         """Extends tlist by appending elements from the iterable."""
@@ -492,7 +481,7 @@ class TransientSequence(_TransientSequenceBase, Transient, MutableSequence):
      * ``count`` (``Sequence``)
      * ``extend(iterable)`` (``Sequence``)
      * ``index(value)`` (``Sequence``)
-     * ``copy()`` (``Transient```)
+     * ``copy()`` (``Transient``)
      * ``__add__``
      * ``__radd__``
      * ``__iadd__``
@@ -502,7 +491,7 @@ class TransientSequence(_TransientSequenceBase, Transient, MutableSequence):
      * ``__reduce__`` (for pickling)
      * ``__json__`` (for the ``json_fix`` module)
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()

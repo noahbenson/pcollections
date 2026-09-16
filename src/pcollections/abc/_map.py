@@ -22,17 +22,11 @@ def _held(mapping):
 class _PersistentMappingBase(_PersistentBase):
     """Plain (non-``ABCMeta``) mixin holding ``PersistentMapping``'s concrete
     method bodies, so that ``pcollections._c._core.pdict`` can inherit them
-    without inheriting ``ABCMeta`` anywhere in its base chain -- see
-    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
-    3.14 rationale.
+    without ``ABCMeta`` in its bases; see ``_PersistentBase``'s docstring
+    (``abc/_core.py``).
 
-    Every method here (other than the newly-added ``__eq__``) used to be
-    defined directly in ``PersistentMapping``'s own class body; only
-    ``__eq__`` is new -- ``PersistentMapping`` never defined its own, relying
-    instead on the real ``collections.abc.Mapping.__eq__`` it inherited, which
-    a plain (non-``Mapping``) base obviously can't do, so this is a faithful,
-    unmodified port of that stdlib method (comparing two mappings' items as
-    dicts) rather than a new algorithm.
+    ``__eq__`` is a copy of ``collections.abc.Mapping.__eq__``, which this
+    plain base cannot inherit.
     """
     __slots__ = ()
     # Methods which must be implemented in the children.
@@ -58,12 +52,9 @@ class _PersistentMappingBase(_PersistentBase):
     def __repr__(self):
         return f"{{|{seqstr(self)}|}}"
     def __eq__(self, other):
-        # Ported verbatim from collections.abc.Mapping.__eq__: only ever
-        # comparable to other Mappings -- real subclasses and virtual ones
-        # registered via .register() both satisfy this isinstance check, so
-        # e.g. a pdict compares fine against a plain dict (Mapping.register()'d
-        # in the stdlib) or another pdict/tdict -- by comparing their
-        # contents as plain dicts.
+        # Same as collections.abc.Mapping.__eq__: compares equal only to
+        # other Mappings (including registered virtual subclasses such as
+        # dict), by comparing contents as dicts.
         if not isinstance(other, Mapping):
             return NotImplemented
         return dict(self.items()) == dict(other.items())
@@ -242,7 +233,7 @@ class PersistentMapping(_PersistentMappingBase, Mapping, Persistent):
      * `__reduce__` (for pickling)
      * `__json__` (for `json_fix` module)
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()
@@ -254,16 +245,12 @@ class PersistentMapping(_PersistentMappingBase, Mapping, Persistent):
 class _TransientMappingBase(Transient):
     """Plain (non-``ABCMeta``) mixin holding ``TransientMapping``'s concrete
     method bodies, so that ``pcollections._c._core.tdict`` can inherit them
-    without inheriting ``ABCMeta`` anywhere in its base chain -- see
-    ``_PersistentBase``'s docstring (``abc/_core.py``) for the full CPython
-    3.14 rationale. (``Transient`` itself was never ``ABCMeta``-based, so this
-    can subclass it directly rather than needing its own ``_core.py``-style
-    split.)
+    without ``ABCMeta`` in its bases; see ``_PersistentBase``'s docstring
+    (``abc/_core.py``). ``Transient`` is not ``ABCMeta``-based, so this
+    subclasses it directly.
 
-    As with ``_PersistentMappingBase``, every method here except ``__eq__`` was
-    already defined directly on ``TransientMapping``; ``__eq__`` is a faithful
-    port of the real ``collections.abc.Mapping.__eq__`` that ``TransientMapping``
-    used to inherit instead (via ``MutableMapping``).
+    As in ``_PersistentMappingBase``, ``__eq__`` is a copy of
+    ``collections.abc.Mapping.__eq__``.
     """
     __slots__ = ()
     # tdict is mutable, so it is not hashable.
@@ -279,8 +266,8 @@ class _TransientMappingBase(Transient):
     def __repr__(self):
         return f"{{<{seqstr(self)}>}}"
     def __eq__(self, other):
-        # See _PersistentMappingBase.__eq__'s comment: a verbatim port of
-        # collections.abc.Mapping.__eq__.
+        # Same as collections.abc.Mapping.__eq__ (see
+        # _PersistentMappingBase.__eq__).
         if not isinstance(other, Mapping):
             return NotImplemented
         return dict(self.items()) == dict(other.items())
@@ -429,7 +416,7 @@ class TransientMapping(_TransientMappingBase, MutableMapping, Transient):
      * `__reduce__` (for pickling)
      * `__json__` (for the `json_fix` module)
     """
-    # See Persistent.__slots__'s comment (abc/_core.py): keeps this mixin,
+    # See _PersistentBase.__slots__'s comment (abc/_core.py): keeps this mixin,
     # and anything that mixes it in, from acquiring an instance
     # __dict__/__weakref__ of its own.
     __slots__ = ()

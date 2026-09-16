@@ -2,48 +2,34 @@
 ################################################################################
 # pcollections/abc/_view.py
 # Plain (non-ABCMeta) mixins backing pcollections._c._core's six view types
-# (pdict_keys/pdict_items/pdict_values/tdict_keys/tdict_items/tdict_values).
+# (pdict_keys/pdict_items/pdict_values/tdict_keys/tdict_items/tdict_values),
+# and the view classes for the C backend's lazy mappings.
 # By Noah C. Benson
 
 """Plain mixins for the ``dict``-view family (``keys()``/``items()``/
 ``values()``).
 
-``pcollections._c._core``'s six view heap types used to inherit directly from
-``collections.abc.KeysView``/``ItemsView``/``ValuesView`` (which is exactly
-what the pure-Python ``pcollections._dict``'s own ``pdict_keys``/``pdict_items``/
-``pdict_values`` still do -- see that module -- since ordinary Python class
-statements are unaffected by the issue described next).
-
-CPython 3.14 tightened ``PyType_FromSpecWithBases``/``PyType_FromMetaclass``
-(the C API ``_c/dict.c.h``'s ``build_view_type()`` uses to build these six types
-as heap types at import time) to unconditionally reject a base whose metaclass
-overrides ``tp_new`` -- which ``ABCMeta`` does, and ``KeysView``/``ItemsView``/
-``ValuesView`` (via ``MappingView``/``Set``/``Collection``/...) are all
-``ABCMeta``-based -- so building these view types directly on top of them is no
-longer possible from C on 3.14. See ``pcollections.abc._core``'s
-``_PersistentBase`` docstring for the fuller CPython 3.14 story; this module
-is the dict-view-family analogue of that fix.
+On CPython 3.14, ``PyType_FromSpecWithBases``/``PyType_FromMetaclass``
+reject a base whose metaclass overrides ``tp_new``, as ``ABCMeta`` does, so
+the C backend cannot build its view heap types directly on
+``collections.abc.KeysView``/``ItemsView``/``ValuesView``. (See
+``pcollections.abc._core._PersistentBase`` for the same issue with the
+collection types.)
 
 ``_MappingViewBase``/``_KeysViewBase``/``_ItemsViewBase``/``_ValuesViewBase``
-below are faithful, verbatim ports of ``collections.abc``'s own
-``MappingView``/``KeysView``/``ItemsView``/``ValuesView`` concrete method
-bodies (and, for the ``Set``-derived Keys/Items views, of ``collections.abc.Set``
-itself), with no ``ABCMeta`` anywhere in their inheritance chain.
-``_c/dict.c.h`` builds its six view heap types on top of these instead, then
-calls ``.register()`` on the real ``collections.abc.KeysView``/``ItemsView``/
-``ValuesView`` (see ``_c/dict.c.h``'s ``pcoll_exec_dict()``) so that
-``isinstance``/``issubclass`` checks against those stdlib ABCs -- and,
-transitively, against ``collections.abc.Set``/``Collection``/``Iterable``/
-``Container``/``Sized`` for the Keys/Items views -- keep working exactly as
-before, without the C API ever being asked to build a heap type on top of an
-``ABCMeta`` base.
+copy the concrete methods of ``collections.abc``'s ``MappingView``/
+``KeysView``/``ItemsView``/``ValuesView`` (and, for the set-like Keys/Items
+views, of ``collections.abc.Set``) without ``ABCMeta`` in their MRO.
+``build_view_type()`` in ``_c/dict.c.h`` builds the six view types on these,
+and ``pcoll_exec_dict()`` registers them with the stdlib view ABCs so that
+``isinstance``/``issubclass`` checks against those ABCs (and the ABCs they
+derive from) succeed.
 
-These mixins aren't used by pcollections.abc's own public classes (there
-never were public ``pcollections.abc.KeysView``-style classes -- the pure
-Python backend uses the real stdlib ABCs directly, and still does), so unlike
-``_core.py``/``_map.py``/``_set.py``/``_seq.py``'s "base" mixins, there's no
-public counterpart here to keep behaviorally identical; these exist solely
-for ``_c/dict.c.h`` to build on.
+These mixins are used only by the C backend; the pure-Python backend's views
+(in ``pcollections._dict``) subclass the stdlib ABCs directly.
+
+``ldict_items``/``ldict_values`` at the end of this module are the views
+returned by the C backend's ``ldict``/``tldict`` ``items()``/``values()``.
 """
 
 from collections.abc import (Set, Iterable)
@@ -53,13 +39,11 @@ from collections.abc import (Set, Iterable)
 # _MappingViewBase
 
 class _MappingViewBase:
-    """Plain port of ``collections.abc.MappingView``'s concrete methods.
+    """Plain copy of ``collections.abc.MappingView``'s concrete methods.
 
-    Declares the ``_mapping`` slot itself (matching
-    ``MappingView.__slots__ = ('_mapping',)``) so that a heap type built
-    directly on this class gets exactly the extra storage its C ``dictview_new``
-    (``_c/dict.c.h``) needs -- see ``_c/dict.c.h``'s ``build_view_type()``, which
-    reads this class's (dynamically, via ``tp_basicsize``) computed size.
+    Declares the ``_mapping`` slot (as ``MappingView`` does), which provides
+    the storage ``dictview_new`` in ``_c/dict.c.h`` uses;
+    ``build_view_type()`` reads this class's ``tp_basicsize``.
     """
     __slots__ = ('_mapping',)
     def __len__(self):
@@ -72,14 +56,10 @@ class _MappingViewBase:
 # _SetViewMixin
 
 class _SetViewMixin:
-    """Plain port of ``collections.abc.Set``'s concrete methods, for the two
-    (``Keys``/``Items``) of the three dict-view mixins that are also
-    set-like. Ported verbatim from ``collections.abc.Set``, with one
-    intentional simplification: ``_from_iterable`` always returns a plain
-    ``set`` (matching ``KeysView``/``ItemsView``'s own ``_from_iterable``
-    override in the stdlib -- ``Set``'s own default, ``cls(it)``, isn't
-    applicable here since these view types' constructors take a mapping, not
-    an arbitrary iterable).
+    """Plain copy of ``collections.abc.Set``'s concrete methods, for the
+    set-like Keys/Items view mixins. ``_from_iterable`` returns a plain
+    ``set``, as ``KeysView``/``ItemsView`` do in the stdlib, since the view
+    constructors take a mapping rather than an iterable.
     """
     __slots__ = ()
     def __le__(self, other):
@@ -159,7 +139,7 @@ class _SetViewMixin:
 # _KeysViewBase / _ItemsViewBase / _ValuesViewBase
 
 class _KeysViewBase(_MappingViewBase, _SetViewMixin):
-    """Plain port of ``collections.abc.KeysView``'s own ``__contains__``/
+    """Plain copy of ``collections.abc.KeysView``'s ``__contains__``/
     ``__iter__`` (its comparisons/set-algebra come from ``_SetViewMixin``, its
     ``__len__``/``__repr__``/``_mapping`` from ``_MappingViewBase``)."""
     __slots__ = ()
@@ -172,7 +152,7 @@ class _KeysViewBase(_MappingViewBase, _SetViewMixin):
 
 
 class _ItemsViewBase(_MappingViewBase, _SetViewMixin):
-    """Plain port of ``collections.abc.ItemsView``'s own ``__contains__``/
+    """Plain copy of ``collections.abc.ItemsView``'s ``__contains__``/
     ``__iter__``."""
     __slots__ = ()
     def __contains__(self, item):
@@ -191,9 +171,9 @@ class _ItemsViewBase(_MappingViewBase, _SetViewMixin):
 
 
 class _ValuesViewBase(_MappingViewBase):
-    """Plain port of ``collections.abc.ValuesView``'s own ``__contains__``/
-    ``__iter__`` (``ValuesView`` is ``Collection``-based, not ``Set``-based --
-    no set algebra to port)."""
+    """Plain copy of ``collections.abc.ValuesView``'s ``__contains__``/
+    ``__iter__`` (``ValuesView`` is not set-like, so there is no set
+    algebra)."""
     __slots__ = ()
     def __contains__(self, value):
         for key in self._mapping:

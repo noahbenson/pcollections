@@ -19,12 +19,10 @@ defining the per-backend `TestCase` subclasses (e.g. `TestPDict_python`,
 and `TestPDict_c` when the C extension is available) as module attributes,
 which is what lets `unittest`'s test discovery find them.
 
-`_trie.py` is the one exception to the "backend-parametrized" pattern above:
-it tests pcollections._trie (the pure-Python AMT/FAT port used only by the
-pure-Python backend -- see that module's docstring) directly, since there is
-no separate C-level equivalent exposed at the Python layer to parametrize
-against. Its TestCase classes are plain (not per-backend), but are picked up
-by suite()/discovery the same way as everything else here.
+`_trie.py` is the exception: it tests pcollections._trie (the pure-Python
+AMT/FAT tries used by the pure-Python backend) directly, since the C tries
+are not exposed to Python. Its TestCase classes are not per-backend, but
+suite()/discovery pick them up the same way.
 """
 
 from . import _backends

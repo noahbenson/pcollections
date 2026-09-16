@@ -16,14 +16,10 @@ def _index_arg(seq, k):
         raise TypeError(f"{type(seq).__name__} indices must be integers or "
                         f"slices, not {type(k).__name__}") from None
 
-# plist/tlist encode their contents as a single dense, (possibly negative-
-# indexed, via prepend) integer-keyed trie -- exactly the "insertion-order
-# value table" role _c/list.c.h's own FAT plays (see that file and
-# pcollections/_trie.py's module docstring for why FAT is, in this pure-
-# Python port, an AMT specialized only by name/role rather than a
-# structurally distinct trie kind). Imported under the names this file
-# already uses throughout (PHAMT/THAMT) so the external `phamt` package
-# dependency is removed with no other change needed below.
+# plist/tlist store their contents in a single integer-keyed FAT (keys may
+# be negative after prepends), as the C backend's list does. See
+# pcollections/_trie.py's module comment. The trie types are used below
+# under the names PHAMT/THAMT.
 from ._trie import (
     FAT as PHAMT,
     TFAT as THAMT
@@ -110,7 +106,7 @@ class plist(PersistentSequence):
         new_phamt = phamt.assoc(index, obj)
         return self._new(new_phamt, start)
     def delete(self, index=-1):
-        """"Returns a copy of the plist with the item at index removed (default
+        """Returns a copy of the plist with the item at index removed (default
         index: last)."""
         index = operator.index(index)
         phamt = self._phamt

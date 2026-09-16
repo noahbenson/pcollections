@@ -326,7 +326,8 @@ typedef struct pcoll_state {
    struct TrieData* g_fat_empty3;
    // shared
    PyObject* g_seqstr;
-   // Not an object: whether util.frozenset_hash matches (set.c.h).
+   // Not an object: pcollections.util._core.FROZENSET_HASH_MATCHES, i.e.
+   // whether pset_hash() may compute frozenset's hash itself (set.c.h).
    int frozenset_hash_ok;
 } pcoll_state;
 
@@ -476,6 +477,7 @@ static int pcoll_registry_add(pcoll_state* state) {
    return rc;
 }
 
+#if PY_VERSION_HEX >= 0x03090000
 // Removes `state` from the registry (if present) and invalidates every
 // thread's cached lookup.
 static void pcoll_registry_remove(pcoll_state* state) {
@@ -492,6 +494,7 @@ static void pcoll_registry_remove(pcoll_state* state) {
    }
    PCOLL_MUTEX_UNLOCK(&g_registry_lock);
 }
+#endif
 
 // Returns the module state for the current interpreter. Never fails while
 // any pcollections object or type exists in this interpreter (they keep the
@@ -701,7 +704,7 @@ static PyTypeObject* pcoll_partner_type(PyObject* self, const char* attr,
 }
 
 // Returns a new reference to the empty instance of persistent type `type`:
-// type.empty if it is an instance of exactly `type`, and otherwise a new
+// type.empty if its type is `type` itself, and otherwise a new
 // empty instance made by `make`, which is then cached as type.empty unless
 // the type defines its own `empty`.
 static PyObject* pcoll_type_empty(PyTypeObject* type,

@@ -1,150 +1,78 @@
 # -*- coding: utf-8 -*-
 ################################################################################
 # pcollections/_trie.py
-# A pure-Python port of pcollections/_c/{trie,amt,fat}.h's persistent and
-# transient trie data structures, used as a drop-in replacement for the
-# external `phamt` package (PHAMT/THAMT) that the pure-Python reference
-# implementation (_dict.py/_list.py/_set.py/_lazy.py) previously depended on.
+# Pure-Python persistent and transient integer-keyed tries, the pure-Python
+# counterpart of pcollections/_c/{trie,amt,fat}.h. They back the pure-Python
+# backend (_dict.py/_list.py/_set.py/_lazy.py).
 #
-# This module exposes four classes with an interface deliberately compatible
-# with phamt.PHAMT/phamt.THAMT, since that's the exact surface _dict.py/
-# _list.py/_set.py already use (`.empty`, `.assoc(k,v)`, `.dissoc(k)`,
-# `.get(k,default)`, `__getitem__`, `__len__`, `__iter__` yielding `(k,v)`
-# pairs, `TAMT(amt)`/`TFAT(fat)` wrapping a persistent instance into a
-# transient one, and `.persistent()` converting back):
-#   - AMT / TAMT   -- persistent / transient "array-mapped trie", mirroring
-#                     _c/amt.h; used for pdict/pset's `_idx` (hash(key) ->
-#                     FAT-chain-head-index) and, generically, for plist's
-#                     `_phamt` (index -> element, including negative indices
-#                     during prepends -- see "AMT and FAT are unified" below).
-#   - FAT / TFAT   -- persistent / transient "fixed-arity trie", mirroring
-#                     _c/fat.h; used for pdict/pset's `_els` (dense
-#                     insertion-ordered index -> value-table entry).
+# Interface (used by _dict.py/_list.py/_set.py): `.empty`, `.assoc(k,v)`,
+# `.dissoc(k)`, `.get(k,default)`, `__getitem__`, `__len__`, `__iter__`
+# yielding `(k,v)` pairs, `TAMT(amt)`/`TFAT(fat)` wrapping a persistent
+# instance into a transient one, and `.persistent()` converting back.
+#   - AMT / TAMT   -- persistent / transient array-mapped trie (cf. _c/amt.h);
+#                     used for pdict/pset's `_idx` (hash(key) ->
+#                     FAT-chain-head-index).
+#   - FAT / TFAT   -- persistent / transient fixed-arity trie (cf. _c/fat.h);
+#                     used for pdict/pset's `_els` (dense insertion-ordered
+#                     index -> value-table entry) and plist's `_phamt`
+#                     (index -> element, including negative indices from
+#                     prepends).
 #
-# AMT and FAT are unified in this port
+# AMT and FAT share one implementation
 # -------------------------------------------------------------------------
-# _c/trie.h says of the C implementation: "Because AMT and FAT tries share
-# most of their layout and code, as much functionality as possible is placed
-# in the trienode_* functions." In C, what's left genuinely different
-# between them is entirely about *memory layout* performance: FAT uses a
-# fixed branching factor (FAT_CELLS in _c/trie.h, chosen so one node fits in
-# 256 bytes / 4 cache lines) with every one of its cells physically always
-# allocated regardless of occupancy, and maintains a
-# "dense tree" invariant (every depth from a node down to its leaves is
-# explicitly materialized, even a branch with only 1 occupied cell) rather
-# than AMT's "minimal tree" invariant (single-child branches are collapsed
-# away, and amt_subjoin() skips straight to the first depth where two
-# subtrees' prefixes actually diverge). _c/fat.h's own file header comment
-# confirms this dense-tree behavior is a design *choice*, not a correctness
-# requirement: fat_lookup() is written as a plain loop that re-reads each
-# node's real depth every iteration (exactly like amt_lookup()) specifically
-# so it stays correct "if FAT's per-depth materialization were ever relaxed
-# again in the future."
+# In C, FAT differs from AMT only for memory-layout reasons: a fixed
+# branching factor with all cells allocated, and a "dense tree" invariant
+# (every depth is materialized) instead of AMT's "minimal tree" invariant
+# (single-child branches are collapsed). None of that helps in Python, so
+# this module implements one minimal-tree, path-compressed trie (the
+# module-level functions below) and defines FAT/TFAT as subclasses of
+# AMT/TAMT. Everything _dict.py/_list.py/_set.py rely on FAT for (in
+# particular ascending-order iteration; see "Iteration order" below) holds.
+# The classes differ only in their key-normalization hook
+# (`_normalize_key()`), which keeps them separate types matching the C
+# `idx` (AMT) vs `els` (FAT) roles.
 #
-# None of that C-specific cache-layout optimization has any equivalent
-# benefit in Python: there's no fixed-size cell array to pre-allocate, no
-# cache-line packing to reason about, and Python's own int is already
-# arbitrary-precision, so there's no analog of FAT's base-29 digit
-# arithmetic (chosen purely to make the fixed-size layout fit in 256 bytes)
-# to replicate either. So this port implements ONE generic, minimal-tree,
-# path-compressed trie engine (functions prefixed `_node_*`/`_trie_*` below)
-# -- structurally an AMT in the _c/amt.h sense -- and defines FAT/TFAT as
-# thin, identically-behaved subclasses of AMT/TAMT. This is a deliberate
-# engineering simplification, not a shortcut: it cuts the amount of new,
-# security/correctness-sensitive trie code roughly in half (one algorithm to
-# get right instead of two near-duplicates), and every *externally
-# observable* behavior FAT is actually relied on for by _dict.py/_list.py/
-# _set.py (dense ascending-order iteration in insertion order in
-# particular -- see "Iteration order" below) still holds.
+# Memory management: trie nodes are ordinary Python objects, so Python's
+# reference counting and garbage collector manage their lifetimes; there is
+# no manual refcounting as in _c/trie.h.
 #
-# The one place AMT and FAT still differ, deliberately, is key normalization
-# (see AMT._normalize_key()/FAT._normalize_key() below) -- kept as a real,
-# distinct hook (not just a naming difference) so the two remain genuinely
-# separate types, matching dict.c.h's own `idx` (AMT) vs `els` (FAT) roles,
-# and so a future divergence in behavior (if one is ever needed) has
-# somewhere to live without disturbing the other.
+# Thread-safety: a persistent AMT/FAT and its nodes are never mutated after
+# construction (assoc()/dissoc() build new nodes and share the rest), so
+# persistent instances can be read from multiple threads without locking. A
+# transient TAMT/TFAT, like `dict`/`list`, is meant to have a single owner
+# at a time; concurrent mutation is a caller error and is not guarded by
+# locks. Because every mutation is an ordinary Python attribute or list
+# assignment, such misuse can produce stale or inconsistent values but not
+# memory corruption, even on a free-threaded build. test/_trie.py's
+# TestTrieThreadStress exercises this.
 #
-# Reference counting: unlike _c/trie.h's manual, atomic `refcount` field and
-# hand-written trienode_incref()/decref()/free() (needed in C because
-# malloc'd trie nodes are otherwise invisible to CPython's own object
-# lifetime tracking), this port's trie nodes are ordinary Python objects.
-# Python's own reference counting / garbage collector is solely responsible
-# for their lifetime; this file never touches a refcount directly. (Per
-# Noah's explicit instruction: "It can use the Python reference tracking
-# system instead of its own tracking system.")
-#
-# Thread-safety (no-GIL): a *persistent* AMT/FAT (and any of its nodes) is
-# never mutated after construction -- assoc()/dissoc() always build new
-# nodes and structurally share the rest, exactly like the C implementation
-# -- so persistent instances are safe to share and read from multiple
-# threads with no locking of any kind, GIL or no GIL. A *transient*
-# TAMT/TFAT follows the same single-owner convention as Python's own
-# `dict`/`list` (or Clojure's transients): it is meant to be mutated by
-# exactly one owner at a time, with no internal locking on the hot path, and
-# concurrent misuse from multiple threads is a caller bug, not something
-# this module guards against with locks. What this module *does* guarantee,
-# with or without the GIL, is memory safety: every mutation here is an
-# ordinary Python attribute/list assignment (`node.bitmap = ...`,
-# `node.cells[i] = ...`, never raw/`ctypes`-style memory access), so even
-# under a genuine data race from concurrent misuse under a free-threaded
-# (no-GIL) build, the worst outcome is a caller seeing a stale or
-# inconsistent *value* -- never a crash, a segfault, or corrupted Python
-# refcounts/GC state, since ordinary attribute and list mutation is exactly
-# the operation CPython's free-threaded build itself guarantees stays
-# memory-safe under concurrent access. See test/_trie.py's
-# `test_thread_stress` for a GIL-based (this sandbox has no free-threaded
-# Python build available to test against real no-GIL semantics -- confirmed
-# acceptable with Noah) multithreaded stress test exercising this.
-#
-# The claiming discipline that makes single-owner mutation safe: every node
-# has an `owner` slot, normally `None` (meaning "persistent / shared -- copy
-# before mutating"). A transient trie carries its own private, unique
-# `_token` object (just a fresh `object()`); a node is "claimed" by that
-# transient -- i.e. safe to mutate in place -- exactly when
+# Claiming discipline: every node has an `owner` slot, normally `None`
+# (persistent/shared; copy before mutating). A transient carries a private
+# `_token` (a fresh `object()`), and a node may be mutated in place iff
 # `node.owner is token`. Mutating operations check this per node as they
-# walk down the tree: an already-claimed node is mutated directly; a
-# not-yet-claimed (persistent or, in principle, someone else's transient)
-# node is copied first, with the copy's `owner` set to `token`, before being
-# mutated -- mirroring amtnode_set()/amtnode_del()'s "claim-or-mutate"
-# contract in _c/amt.h exactly, just without any refcounting to manage.
+# walk down: a claimed node is mutated directly; any other node is copied,
+# the copy's `owner` set to `token`, and the copy mutated. This mirrors
+# amtnode_set()/amtnode_del() in _c/amt.h.
 #
-# Iteration order: `_iter_node()` below walks bit-index 0 upward at every
-# level (matching trienode_first_bitindex()/trienode_next_bitindex()'s
-# ascending scan in _c/trie.h), and each level's own bit-index corresponds
-# to the *most significant* still-undetermined chunk of the key
-# (amtdepth_shift() extracts from the top down: the root's own digit is the
-# highest AMT_DIVBITS bits, not the lowest). A most-significant-digit-first,
-# ascending-at-each-level walk over a fixed-width unsigned integer is
-# exactly radix/lexicographic order, which for equal-width unsigned
-# integers is exactly ascending numeric order -- so `_iter_node()` always
-# yields keys in ascending order of their *normalized* (masked-to-unsigned,
-# see _normalize_key()) representation, regardless of how the tree happens
-# to be shaped by path compression. This matters concretely for FAT/TFAT's
-# `_els`-table role: pdict/pset's `__iter__` relies on ascending index order
-# to reproduce insertion order (see _dict.py's `_els` usage) -- and for
-# plist's `_phamt` role, which stores possibly-*negative* indices (via
-# prepend) directly: _list.py's own __iter__ already special-cases the
-# negative/non-negative boundary explicitly (splitting the walk at 0)
-# precisely because masking a negative Python int to an unsigned width
-# makes it sort *after* every non-negative key -- so this module only needs
-# to guarantee ascending order *within* a run of same-signed keys (which two's
-# -complement masking preserves exactly, since unsigned comparison of two
-# same-width two's-complement values of the same sign matches their signed
-# comparison), which is exactly what callers already assume.
+# Iteration order: `_iter_node()` visits bit-indices in ascending order at
+# every level, and each level's bit-index is the most significant
+# still-undetermined digit of the key (the root holds the highest
+# AMT_DIVBITS bits). That is ascending numeric order of the normalized
+# (masked-to-unsigned; see _normalize_key()) keys, regardless of tree shape.
+# pdict/pset rely on this to iterate `_els` in insertion order. For plist's
+# `_phamt`, masking makes negative keys sort after all non-negative ones;
+# _list.py's __iter__ handles this by splitting the walk at 0, so only
+# ascending order within same-signed keys is required, which masking
+# preserves.
 
 __all__ = ["AMT", "TAMT", "FAT", "TFAT"]
 
 
 #===============================================================================
 # Bit-width configuration.
-# Mirrors _c/trie.h's AMT_DIVBITS/TRIEINT_WIDTH-derived constants. Unlike C's
-# trieint_t (a size_t, typically but not guaranteed 64 bits), Python's own
-# hash() is documented to always fit in a Py_hash_t (a signed word the same
-# width as size_t on the build it's running on) -- practically universally
-# 64 bits on any platform this fallback is likely to run on today, so 64 is
-# hardcoded here rather than probed at import time. This is a faithful
-# match, not an arbitrary Python-side restriction: the C implementation has
-# exactly the same practical 64-bit limit on essentially every build.
+# Mirrors _c/trie.h's AMT_DIVBITS/TRIEINT_WIDTH-derived constants. The width
+# is fixed at 64 bits, which matches Py_hash_t (and the C trieint_t) on
+# practically every platform.
 
 WIDTH = 64
 DIVBITS = 5
@@ -223,13 +151,12 @@ def _divergence_depth(pa, pb):
 # or a "twig" (depth == MAX_DEPTH; `cells` holds leaf values directly). Both
 # shapes use the same struct: `bitmap` records which of the (32, or 16 for a
 # twig) digit slots at this node's depth are occupied, and `cells` holds
-# exactly that many entries, compacted (via popcount(bitmap & below-bit
-# mask), exactly like AMT's own amtnode_bit2cellindex()) into ascending
-# digit order -- there is no FAT-style "always all cells physically
-# present" layout anywhere in this port; see the module docstring's "AMT and
-# FAT are unified" section for why.
+# that many entries, compacted (via popcount(bitmap & below-bit mask), as in
+# amtnode_bit2cellindex()) into ascending digit order. There is no FAT-style
+# fully allocated layout; see the module comment's "AMT and FAT share one
+# implementation" section.
 #
-# `prefix` holds the real key bits from the root down through (but not
+# `prefix` holds the key bits from the root down through (but not
 # including) this node's own digit -- i.e., every bit *this node's own
 # digit position and below* is zeroed, mirroring amt_1leaf()'s
 # `key & ~AMT_TWIG_MASK` and amt_subjoin()'s `prefix & gemask(shift)`. This
@@ -237,7 +164,7 @@ def _divergence_depth(pa, pb):
 # `node.prefix | bitindex` (see _iter_node()) and what _prefix_match() (via
 # a *shallower* node's own prefix check) validates against.
 #
-# `owner`: see the module docstring's "claiming discipline" paragraph.
+# `owner`: see the module comment's "claiming discipline" paragraph.
 # `None` means persistent/shared (must be copied before mutating).
 
 class _Node:
@@ -258,13 +185,13 @@ class _Node:
 def _empty_node():
     # The canonical empty node (of either kind -- there's nothing
     # kind-specific about an empty node): depth 0, no bits set, no cells.
-    # Never claimed by any transient (owner stays None permanently), exactly
-    # like amt_empty()'s singleton in _c/amt.h.
+    # Never claimed by any transient (owner stays None), like amt_empty()'s
+    # singleton in _c/amt.h.
     return _Node(0, 0, 0, [])
 
 
 def _1leaf(key, val, owner=None):
-    """A brand-new twig node containing exactly one key/value pair. Mirrors
+    """A new twig node containing one key/value pair. Mirrors
     amt_1leaf()."""
     bi = key & REMMASK
     prefix = key & ~REMMASK
@@ -296,7 +223,7 @@ def _find_path(root, key):
     """Walks from `root` toward wherever `key` would live, returning
     `(path, found, is_beneath)`:
       - `path` is a list of `(node, bitindex)` pairs, root first.
-      - `found` is True iff `key` is actually present (`path[-1]` is then
+      - `found` is True iff `key` is present (`path[-1]` is then
         the twig containing it).
       - `is_beneath` is True iff `key` *could* live under `path[-1]`'s
         subtree (its prefix matches) even though it isn't there yet --
@@ -324,7 +251,7 @@ def _find_path(root, key):
 
 def _iter_node(node):
     """Yields every (key, value) pair beneath `node`, in ascending
-    normalized-key order -- see the module docstring's "Iteration order"
+    normalized-key order -- see the module comment's "Iteration order"
     section for why this ordering falls out automatically."""
     bitmap = node.bitmap
     if node.depth == MAX_DEPTH:
@@ -426,8 +353,7 @@ def _collapse(node):
     """If `node` is a branch left with exactly one child, replace it with
     that lone child directly (maintaining the minimal-tree invariant: a
     branch always has >= 2 children); otherwise return `node` unchanged.
-    Mirrors amt_collapse() -- much simpler here, since there's no manual
-    refcounting to juggle around the replacement."""
+    Mirrors amt_collapse()."""
     if node.depth != MAX_DEPTH and len(node.cells) == 1:
         return node.cells[0]
     return node
@@ -437,7 +363,7 @@ def _collapse(node):
 # Mutating (claim-or-mutate-in-place) node primitives, for transient tries.
 # Mirror amtnode_set()/amtnode_del(): if `node` is already claimed by this
 # transient (node.owner is token), mutate it directly; otherwise claim a
-# fresh copy first. See the module docstring's "claiming discipline"
+# fresh copy first. See the module comment's "claiming discipline"
 # paragraph.
 
 def _node_set(node, bi, val, token):
@@ -477,7 +403,7 @@ def _node_del(node, bi, token):
 # tamt_delitem(). Each returns `(new_root, changed)`: `changed` is whether
 # the live element count went up (assoc/setitem: True means a new key was
 # added, not just an existing one overwritten) or down (dissoc/delitem:
-# True means a key was actually removed) -- letting the public class's
+# True means a key was removed), letting the public class's
 # `_count` bookkeeping avoid a second, redundant lookup pass.
 
 def assoc_root(root, key, val):
@@ -579,14 +505,14 @@ def delitem_root(root, key, token):
 
 
 #===============================================================================
-# Public, PHAMT/THAMT-compatible classes.
+# Public classes.
 
 class AMT:
     """A persistent (immutable) array-mapped trie: a mapping from
     fixed-width integer keys (arbitrary Python ints, including negative
     ones -- see _normalize_key()) to arbitrary Python values, path-
-    compressed and structurally shared between versions exactly like
-    _c/amt.h's AMT (see the module docstring for how FAT/TFAT relate).
+    compressed and structurally shared between versions like _c/amt.h's
+    AMT (see the module comment for how FAT/TFAT relate).
 
     Never constructed directly with a value; use `AMT.empty` and build up
     from there with `.assoc(key, val)`, or wrap a `TAMT` and call
@@ -597,10 +523,8 @@ class AMT:
     empty = None  # set to AMT._wrap(_empty_node(), 0) below the class body.
 
     def __new__(cls):
-        # `AMT()` (no arguments) conveniently returns the canonical empty
-        # instance -- phamt.PHAMT is never actually called this way by
-        # _dict.py/_list.py/_set.py (they only ever use `.empty`), but
-        # supporting it is harmless and convenient for tests.
+        # `AMT()` (no arguments) returns the canonical empty instance. The
+        # backend modules use `.empty`; this form is convenient for tests.
         return cls.empty
 
     @classmethod
@@ -615,11 +539,11 @@ class AMT:
 
     @staticmethod
     def _normalize_key(key):
-        # See the module docstring's "Iteration order" section: masking a
-        # possibly-negative key to an unsigned WIDTH-bit representation
-        # (exactly like C's trieint_t reinterpretation of a signed
-        # Py_hash_t/ssize_t) preserves ordering *within* same-signed runs of
-        # keys, which is all any caller in this codebase relies on.
+        # See the module comment's "Iteration order" section: masking a
+        # possibly-negative key to an unsigned WIDTH-bit value (like C's
+        # trieint_t reinterpretation of a signed Py_hash_t/ssize_t)
+        # preserves ordering within same-signed keys, which is all callers
+        # rely on.
         return key & MASK_WIDTH
 
     def __len__(self):
@@ -658,11 +582,8 @@ class AMT:
         if not removed:
             return self
         if newroot.bitmap == 0:
-            # A tree that's drained to nothing: hand back the actual
-            # canonical `.empty` singleton (like amt_empty()'s own
-            # contract in _c/amt.h -- "swap this one-off empty result for
-            # the shared canonical one") rather than a distinct, merely
-            # equal-by-value empty instance.
+            # Return the canonical `.empty` singleton (as amt_empty() does
+            # in _c/amt.h) rather than a new empty instance.
             return type(self).empty
         return type(self)._wrap(newroot, self._count - 1)
 
@@ -683,11 +604,8 @@ class AMT:
         return dict(iter(self)) == dict(iter(other))
 
     def __hash__(self):
-        # Persistent and structurally comparable via __eq__, so a stable
-        # hash is meaningful; not used anywhere in this codebase's own
-        # hot paths (pdict/pset compute their own hash over elements, not
-        # over the AMT/FAT itself), but there's no reason to leave this
-        # unhashable given __eq__ is defined.
+        # Consistent with __eq__. pdict/pset hash their elements, not the
+        # AMT/FAT, so this is not used on any hot path.
         return hash((type(self).__name__, frozenset(iter(self))))
 
     def __repr__(self):
@@ -697,7 +615,7 @@ class AMT:
 
 class TAMT:
     """A transient (in-place-mutable) counterpart to AMT. See the module
-    docstring's thread-safety section: intended for single-owner mutation,
+    comment's thread-safety section: intended for single-owner mutation,
     like Python's own `dict`/`list`, not for lock-protected sharing across
     threads."""
     __slots__ = ('_root', '_count', '_token')
@@ -781,22 +699,13 @@ class TAMT:
             result = cls.empty
         else:
             result = cls._wrap(root, self._count)
-        # Retire this transient's claim on every node it currently owns by
-        # rotating to a fresh, private token: the result above shares
-        # `root` (and everything reachable from it) directly, with no copy
-        # taken here -- this call is meant to be O(1)/O(log n), mirroring
-        # tamt_setitem()'s "root is handed off, not copied" contract in
-        # _c/amt.h -- so any *further* mutation through this TAMT must
-        # claim (copy-on-write) a fresh copy of a node before mutating it
-        # in place, even a node this TAMT itself built and previously owned
-        # outright, or that mutation would silently corrupt the persistent
-        # snapshot just handed back above. This mirrors how a Clojure
-        # transient is retired by persistent! (there, continued use after
-        # persistent! is instead simply forbidden -- this port allows it,
-        # at the cost of this one fresh `object()` allocation, since
-        # pdict/tdict's own tdict.persistent() offers no such warning to
-        # its callers and is not itself always the last thing done with a
-        # given tdict).
+        # The result shares `root` without copying, so drop this
+        # transient's claim on every node it owns by switching to a fresh
+        # token. Later mutations through this TAMT then copy nodes before
+        # changing them instead of corrupting the returned snapshot. Unlike
+        # Clojure's persistent!, continued use of the transient is allowed,
+        # since tdict.persistent() is not always the last operation on a
+        # tdict.
         object.__setattr__(self, '_token', object())
         return result
 
@@ -814,24 +723,19 @@ TAMT._persistent_class = AMT
 
 
 class FAT(AMT):
-    """A persistent "fixed-arity trie": in this port, an AMT specialized
-    for dense, non-negative, sequentially-assigned integer keys (mirroring
-    _c/fat.h's role as pdict/pset's `_els` insertion-order value table).
-    See the module docstring's "AMT and FAT are unified" section: FAT is
-    behaviorally an AMT here (same path-compressed minimal-tree algorithm),
-    kept as a distinct class for interface clarity and so it stays a
-    separate, independently-testable type rather than a bare alias."""
+    """A persistent "fixed-arity trie": an AMT used for dense, non-negative,
+    sequentially-assigned integer keys (the role _c/fat.h plays as
+    pdict/pset's `_els` insertion-order value table). See the module
+    comment's "AMT and FAT share one implementation" section: FAT uses the
+    same algorithm as AMT but is a distinct, separately testable type."""
     __slots__ = ()
 
     empty = None  # set to FAT._wrap(_empty_node(), 0) below.
 
     @staticmethod
     def _normalize_key(key):
-        # FAT keys are always already non-negative dense integers (an
-        # insertion counter that only grows), so no masking is strictly
-        # needed -- but applying the same normalization as AMT costs
-        # nothing for a key already in range and keeps both classes
-        # trivially substitutable for one another.
+        # FAT keys are normally non-negative already; applying the same
+        # normalization as AMT keeps the two classes interchangeable.
         return key & MASK_WIDTH
 
 
@@ -839,7 +743,7 @@ FAT.empty = FAT._wrap(_empty_node(), 0)
 
 
 class TFAT(TAMT):
-    """Transient counterpart to FAT. See TAMT and the module docstring."""
+    """Transient counterpart to FAT. See TAMT and the module comment."""
     __slots__ = ()
 
     _persistent_class = FAT

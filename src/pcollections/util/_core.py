@@ -131,8 +131,8 @@ def seqstr(seq, maxlen=None, sep=", ", tostr=repr):
     Mappings are converted to `"key: value"` strings.
 
     The option `maxlen` may be set to a positive integer to fill in the string
-    with an ellipsis in the case that it goes to long; for exaple,
-    `seqstr(range(10), 12)` would return `"0, 1, 2 ..."`.
+    with an ellipsis in the case that it goes too long; for example,
+    `seqstr(range(10), 12)` would return `"0, 1, 2, ..."`.
     """
     if isinstance(seq, Mapping):
         orig_tostr = tostr

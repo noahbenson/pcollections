@@ -5,65 +5,31 @@
 // (hash(elem) -> index) and a FAT used as an insertion-ordered element table
 // (index -> (elem, next_index)).
 //
-// This is deliberately almost the same file as dict.c.h, with the value half
-// of every (key, value, next) triple removed -- see dict.c.h's own file header
-// for the full rationale behind the two-trie design, the tombstone-based
-// deletion scheme, and the compaction policy; only the differences from
-// dict.c.h are called out in comments here.
+// The design follows dict.c.h (see its file comment) without the values:
 //
-//  - `els` (a FAT) is the insertion-ordered element table, dense indices
-//    0, 1, ..., `top`-1. Each leaf is a `SetEntry` (see below): the element
-//    plus the FAT index of the *next* entry sharing the same hash (or
-//    SET_NO_NEXT), forming a singly-linked collision chain. Iterating `els`
-//    in ascending index order (fat_firstpath/fat_nextpath) therefore visits
-//    elements in insertion order, exactly like pdict/tdict's own `els`.
-//  - `idx` (an AMT) maps hash(elem) -> the FAT index of the *first* entry in
-//    that hash's collision chain, exactly as in dict.c.h.
+//  - `els` (a FAT) is the insertion-ordered element table, with keys
+//    0, 1, ..., top-1. Each leaf is a SetEntry: the element and the index of
+//    the next entry whose element has the same hash (or SET_NO_NEXT).
+//  - `idx` (an AMT) maps hash(elem) to the index of the first entry in that
+//    hash's collision chain.
 //
-// Compaction: identical policy and mechanism to dict.c.h's -- discard()
-// overwrites the doomed slot with a tombstone (see setentry_is_tombstone()
-// below) rather than actually removing it from `els` (removing a *middle*
-// FAT index would shift every later index down by one, silently
-// invalidating `idx` and every collision-chain `.next` pointer at or past
-// that index -- this is not a hypothetical concern: it is exactly the bug
-// that dict.c.h's own tombstone scheme was written to fix, confirmed via a
-// dedicated debug walk during that work). `ndeleted > 1024**2 or
-// ndeleted > 0.3*count` (checked after every mutating op) triggers a
-// from-scratch rebuild of `els`/`idx` with the live elements renumbered
-// 0..count-1 in their original insertion order.
+// Deletion tombstones the entry's slot, and compaction uses the same policy
+// as dict.c.h.
 //
 // Every FAT node here has leafsize == sizeof(SetEntry); every AMT node has
 // leafsize == sizeof(trieint_t).
 //
-// Scope note: pset/tset implement the "must implement" primitives of
-// PersistentSet/TransientSet (see pcollections/abc/_set.py) natively in C --
-// add/discard/clear/transient/__len__/__iter__/__contains__ for pset;
-// add/discard/clear/persistent/__len__/__iter__/__contains__ for tset --
-// plus __hash__ (pset only; MutableSet's default is already fully generic
-// -- hash(frozenset(self)) + 1 -- so tset need only have it disabled, not
-// replaced). Everything else -- pop/remove/addall/discardall/removeall/
-// union/intersection/difference/symmetric_difference/isdisjoint/issubset/
-// issuperset/__eq__/__ne__/__lt__/__le__/__gt__/__ge__/__or__/__and__/
-// __sub__/__xor__/__ior__/__iand__/__isub__/__ixor__/__reduce__/__str__/
-// __repr__ -- is inherited for free from PersistentSet/TransientSet (which
-// in turn get their Set-algebra defaults from collections.abc.Set/
-// MutableSet), via the same PyType_FromSpecWithBases heap-type technique
-// dict.c.h/list.c.h use. Like pdict/tdict, pset/tset are not subclassable
-// (Py_TPFLAGS_BASETYPE left unset) -- note for later: the planned ldict/
-// llist-style lazy subclasses will need BASETYPE added to whichever of
-// these C types they end up inheriting from.
-//
-// pset/tset do NOT get native __repr__/__str__ overrides the way pdict/
-// tdict do: PersistentSet.__str__/__repr__/TransientSet.__str__/__repr__
-// are fully generic (built from seqstr(self, ...), which only needs
-// __iter__), so they're left to inherit rather than being reimplemented
-// natively -- see the note on the "same slot-inheritance uncertainty as
-// tp_hash" below for why this was decided empirically rather than assumed.
+// pset and tset implement add, discard, clear, transient/persistent, len,
+// iteration, membership, repr and str natively, plus __hash__ (pset); the
+// rest of the set API (set algebra, comparisons, pop, remove, ...) is
+// inherited from their pcollections.abc bases (see pcoll_exec_set()). Both
+// types can be subclassed, and operations that return a new set build an
+// instance of type(self), or of the type being constructed.
 
 
 //=============================================================================
-// SetEntry: the FAT leaf type for `els`. Mirrors dict.c.h's DictEntry minus
-// the value.
+// SetEntry: the FAT leaf type for `els` (dict.c.h's DictEntry without the
+// value).
 
 typedef struct {
    PyObject* key;
@@ -75,7 +41,7 @@ typedef struct {
 #define SETIDXLEAFSIZE ((uint8_t)sizeof(trieint_t))
 #define SET_NO_NEXT (~(trieint_t)0)
 
-// Compaction thresholds -- identical to dict.c.h's.
+// Compaction thresholds (the same as dict.c.h's).
 #define SET_COMPACT_ABS_THRESHOLD ((Py_ssize_t)1024 * 1024)
 #define SET_COMPACT_FRAC_NUM 3
 #define SET_COMPACT_FRAC_DEN 10
@@ -84,8 +50,8 @@ typedef struct {
 //=============================================================================
 // Leaf refcounting callbacks.
 
-// els leaves (SetEntry) own a reference to their key. idx leaves are raw
-// FAT indices -- nothing to refcount.
+// els leaves (SetEntry) own a reference to their key; idx leaves are plain
+// integers.
 // A tombstone's key is NULL.
 static void setentry_incref(void* v) {
    SetEntry* e = (SetEntry*)v;
@@ -97,10 +63,8 @@ static void setentry_decref(void* v) {
 }
 
 //=============================================================================
-// Tombstones -- see dict.c.h's much longer comment (near dictentry_is_
-// tombstone()) for the full rationale for why deletion must overwrite
-// rather than remove a FAT slot. Identical scheme here, just for SetEntry: a
-// tombstone is an entry whose key is NULL.
+// Tombstones: an entry whose key is NULL (see dictentry_is_tombstone() in
+// dict.c.h).
 static int setentry_is_tombstone(const SetEntry* e) {
    return e->key == NULL;
 }
@@ -113,7 +77,7 @@ static void set_make_tombstone(SetEntry* out) {
 
 
 //=============================================================================
-// Hash-key conversion -- identical to dict.c.h's dict_hash_key().
+// Hash-key conversion (as dict_hash_key() in dict.c.h).
 static int set_hash_key(PyObject* key, trieint_t* out) {
    Py_hash_t h = PyObject_Hash(key);
    if (h == -1 && PyErr_Occurred()) return -1;
@@ -123,13 +87,8 @@ static int set_hash_key(PyObject* key, trieint_t* out) {
 
 
 //=============================================================================
-// Core chain-walking primitive shared by pset and tset. Mirrors dict.c.h's
-// dict_chain_find() exactly (including *out_prev being set on BOTH the
-// found and not-found paths -- dict.c.h's very first version of this function
-// only set it on the not-found path, which was the root cause of a nasty,
-// near-100%-reproducible corruption bug in pdict_drop()/tdict's __delitem__
-// reading uninitialized stack garbage whenever the target was actually
-// found; getting this right from the start here avoids repeating that).
+// Collision-chain lookup shared by pset and tset; see dict_chain_find() in
+// dict.c.h. *out_prev is set whether or not the element is found.
 static int set_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
                           PyObject* key, trieint_t* out_index,
                           trieint_t* out_prev,
@@ -202,8 +161,8 @@ typedef struct PSetObject {
    Trie_t els;           // FAT: index -> SetEntry. Persistent.
    Py_ssize_t top;        // next fresh index to hand out.
    Py_ssize_t count;      // number of live entries (== len()).
-   Py_ssize_t ndeleted;   // holes burned by deletions since last compaction.
-   Py_hash_t hashcode;    // -1 == not yet computed.
+   Py_ssize_t ndeleted;   // tombstones since the last compaction.
+   Py_hash_t hashcode;    // cached hash, or -1 if not yet computed.
    PyObject* weaklist;
 } PSetObject;
 
@@ -277,10 +236,8 @@ static PyObject* pset_wrap_astype(PyTypeObject* type, Trie_t els, Trie_t idx,
    return (PyObject*)self;
 }
 
-// Rebuilds a fresh, fully transient (els, idx) pair containing exactly the
-// live entries currently in (els, idx), renumbered 0..count-1 in their
-// original insertion-order sequence. Consumes neither input. Mirrors
-// dict.c.h's dict_rebuild_compacted() exactly, minus the value half.
+// Builds new transient tries holding the live entries of `els`, renumbered
+// 0..count-1 in insertion order; see dict_rebuild_compacted() in dict.c.h.
 static int set_rebuild_compacted(Trie_t els, Trie_t idx,
                                   Trie_t* out_els, Trie_t* out_idx,
                                   Py_ssize_t* out_top) {
@@ -424,11 +381,8 @@ static PyObject* pset_add(PSetObject* self, PyObject* obj) {
          fat_lookup(self->els, prev, &ep);
          memcpy(&patched, ep, sizeof(SetEntry));
          patched.next = (trieint_t)new_top;
-         // fat_anditem() is non-consuming (leaves its input tree untouched
-         // and independently valid), so the intermediate `prev_els` result
-         // from the append above must be explicitly decref'd once we're
-         // done reading from it -- see dict.c.h's pdict_set() for the
-         // identical concern.
+         // fat_anditem() does not consume its input, so the intermediate
+         // tree is released here.
          prev_els = new_els;
          new_els = fat_anditem(prev_els, prev, &patched, setentry_incref);
          fatnode_decref(prev_els, setentry_decref);
@@ -490,10 +444,7 @@ static PyObject* pset_discard(PSetObject* self, PyObject* obj) {
          pentry.next = entry.next;
          trienode_incref(self->idx);
          new_idx = self->idx;
-         // OVERWRITE found_index's slot with a tombstone via fat_anditem()
-         // -- must never be fat_butitem(), which would shift every later
-         // index down by one; see the tombstone comment near
-         // setentry_is_tombstone() at the top of this file.
+         // Relink the previous entry, then tombstone the deleted slot.
          tmp_els = fat_anditem(self->els, prev, &pentry, setentry_incref);
          new_els = fat_anditem(tmp_els, found_index, &tombstone, setentry_incref);
          fatnode_decref(tmp_els, setentry_decref);
@@ -529,9 +480,7 @@ static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored));
 static PyObject* pset_iter(PSetObject* self);
 
 // Matches abc/_set.py's PersistentSet.__repr__/__str__: both use the
-// "{|...|}" delimiter (same shape as PersistentMapping's -- distinguished
-// only by content, since seqstr on a non-Mapping just joins repr()s with no
-// ": "), __str__ truncated at 60 chars, __repr__ not.
+// "{|...|}" delimiter, __str__ truncated at 60 chars, __repr__ not.
 static PyObject* pset_repr(PSetObject* self) {
    PyObject* s = call_seqstr((PyObject*)self, 0, 0, NULL);
    PyObject* result;
@@ -551,13 +500,13 @@ static PyObject* pset_str(PSetObject* self) {
 
 static PyMethodDef pset_methods[] = {
    {"add", (PyCFunction)pset_add, METH_O,
-    "Returns a copy of the pset that includes the given object."},
+    "add($self, obj, /)\n--\n\nReturns a copy of the pset that includes the given object."},
    {"discard", (PyCFunction)pset_discard, METH_O,
-    "Returns a copy of the pset that does not include the given object."},
+    "discard($self, obj, /)\n--\n\nReturns a copy of the pset that does not include the given object."},
    {"clear", (PyCFunction)pset_clear_method, METH_NOARGS,
-    "Returns the empty pset."},
+    "clear($self, /)\n--\n\nReturns the empty pset."},
    {"transient", (PyCFunction)pset_transient, METH_NOARGS,
-    "Efficiently copies the pset into a tset and returns the tset."},
+    "transient($self, /)\n--\n\nEfficiently copies the pset into a tset and returns the tset."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
@@ -569,9 +518,18 @@ static PyType_Slot pset_slots[] = {
    {Py_sq_length, (void*)pset_length},
    {Py_sq_contains, (void*)pset_contains},
    {Py_tp_hash, (void*)pset_hash},
-   {Py_tp_doc,
-    (void*)"A persistent set type similar to `set`, preserving insertion"
-           " order, backed by an AMT hash table and a FAT element table."},
+   {Py_tp_doc, (void*)PyDoc_STR(
+      "A persistent (immutable) set.\n"
+      "\n"
+      "Usage::\n"
+      "\n"
+      "    pset() -> an empty pset\n"
+      "    pset(iterable) -> a pset of the elements of iterable\n"
+      "\n"
+      "Methods that would change a set instead return a new pset (add, addall,\n"
+      "discard, discardall, remove, removeall, drop, pop, clear). A pset remembers\n"
+      "the order in which its elements were added, and has the same hash as an\n"
+      "equal frozenset. transient() returns a tset copy in constant time.")},
    {Py_tp_traverse, (void*)pset_traverse},
    {Py_tp_clear, (void*)pset_clear},
    {Py_tp_iter, (void*)pset_iter},
@@ -598,9 +556,8 @@ typedef struct {
    Py_ssize_t top;
    Py_ssize_t count;
    Py_ssize_t ndeleted;
-   PyObject* orig;          // cached pset (owned ref), or NULL -- see
-                            // TDictObject's matching field in dict.c.h for the
-                            // exact caching/invalidation convention.
+   PyObject* orig;          // a persistent set with the same contents
+                            // (owned), or NULL; dropped on any change.
    pcoll_tguard guard;      // see core.h.
    PyObject* weaklist;
 } TSetObject;
@@ -660,8 +617,7 @@ static PyObject* tset_empty_astype(PyTypeObject* type) {
                            amt_empty(SETIDXLEAFSIZE), 0, 0, 0, NULL);
 }
 
-// Maybe-compact a tset in place after a mutation -- mirrors dict.c.h's
-// tdict_maybe_compact() exactly.
+// Compacts the tset in place if needed (see tdict_maybe_compact()).
 static int tset_maybe_compact(TSetObject* self) {
    Trie_t c_els, c_idx; Py_ssize_t c_top;
    if (!set_should_compact(self->count, self->ndeleted)) return 0;
@@ -728,8 +684,7 @@ static int tset_discard_guarded(TSetObject* self, trieint_t hkey, PyObject* obj)
    }
    self->count -= 1;
    self->ndeleted += 1;
-   // OVERWRITE found_index's slot with a tombstone -- never delete it; see
-   // the tombstone comment near setentry_is_tombstone().
+   // Tombstone the deleted slot.
    tfat_setitem_at(&self->els, found_index, &tombstone,
                    setentry_incref, setentry_decref);
    tset_invalidate_orig(self);
@@ -771,9 +726,7 @@ static int tset_contains_impl(TSetObject* self, PyObject* el) {
 }
 PCOLL_LOCKED1(int, tset_contains, tset_contains_impl, TSetObject*, PyObject*)
 
-// Builds a fresh, freshly-populated tset out of a general Python iterable of
-// elements. Mirrors tset.__new__'s general-argument fallback in _set.py
-// (`t = cls.empty(); t.addall(arg); return t`).
+// Builds a new `type` instance holding the elements of iterable `arg`.
 static PyObject* tset_build_from_arg(PyTypeObject* type, PyObject* arg) {
    PyObject* obj = tset_empty_astype(type);
    PyObject* iterator;
@@ -930,8 +883,7 @@ static PyObject* tset_clear_method(TSetObject* self, PyObject* Py_UNUSED(ignored
 static PyObject* tset_iter(TSetObject* self);
 
 // Matches abc/_set.py's TransientSet.__repr__/__str__: both use the
-// "{<...>}" delimiter (no repr/str asymmetry here, unlike TransientMapping
-// in dict.c.h).
+// "{<...>}" delimiter, __str__ truncated at 60 chars, __repr__ not.
 static PyObject* tset_repr(TSetObject* self) {
    PyObject* s = call_seqstr((PyObject*)self, 0, 0, NULL);
    PyObject* result;
@@ -949,27 +901,22 @@ static PyObject* tset_str(TSetObject* self) {
    return result;
 }
 
-// Matches abc/_set.py's tset.empty being a *classmethod* (same pattern as
-// tdict_empty_classmethod in dict.c.h). pset/tset don't support subclassing
-// (no Py_TPFLAGS_BASETYPE on their specs), so `cls` here is always exactly
-// TSetType and this is equivalent to just calling tset_empty() -- but it's
-// written to take `cls` anyway for parity with tdict/tlist's classmethod
-// signature. Previously unexposed to Python at all.
+// tset.empty() is a classmethod that returns a new empty instance of cls.
 static PyObject* tset_empty_classmethod(PyObject* cls, PyObject* Py_UNUSED(ignored)) {
    return tset_empty_astype((PyTypeObject*)cls);
 }
 
 static PyMethodDef tset_methods[] = {
    {"empty", (PyCFunction)tset_empty_classmethod, METH_NOARGS | METH_CLASS,
-    "Returns a new, empty tset."},
+    "empty($type, /)\n--\n\nReturns a new, empty tset."},
    {"add", (PyCFunction)tset_add, METH_O,
-    "Adds the given object to the tset."},
+    "add($self, obj, /)\n--\n\nAdds the given object to the tset."},
    {"discard", (PyCFunction)tset_discard, METH_O,
-    "Discards the given object from the tset."},
+    "discard($self, obj, /)\n--\n\nDiscards the given object from the tset."},
    {"clear", (PyCFunction)tset_clear_method, METH_NOARGS,
-    "Clears all elements from the tset."},
+    "clear($self, /)\n--\n\nClears all elements from the tset."},
    {"persistent", (PyCFunction)tset_persistent, METH_NOARGS,
-    "Efficiently copies the tset into a pset and returns the pset."},
+    "persistent($self, /)\n--\n\nEfficiently copies the tset into a pset and returns the pset."},
    PCOLL_CLASS_GETITEM_METHODDEF
    {NULL, NULL, 0, NULL}
 };
@@ -980,10 +927,18 @@ static PyType_Slot tset_slots[] = {
    {Py_tp_str, (void*)tset_str},
    {Py_sq_length, (void*)tset_length},
    {Py_sq_contains, (void*)tset_contains},
-   {Py_tp_doc,
-    (void*)"A transient (mutable) set type similar to `set`, preserving"
-           " insertion order, backed by an AMT hash table and a FAT element"
-           " table."},
+   {Py_tp_doc, (void*)PyDoc_STR(
+      "A transient (mutable) set.\n"
+      "\n"
+      "Usage::\n"
+      "\n"
+      "    tset() -> an empty tset\n"
+      "    tset(iterable) -> a tset of the elements of iterable\n"
+      "\n"
+      "A tset has the interface of set, plus addall, discardall, and removeall.\n"
+      "persistent() returns a pset copy in constant time. A tset is meant to be\n"
+      "used by one thread at a time; a modification that overlaps another\n"
+      "modification raises RuntimeError.")},
    {Py_tp_traverse, (void*)tset_traverse},
    {Py_tp_clear, (void*)tset_clear},
    {Py_tp_iter, (void*)tset_iter},
@@ -999,8 +954,8 @@ static PyType_Spec tset_spec = {
    .slots = tset_slots,
 };
 
-// pset(arg), for `type` pset or a subtype. An object of exactly the requested
-// type is returned as-is; a tset or pset is shared; anything else is
+// pset(arg), for `type` pset or a subtype. An object whose type is `type`
+// is returned as-is; a tset or pset shares its tries; anything else is
 // iterated.
 static PyObject* pset_new_dispatch(PyTypeObject* type, PyObject* arg) {
    PyObject* t;
@@ -1039,14 +994,11 @@ static PyObject* pset_new_dispatch(PyTypeObject* type, PyObject* arg) {
 
 
 //=============================================================================
-// Iterator type. Both pset and tset walk `els` directly via fat_firstpath/
-// fat_nextpath, skipping tombstones -- mirrors dict.c.h's DictIterObject,
-// with no "mode" needed since sets only ever iterate their elements.
+// Iterators. As in dict.c.h, they walk `els` directly, skipping tombstones.
 
 typedef struct {
    PyObject_HEAD
-   PyObject* owner;    // strong ref to the pset/tset being walked -- keeps
-                       // `els` alive for the duration.
+   PyObject* owner;    // the pset/tset being walked; owned.
    TriePath path;
    int state;          // 0 = not yet started, 1 = active, 2 = exhausted,
                        // 3 = failed (the transient changed).

@@ -317,15 +317,9 @@ static inline Trie_t amtnode_del(Trie_t a,
    if (!(a->header.bits & bit)) {
       return a;
    }
-   // The bit is set: deref the previous value, unset the bit, and shift the
-   // remaining cells down to close the gap. Every cell index is derived
-   // on the fly from popcount(bits & ltmask(bitindex)) (see
-   // amtnode_bit2cellindex()), which assumes the cells array is always
-   // densely packed in bit order with no holes -- so unlike amtnode_set()'s
-   // "add a new cell" branch (which shifts cells *up* to open a gap before
-   // writing), removal must shift the following cells *down* to close one,
-   // or every subsequent cell's real position stops matching what
-   // popcount-based lookup expects it to be.
+   // The bit is set: unset it, shift the following cells down to close the
+   // gap (cell indices are popcounts, so the cells must stay packed in bit
+   // order; see amtnode_bit2cellindex()), then release the removed cell.
    {
       size_t cellsize = amtnode_cellsize(a);
       char old[256];  // the removed cell, released after the update.

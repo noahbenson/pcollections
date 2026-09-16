@@ -7,7 +7,7 @@
 //    node allocates only as many cells as it has occupied bits (a cell's
 //    index is the popcount of the occupied bits below it). Used for hash
 //    tables: `idx` in pdict/pset, whose leaves are plain integers.
-//  - FAT (fixed arity trie): exactly FAT_CELLS cells per node, and a cell's
+//  - FAT (fixed arity trie): always FAT_CELLS cells per node, and a cell's
 //    index equals its bit index. Used for dense, sequential keys: `els` in
 //    pdict/pset and the element store of plist. Its leaves hold Python
 //    object references.
@@ -19,7 +19,7 @@
 //  - FAT nodes are Python objects (instances of the per-interpreter node
 //    types created in core.h). Their reference counts are ordinary Python
 //    reference counts, and they take part in cyclic garbage collection: a
-//    node reports its own children or leaves exactly once, however many
+//    node reports its own children or leaves once, however many
 //    collections share it. Nodes that cannot be part of a cycle (all of
 //    whose contents are atomic, like ints and strings) are not tracked by
 //    the collector at all (see fat.h).
@@ -254,7 +254,7 @@ static inline bool fatdepth_prefix_match(uint8_t depth,
 
 // The per-node metadata (16 bytes).
 EXTC typedef struct TrieHeader {
-   // The key prefix shared by everything beneath this node, stored exactly
+   // The key prefix shared by everything beneath this node, stored in full
    // (no bits are borrowed for flags: FAT's digit arithmetic uses division,
    // which any borrowed bit would corrupt). A node's own digit, and all
    // digits below it, are zero.
@@ -545,7 +545,7 @@ static inline int amt_lookup(Trie_t node,
       bitindex = keyshift & AMT_DIVMASK;
       bit = node->header.bits & (TRIEBITS_1 << bitindex);
       ok = (bit > 0);
-      // A persistent AMT node has exactly as many cells as occupied bits, so
+      // A persistent AMT node has as many cells as occupied bits, so
       // when the bit is absent the computed cell index can be one past the
       // end. It is masked to 0 (always a valid index for a non-empty node)
       // in that case; the value read is then discarded. (`0 - ok` rather

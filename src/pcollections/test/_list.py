@@ -232,7 +232,7 @@ class _LListTestMixin:
     """
     def test_api(self):
         """Tests/demonstrates the basic llist API."""
-        # An empty plist can be created with `llist()`.
+        # An empty llist can be created with `llist()`.
         e = self.llist()
         self.assertEqual(len(e), 0)
         self.assertIsInstance(e, self.llist)
@@ -241,7 +241,7 @@ class _LListTestMixin:
         self.assertIs(e, self.llist.empty)
         # ... but it is not identical to the plist.empty object.
         self.assertIsNot(e, self.plist.empty)
-        # A plist can also be created by passing an iterable to the type.
+        # An llist can also be created by passing an iterable to the type.
         p1 = self.llist(range(10))
         self.assertEqual(len(p1), 10)
         # Element access is like with the list type.
@@ -266,7 +266,7 @@ class _LListTestMixin:
         self.assertLess(p1[:4], p1[6:])
         # Clearing an llist always yields the empty llist.
         self.assertIs(p1.clear(), self.llist.empty)
-        # Copying an llist always just returns the plist (it is immutable).
+        # Copying an llist always just returns the llist (it is immutable).
         self.assertIs(p1.copy(), p1)
         # llists are hashable as long as their values are hashable.
         self.assertIsInstance(hash(p1), int)
@@ -323,7 +323,7 @@ class _LListTestMixin:
         self.assertEqual(p3.insert(1, 10), [1, 10, 2, 3])
     def test_lazy(self):
         """Tests the lazy aspects of the llist type."""
-        # Lazy dictionaries don't evaluate lazy arguments until they are
+        # Lazy lists don't evaluate lazy arguments until they are
         # requested, and they only evaluate them once.
         def counter(n):
             counter.count += n
@@ -349,7 +349,7 @@ class _LListTestMixin:
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
         self.assertEqual(counter.count, 11)
-        # Converstion via held_plist preserves the lazy items.
+        # Conversion via held_plist preserves the lazy items.
         counter.count = 0
         p1 = self.llist([self.lazy(counter, 1), self.lazy(counter, 10)])
         t1 = p1.held_plist()
@@ -361,8 +361,8 @@ class _LListTestMixin:
         self.assertIsInstance(t1, self.tllist)
         self.assertEqual(t1[0], 1)
         self.assertEqual(t1[1], 11)
-        # Note that the new dictionary in this case shares the lazy values with
-        # the old dictionary.
+        # Note that the new list in this case shares the lazy values with
+        # the old list.
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
         # To extract the lazy object itself, one can use getlazy:

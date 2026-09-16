@@ -36,56 +36,35 @@ class _PersistentBase:
     """Plain (non-``ABCMeta``) mixin holding ``Persistent``'s concrete method
     bodies, with no abstract base of its own.
 
-    This exists so that C extension types (``pcollections._c._core.pdict``,
-    ``_c.set.pset``, ``_c.list.plist``, and friends) can inherit these
-    methods -- ``__setattr__``/``__delattr__``/``__setitem__``/``__delitem__``
-    raising ``TypeError``, and a ``copy()`` that returns ``self`` -- from a
-    base class whose metaclass is plain ``type``, not ``ABCMeta``.
+    This lets the C extension types in ``pcollections._c._core`` (``pdict``,
+    ``pset``, ``plist``, and the others) inherit these methods
+    (``__setattr__``/``__delattr__``/``__setitem__``/``__delitem__`` raising
+    ``TypeError``, and a ``copy()`` that returns ``self``) from a base whose
+    metaclass is ``type``.
 
-    CPython 3.14 tightened ``PyType_FromSpecWithBases``/``PyType_FromMetaclass``
-    (the C API the extension types use to build themselves as heap types at
-    import time) to unconditionally reject a base whose metaclass overrides
-    ``tp_new`` -- which ``ABCMeta`` does (``Persistent`` inherits from
-    ``collections.abc.Hashable``, an ``ABCMeta``-based class) -- so a C type
-    that inherited directly from ``Persistent`` can no longer be constructed
-    at all on 3.14. Confirmed empirically (against a real 3.14 interpreter)
-    that there is no C-API-level workaround: not passing the correct
-    metaclass explicitly to ``PyType_FromMetaclass``, not reassigning
-    ``__bases__`` after construction (the latter also fails outright, with a
-    ``deallocator differs from 'object'`` ``TypeError``, since these C types
-    have a custom ``tp_dealloc`` for their native struct fields that could
-    never match a plain-Python class's deallocator anyway).
+    On CPython 3.14, ``PyType_FromSpecWithBases``/``PyType_FromMetaclass``
+    reject a base whose metaclass overrides ``tp_new``, as ``ABCMeta`` does
+    (``Persistent`` derives from ``collections.abc.Hashable``), so a C heap
+    type cannot inherit from ``Persistent`` directly. Passing the metaclass
+    to ``PyType_FromMetaclass`` does not help, and reassigning ``__bases__``
+    afterward fails because the C types have their own ``tp_dealloc``.
 
-    ``_PersistentBase`` -- and its siblings ``_PersistentMappingBase``
+    ``_PersistentBase`` and its siblings ``_PersistentMappingBase``
     (``abc/_map.py``), ``_PersistentSetBase`` (``abc/_set.py``), and
-    ``_PersistentSequenceBase`` (``abc/_seq.py``) -- give the C extensions a
-    plain class to inherit from instead. The extensions then call
-    ``.register()`` on the real ``Persistent``/``PersistentMapping``/etc. ABCs
-    (see each ``_c/*.c``'s ``PyInit_*``) so that ``isinstance``/``issubclass``
-    checks against ``pcollections.abc.Persistent`` (and, transitively, against
-    ``collections.abc.Hashable``/``Mapping``/``Set``/``Sequence``, since a
-    ``.register()`` with a *real* subclass of those stdlib ABCs is honored by
-    them too -- confirmed empirically) keep working exactly as before, without
-    ever asking the C API to build a heap type on top of an ``ABCMeta`` base.
+    ``_PersistentSequenceBase`` (``abc/_seq.py``) are the plain bases the C
+    types inherit from. The C module then registers each type as a virtual
+    subclass of the corresponding ABC (``PersistentMapping`` etc.), so
+    ``isinstance``/``issubclass`` checks against those ABCs, and the
+    ``collections.abc`` ABCs they derive from, succeed.
 
-    The public ``Persistent`` class below still mixes this class in alongside
-    the real ``Hashable`` ABC, so pure-Python subclasses (and
-    ``pcollections.abc``'s own public interface) are completely unaffected:
-    ``isinstance(x, Persistent)`` and ``isinstance(x, Hashable)`` are both
-    still literally true (not just true via ``.register()``) for any ordinary
-    Python subclass, exactly as before this fix.
+    The public ``Persistent`` class mixes this class in alongside
+    ``Hashable``, so pure-Python subclasses are real subclasses of both.
     """
-    # No instance state of its own, and no __dict__/__weakref__ either: like
-    # collections.abc's own mixins, this is meant to be combined with other
-    # bases via multiple inheritance, and a concrete leaf class decides for
-    # itself (via its own __slots__, or lack thereof) whether instances get a
-    # __dict__. Without this, *every* class in the MRO that omits __slots__
-    # gives instances a __dict__ regardless of what the leaf class declares,
-    # silently defeating any __slots__ a concrete subclass (e.g. plist/pdict)
-    # declares -- and, for a C-implemented subclass, inheriting a nonzero
-    # tp_dictoffset/tp_weaklistoffset computed for *this* class's own (much
-    # smaller) layout onto a C struct with extra native fields corrupts
-    # memory the instant a weakref or instance attribute touches it.
+    # Empty __slots__ (as in collections.abc's mixins) so this class adds no
+    # __dict__/__weakref__; the concrete class decides that. Otherwise the
+    # __slots__ of subclasses such as plist/pdict would be defeated, and a C
+    # subclass would inherit a tp_dictoffset/tp_weaklistoffset computed for
+    # this class's layout, which would corrupt its native fields.
     __slots__ = ()
     # Methods that should throw errors in children.
     def __setattr__(self, k, v):
@@ -132,11 +111,10 @@ class Persistent(_PersistentBase, Hashable):
             __persistent_type__ = MyDict
         MyDict.__transient_type__ = MyTDict
 
-    (The concrete methods above are actually implemented on ``_PersistentBase``,
-    a plain mixin with no ``ABCMeta`` in its inheritance chain -- see that
-    class's docstring for why. ``Persistent`` itself is unaffected: it's
-    still a real, ``ABCMeta``-based subclass of ``collections.abc.Hashable``,
-    exactly as before.)
+    (The concrete methods above are implemented on ``_PersistentBase``, a
+    plain mixin without ``ABCMeta``; see that class's docstring.
+    ``Persistent`` itself is an ``ABCMeta``-based subclass of
+    ``collections.abc.Hashable``.)
     """
     __slots__ = ()
     # Abstract methods.
@@ -158,10 +136,10 @@ class Transient:
     new persistent object, and ``copy()``, which by default returns
     ``self.persistent().transient()``.
 
-    Unlike ``Persistent``, ``Transient`` was never ``ABCMeta``-based to begin
-    with (it doesn't inherit from any ``collections.abc`` class), so it needs
-    no ``_TransientBase``-style split for the C extensions: ``_c/dict.c.h`` and
-    friends can -- and do -- keep inheriting from ``Transient`` directly.
+    Unlike ``Persistent``, ``Transient`` is not ``ABCMeta``-based (it does
+    not inherit from any ``collections.abc`` class), so it needs no
+    ``_TransientBase`` counterpart: the C transient types inherit from it
+    through ``_TransientMappingBase`` and its siblings.
     """
     # See the matching comment on _PersistentBase.__slots__ above: this keeps
     # Transient (and everything that mixes it in) from acquiring an instance

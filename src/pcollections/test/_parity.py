@@ -7,20 +7,17 @@
 
 """Interface-parity checks between the pure-Python and C backends.
 
-These tests only run anything when both backends are available (i.e. the C
-extension modules are built and importable) -- when only the pure-Python
-backend is present, `test_public_api_matches` for every pair is skipped
-rather than failing, since there is nothing to compare against.
+These tests run only when both backends are available (i.e., the C
+extension module is built and importable); otherwise
+`test_public_api_matches` is skipped for every pair.
 
 Two backends are considered interface-identical here if, for every
 corresponding pair of classes (`pdict`/`pdict`, `llist`/`llist`, etc.),
-their *public* attributes (excluding a documented list of legitimately
-implementation-specific names, and excluding leading-underscore internals
-like `_els`/`_idx`/`_start`, which are storage details that are expected --
-even required, per abc/_core.py's comment on why -- to differ between a
-trie-backed C struct and a PHAMT/THAMT-backed Python object) are the same
-set of names, and that each is the same *kind* of thing (method, property,
-etc.) on both sides.
+their *public* attributes are the same set of names, and each is the same
+*kind* of thing (method, property, etc.) on both sides. Excluded are a
+listed set of implementation-specific names and leading-underscore
+internals such as `_els`/`_idx`/`_start`, which are storage details that
+differ between the C structs and the pure-Python trie-backed objects.
 """
 
 from unittest import TestCase, skipUnless
@@ -29,23 +26,14 @@ from ._backends import BACKENDS
 
 _HAVE_C = 'c' in BACKENDS
 
-# Names that are allowed to appear on only one side. `empty` is a plain
-# stored class attribute on pdict/plist (both backends) but a classmethod
-# on tdict/tlist (both backends) -- included here defensively in case a
-# future backend implements it a third way; `__weakref__`/`__dict__` are
-# per-instance slots CPython adds automatically and aren't meaningful to
-# compare. `__orig_bases__`/`__slots__`/`__abstractmethods__` etc. are
-# implementation bookkeeping from ABCMeta/typing, not part of the public
-# collection API. `__firstlineno__`/`__static_attributes__` (3.13+) and
-# `__annotate_func__`/`__annotations_cache__` (3.14+, PEP 649/749's deferred-
-# evaluation machinery) are the same kind of thing, one CPython version
-# later: bookkeeping the compiler attaches to every ordinary `class`
-# statement regardless of whether the class actually has annotations,
-# which a C heap type built via PyType_FromSpecWithBases never goes
-# through (there's no class body for the compiler to have compiled in the
-# first place) -- confirmed as a real 3.14 CI failure (present on the
-# actual 3.14 release but not on the 3.14.0rc2 interpreter used to develop
-# this suite, so it never showed up locally).
+# Names that are allowed to appear on only one side. `__weakref__`/
+# `__dict__` are per-instance slots CPython adds automatically.
+# `__orig_bases__`/`__slots__`/`__abstractmethods__` etc. are bookkeeping
+# from ABCMeta/typing, not public API. `__firstlineno__`/
+# `__static_attributes__` (3.13+) and `__annotate_func__`/
+# `__annotations_cache__` (3.14+, PEP 649/749) are attached by the compiler
+# to every `class` statement, and so are absent from C heap types built with
+# PyType_FromSpecWithBases.
 _IGNORE = {
     '__dict__', '__weakref__', '__slots__', '__module__', '__doc__',
     '__abstractmethods__', '__orig_bases__', '__parameters__',

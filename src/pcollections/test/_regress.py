@@ -57,11 +57,12 @@ class _RegressionTests:
         self.assertEqual(proc.stdout.strip().splitlines()[-1:], ['ok'], detail)
 
     # Overwriting values in a large transient dict ---------------------------
-    # The in-place leaf overwrite released the old entry before taking
-    # references for the new one. A tdict entry is rewritten by copying the
-    # old entry and changing its value, so the key object is in both; when
-    # the entry held the only reference to the key (any int > 256 that the
-    # caller built separately), the key was freed and then used.
+    # A tdict entry is rewritten in place by copying the old entry and
+    # changing its value, so the key object is in both. The overwrite must
+    # take references for the new entry before releasing the old one;
+    # otherwise, when the entry holds the only reference to the key (any
+    # int > 256 that the caller built separately), the key is freed and then
+    # used.
     def test_tdict_overwrite_large(self):
         self.run_scenario("""
             for n in (1, 28, 29, 30, 257, 300, 840, 841, 842, 1000, 3000):
@@ -325,9 +326,8 @@ class _RegressionTests:
         """)
 
     # Sequence equality must not require orderable elements -----------------
-    # The pure-Python plist/tlist compared elements with `<` to test
-    # equality, so plist([None]) == plist([None]) raised TypeError. The C
-    # tlist inherits the same comparison.
+    # Equality must not compare elements with `<`; otherwise
+    # plist([None]) == plist([None]) raises TypeError.
     def test_sequence_equality_of_unorderable_elements(self):
         self.run_scenario("""
             for make in (plist, tlist):

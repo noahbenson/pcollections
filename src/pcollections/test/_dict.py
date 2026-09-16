@@ -54,7 +54,7 @@ class _PDictTestMixin:
         self.assertIs(p1.copy(), p1)
         # pdicts are hashable.
         self.assertIsInstance(hash(p1), int)
-        # pdicts contain their keyss.
+        # pdicts contain their keys.
         for k in range(0,10):
             self.assertIn(k, p1)
         self.assertNotIn(-1, p1)
@@ -196,7 +196,7 @@ class _LDictTestMixin:
         self.assertIs(p1.copy(), p1)
         # ldicts are hashable (assuming all values are hashable).
         self.assertIsInstance(hash(p1), int)
-        # ldicts contain their keyss.
+        # ldicts contain their keys.
         for k in range(0,10):
             self.assertIn(k, p1)
         self.assertNotIn(-1, p1)
@@ -268,13 +268,13 @@ class _LDictTestMixin:
         self.assertEqual(p1['a'], 1)
         self.assertEqual(p1['b'], 11)
         self.assertEqual(counter.count, 11)
-        # Converstion into a tdict respects the lazy items.
+        # Conversion into a tdict respects the lazy items.
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
         t1 = p1.transient()
         self.assertEqual(t1['a'], 1)
         self.assertEqual(t1['b'], 11)
-        # The held_pdict method can be used to reveeal lazy elements.
+        # The held_pdict method can be used to reveal lazy elements.
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
         t1 = p1.held_pdict()
@@ -323,10 +323,7 @@ class _LDictTestMixin:
         self.assertEqual(t['d'], 10)
         self.assertEqual(t.persistent(), t)
         # tdict's __str__ and __repr__ both use the "{<...>}" transient
-        # delimiter (unlike ldict/tldict, which deliberately use "{|...|}"
-        # for both -- see test_tldict below); __repr__ previously had a
-        # copy-paste bug that used "{|...|}" here instead, matching
-        # pdict's delimiter rather than tdict's own.
+        # delimiter, not pdict's "{|...|}".
         self.assertEqual(str(t), repr(t))
         self.assertTrue(str(t).startswith('{<'))
         self.assertTrue(str(t).endswith('>}'))
@@ -345,9 +342,8 @@ class _LDictTestMixin:
         self.assertIs(type(t.persistent()), ldict)
         self.assertEqual(t['d'], 10)
         self.assertEqual(t.persistent(), t)
-        # Regression test for a fixed infinite-recursion bug: tldict.pop
-        # used to call `self.pop(...)` from inside its own `pop` override,
-        # recursing forever instead of delegating to tdict.pop.
+        # tldict.pop removes and returns the value (guards against a
+        # regression in which it recursed into itself).
         self.assertEqual(t.pop('d'), 10)
         self.assertNotIn('d', t)
         with self.assertRaises(KeyError):

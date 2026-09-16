@@ -1,21 +1,14 @@
 # -*- coding: utf-8 -*-
 ################################################################################
 # pcollections/test/_trie.py
-# Dedicated structural/low-level tests for pcollections._trie's AMT/TAMT/
-# FAT/TFAT classes -- the pure-Python port of pcollections/_c/amt.h and
-# fat.h (see pcollections/_trie.py's module docstring for the port's design
-# and why AMT and FAT are unified there).
+# Structural tests for pcollections._trie's AMT/TAMT/FAT/TFAT classes, the
+# pure-Python counterparts of pcollections/_c/amt.h and fat.h (see
+# pcollections/_trie.py's module comment for their design).
 #
-# Unlike test/_dict.py/_list.py/_set.py (which test pdict/plist/pset/etc.
-# through their public, backend-parametrized API -- pure-Python and C alike,
-# via _backends.make_tests), these tests exercise pcollections._trie
-# directly: there is no C-level equivalent exposed at the Python layer to
-# parametrize against (the C extension's AMT/FAT live entirely inside
-# pcollections/_c, never surfaced as standalone Python objects), so this
-# module is plain unittest.TestCase classes, mirroring the spirit of the C
-# project's own dedicated test_amt.c/test_fat.c (structural invariants,
-# edge cases, and randomized stress against a trusted reference) rather than
-# its exact mechanics.
+# Unlike test/_dict.py/_list.py/_set.py, which run against both backends via
+# _backends.make_tests, these tests use pcollections._trie directly: the C
+# tries are not exposed as Python objects. They cover structural invariants,
+# edge cases, and randomized comparison against a plain dict.
 # By Noah C. Benson
 
 import random
@@ -27,13 +20,12 @@ from .._trie import AMT, TAMT, FAT, TFAT, MASK_WIDTH
 
 class _TrieTestMixin:
     """Shared structural tests, run once against (AMT, TAMT) and once
-    against (FAT, TFAT) -- see TestAMT/TestFAT below. Since this port
-    deliberately implements FAT as a same-algorithm specialization of AMT
-    (see pcollections/_trie.py's module docstring), the two classes are
-    expected to behave identically here; TestFAT additionally checks the
-    dense, non-negative-key scenario FAT is actually used for in _dict.py/
-    _set.py (ascending order == insertion order, exercised in
-    test_dense_ascending_order below)."""
+    against (FAT, TFAT) -- see TestAMT/TestFAT below. FAT uses the same
+    algorithm as AMT (see pcollections/_trie.py's module comment), so the
+    two are expected to behave identically here; TestFAT additionally checks
+    the dense, non-negative-key case FAT is used for in _dict.py/_set.py
+    (ascending order == insertion order; see
+    test_dense_ascending_order)."""
 
     # Set by subclasses.
     persistent_cls = None
@@ -123,7 +115,7 @@ class _TrieTestMixin:
     def test_transient_claim_discipline(self):
         # Mutating a TAMT/TFAT built from a persistent snapshot never
         # mutates that snapshot (copy-on-write "claiming" -- see
-        # pcollections/_trie.py's module docstring), and, symmetrically,
+        # pcollections/_trie.py's module comment), and, symmetrically,
         # mutating the transient further after calling .persistent() never
         # mutates the persistent snapshot just handed out.
         pcls, tcls = self.persistent_cls, self.transient_cls
@@ -133,7 +125,7 @@ class _TrieTestMixin:
         t = tcls(base)
         for i in range(50, 100):
             t[i] = i
-        # base is still exactly as it was.
+        # base is unchanged.
         self.assertEqual(len(base), 50)
         for i in range(50, 100):
             self.assertNotIn(i, base)
@@ -229,7 +221,7 @@ class TestAMT(_TrieTestMixin, unittest.TestCase):
     def test_negative_keys_and_masking(self):
         # AMT keys are masked to an unsigned MASK_WIDTH-bit representation
         # (see AMT._normalize_key() and the "Iteration order" section of
-        # pcollections/_trie.py's module docstring) -- get/assoc/dissoc all
+        # pcollections/_trie.py's module comment) -- get/assoc/dissoc all
         # normalize the same way, so lookups stay correct for negative keys
         # even though the *iterated* key differs from the original signed
         # one.
@@ -237,16 +229,15 @@ class TestAMT(_TrieTestMixin, unittest.TestCase):
         self.assertEqual(a.get(-1), 'neg-one')
         self.assertEqual(a.get(1), 'pos-one')
         self.assertEqual(len(a), 2)
-        # The masked representation of -1 really is MASK_WIDTH bits of 1s.
+        # The masked representation of -1 is MASK_WIDTH bits of 1s.
         keys = dict(iter(a))
         self.assertIn(MASK_WIDTH, keys)
         self.assertEqual(keys[MASK_WIDTH], 'neg-one')
 
     def test_ascending_order_within_signed_runs(self):
-        # See the module docstring's "Iteration order" section: ascending
-        # order is only guaranteed *within* a run of same-signed keys (not
-        # across the negative/non-negative boundary) -- exactly what
-        # _list.py's plist.__iter__ already assumes and works around.
+        # See pcollections/_trie.py's "Iteration order" section: ascending
+        # order is guaranteed only within a run of same-signed keys, which
+        # is what _list.py's plist.__iter__ assumes.
         rnd = random.Random(99)
         negkeys = list(range(-40, 0))
         rnd.shuffle(negkeys)
@@ -268,12 +259,12 @@ class TestFAT(_TrieTestMixin, unittest.TestCase):
     transient_cls = TFAT
 
     def _keyrange(self):
-        # FAT's real role (pdict/pset's `_els`) only ever sees dense,
+        # FAT's role (pdict/pset's `_els`) only ever sees dense,
         # non-negative keys.
         return list(range(0, 1000))
 
     def test_dense_ascending_order(self):
-        # FAT's actual role in _dict.py/_set.py (the `_els` insertion-order
+        # FAT's role in _dict.py/_set.py (the `_els` insertion-order
         # value table) depends on this: iterating in ascending index order
         # must reproduce insertion order.
         rnd = random.Random(42)
@@ -289,8 +280,8 @@ class TestFAT(_TrieTestMixin, unittest.TestCase):
         self.assertEqual([k for (k, _v) in p], list(range(n)))
 
     def test_is_distinct_type_from_amt(self):
-        # FAT/AMT share an implementation (see the module docstring) but
-        # are kept as genuinely distinct classes.
+        # FAT/AMT share an implementation (see pcollections/_trie.py) but
+        # are distinct classes.
         self.assertTrue(issubclass(FAT, AMT))
         self.assertIsNot(FAT, AMT)
         self.assertIsNot(FAT.empty, AMT.empty)
@@ -299,19 +290,13 @@ class TestFAT(_TrieTestMixin, unittest.TestCase):
 
 
 class TestTrieThreadStress(unittest.TestCase):
-    """A GIL-based multithreaded stress test: many reader threads hammer a
-    shared *persistent* snapshot (which must never be mutated by anything,
-    so this also indirectly checks that no persistent-side operation ever
-    mutates shared state) while, concurrently, a single owner thread builds
-    up a *transient* trie via repeated assoc/dissoc-style mutation. This
-    doesn't exercise genuine no-GIL race conditions -- no free-threaded
-    Python build is available to test against here (confirmed an acceptable
-    verification bar with Noah; see pcollections/_trie.py's module
-    docstring's thread-safety section for the memory-safety argument that
-    covers the no-GIL case even without being able to test it directly) --
-    but it does exercise the single-owner transient/many-reader-of-a-frozen-
-    snapshot pattern this module is designed for, under real concurrent
-    scheduling, repeatedly, looking for any crash or corrupted result."""
+    """Multithreaded stress test: reader threads read a shared persistent
+    snapshot (checking that no persistent operation mutates shared state)
+    while a single owner thread mutates a transient trie. On a GIL build this
+    does not exercise true parallel races (see pcollections/_trie.py's
+    thread-safety comment for the free-threaded argument), but it does run
+    the single-owner-transient / many-snapshot-readers pattern under
+    concurrent scheduling, looking for crashes or corrupted results."""
 
     def test_concurrent_readers_of_persistent_snapshot(self):
         base = AMT.empty
@@ -339,9 +324,8 @@ class TestTrieThreadStress(unittest.TestCase):
     def test_single_owner_transient_under_concurrent_readers(self):
         # One thread owns and mutates a TAMT; other threads concurrently
         # read *persistent snapshots* taken from it via .persistent() (never
-        # the transient itself -- that would violate the single-owner
-        # contract, exactly as concurrently mutating a plain Python dict
-        # from two threads would). Each snapshot must be internally
+        # the transient itself, which would violate the single-owner
+        # contract). Each snapshot must be internally
         # consistent even while the owner keeps mutating afterward.
         t = TAMT(AMT.empty)
         errors = []
@@ -387,17 +371,12 @@ class TestDictSetCompaction(unittest.TestCase):
     """Directly exercises pdict/tdict's and pset/tset's tombstone-based
     deletion + periodic compaction (pcollections/_compact.py), mirroring
     dict_should_compact()/dict_rebuild_compacted() in _c/dict.c.h -- see that
-    file's header comment and _compact.py's own docstring. This targets the
-    pure-Python implementation specifically (via pcollections._dict/_set
-    directly, bypassing pcollections/__init__.py's C-first-if-available
-    shim): `_top`/`_ndeleted` are pure-Python-only implementation details
-    the C pdict/pset don't expose at the Python layer, so this isn't a
-    backend-parametrized test the way test/_dict.py's/_set.py's tests are.
-    test/_dict.py's/_set.py's own existing test_random already exercises
-    compaction incidentally (deletions are common there and the 30%-of-
-    count threshold is easy to cross even at small scale -- confirmed by
-    running it); this test instead directly forces a large, sustained
-    churn well past every threshold and checks the bookkeeping itself."""
+    file's header comment and _compact.py's header comment. These use
+    pcollections._dict/_set directly, since `_top`/`_ndeleted` are
+    pure-Python implementation details the C pdict/pset don't expose.
+    test/_dict.py's and _set.py's test_random exercise compaction
+    incidentally; these tests force sustained churn well past the threshold
+    and check the bookkeeping itself."""
 
     def test_dict_compaction_bounds_top_and_resets_ndeleted(self):
         from .._dict import tdict

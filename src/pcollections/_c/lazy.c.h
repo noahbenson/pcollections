@@ -342,7 +342,7 @@ static PyObject* lazy_reduce(PyObject* self, PyObject* Py_UNUSED(ignored)) {
 
 static PyMethodDef lazy_methods[] = {
    {"is_ready", (PyCFunction)lazy_is_ready, METH_NOARGS,
-    "Returns True if the value has been computed, otherwise False."},
+    "is_ready($self, /)\n--\n\nReturns True if the value has been computed, otherwise False."},
    {"_from_value", (PyCFunction)lazy_from_value, METH_O | METH_CLASS, NULL},
    {"__reduce__", (PyCFunction)lazy_reduce, METH_NOARGS, NULL},
    {NULL, NULL, 0, NULL}
@@ -358,11 +358,21 @@ static PyType_Slot lazy_slots[] = {
    {Py_tp_str, (void*)lazy_str},
    {Py_tp_methods, (void*)lazy_methods},
    {Py_tp_doc, (void*)PyDoc_STR(
-      "A value computed on first request, like a partial with no free\n"
-      "arguments.\n\n"
-      "lazy(fn, *args, **kwargs)() computes fn(*args, **kwargs) once, caches\n"
-      "the result, and releases fn and its arguments. See the pure-Python\n"
-      "pcollections._lazy.lazy for the full description.")},
+      "lazy(func, /, *args, **kwargs)\n"
+      "--\n"
+      "\n"
+      "A value computed, at most once, by calling a function.\n"
+      "\n"
+      "Calling a lazy object returns the value of func called with args and\n"
+      "kwargs, computing it on the first call and releasing func and its\n"
+      "arguments afterwards. The lazy collections (ldict, llist, tldict,\n"
+      "tllist) compute their lazy values when they are read.\n"
+      "\n"
+      "If func raises an exception, every call raises a new LazyError whose\n"
+      "__cause__ is that exception. A lazy value whose computation requests its\n"
+      "own value raises LazyError. Set lazy.trace (or the environment variable\n"
+      "PCOLLECTIONS_LAZY_TRACE) to record the stack at each lazy's creation.\n"
+      "Pickling a lazy computes it and pickles its value.")},
    {0, NULL}
 };
 static PyType_Spec lazy_spec = {
@@ -638,22 +648,22 @@ static Py_hash_t ldict_hash(PDictObject* self) {
 
 static PyMethodDef ldict_methods[] = {
    {"get", (PyCFunction)ldict_get, METH_VARARGS,
-    "Returns the (computed) value for key, or default if key is absent."},
+    "get($self, key, default=None, /)\n--\n\nReturns the (computed) value for key, or default if key is absent."},
    {"items", (PyCFunction)ldict_items, METH_NOARGS,
-    "Returns a view of the items, with lazy values computed."},
+    "items($self, /)\n--\n\nReturns a view of the items, with lazy values computed."},
    {"values", (PyCFunction)ldict_values, METH_NOARGS,
-    "Returns a view of the values, with lazy values computed."},
+    "values($self, /)\n--\n\nReturns a view of the values, with lazy values computed."},
    {"is_lazy", (PyCFunction)ldict_is_lazy, METH_O,
-    "Returns True if key is mapped to a lazy object."},
+    "is_lazy($self, key, /)\n--\n\nReturns True if key is mapped to a lazy object."},
    {"is_ready", (PyCFunction)ldict_is_ready, METH_O,
-    "Returns True if key is mapped to a non-lazy value or a computed lazy value."},
+    "is_ready($self, key, /)\n--\n\nReturns True if key is mapped to a non-lazy value or a computed lazy value."},
    {"ready_all", (PyCFunction)ldict_ready_all, METH_NOARGS,
-    "Computes all lazy values, then returns the dict."},
+    "ready_all($self, /)\n--\n\nComputes all lazy values, then returns the dict."},
    {"held_pdict", (PyCFunction)ldict_held_pdict, METH_NOARGS,
-    "Returns a pdict of the dict's items with lazy values left uncomputed."},
+    "held_pdict($self, /)\n--\n\nReturns a pdict of the dict's items with lazy values left uncomputed."},
    {"__holdlazy__", (PyCFunction)ldict_held_pdict, METH_NOARGS, NULL},
    {"getlazy", (PyCFunction)ldict_getlazy, METH_VARARGS,
-    "Like get(), but returns a lazy value itself rather than its value."},
+    "getlazy($self, key, default=None, /)\n--\n\nLike get(), but returns a lazy value itself rather than its value."},
    {NULL, NULL, 0, NULL}
 };
 static PyType_Slot ldict_slots[] = {
@@ -666,7 +676,12 @@ static PyType_Slot ldict_slots[] = {
    {Py_tp_str, (void*)ldict_str},
    {Py_tp_methods, (void*)ldict_methods},
    {Py_tp_doc, (void*)PyDoc_STR(
-      "A persistent dict whose lazy values are computed when read.")},
+      "A persistent dictionary whose lazy values are computed when read.\n"
+      "\n"
+      "An ldict is a pdict. Reading a value (by indexing, get, values, items,\n"
+      "iteration, comparison, or conversion to another collection) computes it if\n"
+      "it is a lazy object. The constructor keeps lazy values uncomputed. getlazy,\n"
+      "held_pdict, and holdlazy return the lazy objects themselves.")},
    {0, NULL}
 };
 static PyType_Spec ldict_spec = {
@@ -737,23 +752,23 @@ static int tldict_gc_clear(PyObject* self) {
 
 static PyMethodDef tldict_methods[] = {
    {"get", (PyCFunction)tldict_get, METH_VARARGS,
-    "Returns the (computed) value for key, or default if key is absent."},
+    "get($self, key, default=None, /)\n--\n\nReturns the (computed) value for key, or default if key is absent."},
    {"getlazy", (PyCFunction)tldict_getlazy, METH_VARARGS,
-    "Like get(), but returns a lazy value itself rather than its value."},
+    "getlazy($self, key, default=None, /)\n--\n\nLike get(), but returns a lazy value itself rather than its value."},
    {"pop", (PyCFunction)tldict_pop, METH_VARARGS,
     "Removes key and returns its (computed) value."},
    {"items", (PyCFunction)ldict_items, METH_NOARGS,
-    "Returns a view of the items, with lazy values computed."},
+    "items($self, /)\n--\n\nReturns a view of the items, with lazy values computed."},
    {"values", (PyCFunction)ldict_values, METH_NOARGS,
-    "Returns a view of the values, with lazy values computed."},
+    "values($self, /)\n--\n\nReturns a view of the values, with lazy values computed."},
    {"is_lazy", (PyCFunction)tldict_is_lazy, METH_O,
-    "Returns True if key is mapped to a lazy object."},
+    "is_lazy($self, key, /)\n--\n\nReturns True if key is mapped to a lazy object."},
    {"is_ready", (PyCFunction)tldict_is_ready, METH_O,
-    "Returns True if key is mapped to a non-lazy value or a computed lazy value."},
+    "is_ready($self, key, /)\n--\n\nReturns True if key is mapped to a non-lazy value or a computed lazy value."},
    {"ready_all", (PyCFunction)tldict_ready_all, METH_NOARGS,
-    "Computes all lazy values, then returns the dict."},
+    "ready_all($self, /)\n--\n\nComputes all lazy values, then returns the dict."},
    {"held_tdict", (PyCFunction)tldict_held_tdict, METH_NOARGS,
-    "Returns a tdict of the dict's items with lazy values left uncomputed."},
+    "held_tdict($self, /)\n--\n\nReturns a tdict of the dict's items with lazy values left uncomputed."},
    {"__holdlazy__", (PyCFunction)tldict_held_tdict, METH_NOARGS, NULL},
    {NULL, NULL, 0, NULL}
 };
@@ -766,7 +781,10 @@ static PyType_Slot tldict_slots[] = {
    {Py_tp_str, (void*)tldict_str},
    {Py_tp_methods, (void*)tldict_methods},
    {Py_tp_doc, (void*)PyDoc_STR(
-      "A transient dict whose lazy values are computed when read.")},
+      "A transient dictionary whose lazy values are computed when read.\n"
+      "\n"
+      "A tldict is a tdict. Reading a value computes it if it is a lazy object.\n"
+      "getlazy, held_tdict, and holdlazy return the lazy objects themselves.")},
    {0, NULL}
 };
 static PyType_Spec tldict_spec = {
@@ -920,16 +938,16 @@ static Py_hash_t llist_hash(PListObject* self) {
 
 static PyMethodDef llist_methods[] = {
    {"is_lazy", (PyCFunction)llist_is_lazy, METH_O,
-    "Returns True if the element at index is a lazy object."},
+    "is_lazy($self, index, /)\n--\n\nReturns True if the element at index is a lazy object."},
    {"is_ready", (PyCFunction)llist_is_ready, METH_O,
-    "Returns True if the element at index is not lazy or has been computed."},
+    "is_ready($self, index, /)\n--\n\nReturns True if the element at index is not lazy or has been computed."},
    {"ready_all", (PyCFunction)llist_ready_all, METH_NOARGS,
-    "Computes all lazy elements, then returns the list."},
+    "ready_all($self, /)\n--\n\nComputes all lazy elements, then returns the list."},
    {"held_plist", (PyCFunction)llist_held_plist, METH_NOARGS,
-    "Returns a plist of the list's elements with lazy elements left uncomputed."},
+    "held_plist($self, /)\n--\n\nReturns a plist of the list's elements with lazy elements left uncomputed."},
    {"__holdlazy__", (PyCFunction)llist_held_plist, METH_NOARGS, NULL},
    {"getlazy", (PyCFunction)llist_getlazy, METH_O,
-    "Like self[index], but returns a lazy element itself rather than its value."},
+    "getlazy($self, index, /)\n--\n\nLike self[index], but returns a lazy element itself rather than its value."},
    {NULL, NULL, 0, NULL}
 };
 static PyType_Slot llist_slots[] = {
@@ -944,7 +962,12 @@ static PyType_Slot llist_slots[] = {
    {Py_tp_str, (void*)llist_str},
    {Py_tp_methods, (void*)llist_methods},
    {Py_tp_doc, (void*)PyDoc_STR(
-      "A persistent list whose lazy elements are computed when read.")},
+      "A persistent list whose lazy elements are computed when read.\n"
+      "\n"
+      "An llist is a plist. Reading an element (by indexing, iteration,\n"
+      "comparison, or conversion to another collection) computes it if it is a\n"
+      "lazy object. The constructor keeps lazy elements uncomputed. getlazy,\n"
+      "held_plist, and holdlazy return the lazy objects themselves.")},
    {0, NULL}
 };
 static PyType_Spec llist_spec = {
@@ -1012,17 +1035,17 @@ static int tllist_gc_clear(PyObject* self) {
 }
 static PyMethodDef tllist_methods[] = {
    {"getlazy", (PyCFunction)tllist_getlazy, METH_O,
-    "Like self[index], but returns a lazy element itself rather than its value."},
+    "getlazy($self, index, /)\n--\n\nLike self[index], but returns a lazy element itself rather than its value."},
    {"pop", (PyCFunction)tllist_pop, METH_VARARGS,
-    "Removes and returns the (computed) element at index (default last)."},
+    "pop($self, index=-1, /)\n--\n\nRemoves and returns the (computed) element at index (default last)."},
    {"is_lazy", (PyCFunction)tllist_is_lazy, METH_O,
-    "Returns True if the element at index is a lazy object."},
+    "is_lazy($self, index, /)\n--\n\nReturns True if the element at index is a lazy object."},
    {"is_ready", (PyCFunction)tllist_is_ready, METH_O,
-    "Returns True if the element at index is not lazy or has been computed."},
+    "is_ready($self, index, /)\n--\n\nReturns True if the element at index is not lazy or has been computed."},
    {"ready_all", (PyCFunction)tllist_ready_all, METH_NOARGS,
-    "Computes all lazy elements, then returns the list."},
+    "ready_all($self, /)\n--\n\nComputes all lazy elements, then returns the list."},
    {"held_tlist", (PyCFunction)tllist_held_tlist, METH_NOARGS,
-    "Returns a tlist of the list's elements with lazy elements left uncomputed."},
+    "held_tlist($self, /)\n--\n\nReturns a tlist of the list's elements with lazy elements left uncomputed."},
    {"__holdlazy__", (PyCFunction)tllist_held_tlist, METH_NOARGS, NULL},
    {NULL, NULL, 0, NULL}
 };
@@ -1037,7 +1060,10 @@ static PyType_Slot tllist_slots[] = {
    {Py_tp_str, (void*)tllist_str},
    {Py_tp_methods, (void*)tllist_methods},
    {Py_tp_doc, (void*)PyDoc_STR(
-      "A transient list whose lazy elements are computed when read.")},
+      "A transient list whose lazy elements are computed when read.\n"
+      "\n"
+      "A tllist is a tlist. Reading an element computes it if it is a lazy object.\n"
+      "getlazy, held_tlist, and holdlazy return the lazy objects themselves.")},
    {0, NULL}
 };
 static PyType_Spec tllist_spec = {

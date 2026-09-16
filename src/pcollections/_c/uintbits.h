@@ -50,13 +50,8 @@
 
 // For starters, it's possible that the uint128_t isn't defined explicitly but
 // could be... if this is the case, we can go ahead and define it.
-// (The comparison below is written as ULLONG_MAX > UINT64_MAX, rather than
-// the more obvious ULLONG_MAX >> 64 == UINT64_MAX, because the latter is
-// undefined behavior -- and triggers a real "integer overflow in
-// preprocessor expression" warning under clang -- whenever unsigned long
-// long is exactly 64 bits, since shifting by the full width of the type is
-// never well-defined. ULLONG_MAX > UINT64_MAX asks the same question --
-// "is unsigned long long wider than 64 bits?" -- without ever shifting.)
+// (The test is ULLONG_MAX > UINT64_MAX rather than a shift by 64, which is
+// undefined when unsigned long long is 64 bits wide.)
 #if (!defined(uint128_t)                  \
      && defined(ULLONG_MAX)               \
      && defined(UINT64_MAX)               \
@@ -73,22 +68,11 @@
 #endif
 
 // Bit widths of the fixed-size integer types and of uintptr_t/size_t.
-// C23's <stdint.h> defines these directly (UINT8_WIDTH, ..., UINTPTR_WIDTH,
-// SIZE_WIDTH), and this codebase relies on them further down (and in
-// trie.h). But they aren't available pre-C23, and in practice that matters:
-// e.g. glibc happens to expose them as an extension even in -std=c11 mode
-// (because Python.h pulls in _GNU_SOURCE before this header is reached), but
-// Apple's libc and MSVC's UCRT do not, so a strict-C11 build on macOS or
-// Windows would otherwise fail with "cannot deduce size/type of ..." errors
-// despite compiling fine on Linux (confirmed directly: reproduced the exact
-// "Cannot deduce size of uintptr_t"/"Cannot deduce size of size_t"/"Could
-// not deduce type of triebits_t" failures from the macOS CI log by
-// #undef-ing these macros before including this header on Linux, and
-// confirmed the fallback below resolves them all correctly). So: use the
-// real macro if the platform already defines it (never redefine it out from
-// under a compliant C23 implementation), and otherwise derive it here from
-// each type's MAX macro, which is guaranteed by C99 regardless of C standard
-// mode.
+// C23's <stdint.h> defines these (UINT8_WIDTH, ..., UINTPTR_WIDTH,
+// SIZE_WIDTH), and this header and trie.h rely on them. Before C23 only some
+// libcs provide them (glibc does, via _GNU_SOURCE; Apple's libc and MSVC's
+// UCRT do not), so each is used if already defined and otherwise derived
+// from the type's MAX macro.
 #ifndef UINT8_WIDTH
 #  define UINT8_WIDTH 8
 #endif
@@ -231,9 +215,8 @@
 #    define popcount128 _STDBIT128(stdc_count_ones)
 #  endif
 #else
-   // We use the following population count function, which is pretty fast for
-   // 32-bit integers; we then force the smaller sizes through this function
-   // force larger types to integrate this function.
+   // A branch-free 32-bit population count; the other widths are built on
+   // top of it.
    EXTC static inline uint32_t popcount32(uint32_t w) {
       w = w - ((w >> 1) & 0x55555555);
       w = (w & 0x33333333) + ((w >> 2) & 0x33333333);
@@ -336,12 +319,8 @@
          0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8,
          31, 27, 13, 23, 21, 19, 16, 7, 26, 12, 18, 6, 11, 5, 10, 9
       };
-      // `(uint32_t)0 - v` rather than `-v`: identical result for an
-      // unsigned type (two's-complement negation and "subtract from zero"
-      // are the same bit pattern -- this is the standard isolate-lowest-
-      // set-bit idiom, `v & -v`, just spelled to avoid MSVC's C4146 "unary
-      // minus operator applied to unsigned type" warning, which fires here
-      // even though the operation is well-defined and intentional).
+      // `v & -v` (isolate the lowest set bit), spelled `(uint32_t)0 - v` to
+      // avoid MSVC's C4146 warning about negating an unsigned value.
       return deBruijn_values[((uint32_t)((v & ((uint32_t)0 - v)) * 0x077CB531U)) >> 27];
    }
    EXTC static inline uint16_t ctz16(uint16_t w) {
