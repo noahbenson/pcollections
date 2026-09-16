@@ -158,24 +158,26 @@ jobs:
           python -m pcollections.test
 
   # A debug build of CPython, whose consistency checks catch reference
-  # counting mistakes that a release build tolerates.
+  # counting mistakes that a release build tolerates. uv provides current
+  # debug builds (Ubuntu's packages lag behind).
   test-debug-python:
     name: debug CPython
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     env:
       PCOLLECTIONS_REQUIRE_C: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
       - name: Install debug CPython
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3.12-dbg python3.12-dev python3.12-venv
+        run: uv python install 3.14+debug
       - name: Install
         run: |
-          python3.12d -m venv ~/dbgenv
+          uv venv --seed --python 3.14+debug ~/dbgenv
+          ~/dbgenv/bin/python -VV
           ~/dbgenv/bin/python -c "import sys; assert hasattr(sys, 'gettotalrefcount')"
-          ~/dbgenv/bin/pip install .
+          ~/dbgenv/bin/python -m pip install .
       - name: Run tests
         run: |
           cd ~
