@@ -4,21 +4,39 @@
 # GitHub Pages (https://nben.net/pcollections/).
 # by Noah C. Benson
 #
-# In the repository settings, Pages must be set to deploy from GitHub Actions.
+# This workflow only runs when started by hand (Actions > Docs > Run
+# workflow), from the branch chosen there. It builds the docs from that
+# branch and, unless "deploy" is unchecked, publishes them.
+#
+# In the repository settings, Pages must be set to deploy from GitHub
+# Actions. The github-pages environment's deployment rules (Settings >
+# Environments) decide which branches may publish.
 
 name: Docs
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main, dev, 'dev/**' ]
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Publish the built docs to GitHub Pages'
+        type: boolean
+        default: true
+
+# Only one docs build and deployment at a time.
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
     name: Build the docs
     runs-on: ubuntu-latest
+    env:
+      # The docs describe the C implementation (see docs/conf.py).
+      PCOLLECTIONS_REQUIRE_C: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,20 +46,21 @@ jobs:
           python-version: '3.13'
       - name: Install
         run: pip install ".[docs]"
+      - name: Check the backend
+        run: python -c "import pcollections; assert pcollections.using_c_extension; print(pcollections.__version__)"
       - name: Check the examples
         run: python docs/check_examples.py
       - name: Build
         # -W turns warnings (such as broken references) into errors.
         run: sphinx-build -W --keep-going -b html docs docs/_build/html
       - name: Upload the site
-        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_build/html
 
   deploy:
     name: Publish to GitHub Pages
-    if: github.event_name != 'pull_request'
+    if: inputs.deploy
     needs: build
     runs-on: ubuntu-latest
     permissions:
