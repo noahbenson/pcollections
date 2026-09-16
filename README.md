@@ -12,6 +12,20 @@ implemented in C, with a pure-Python fallback, and has no dependencies.
 
 Documentation: <https://nben.net/pcollections/>
 
+### Use of Generative AI
+
+Version 1.0 and later of `pcollections` was written in collaboration with
+Claude Code, using models Sonnet 5 and Opus 5. All code prior to and including
+commit [`c83db2e`](
+https://github.com/noahbenson/pcollections/tree/c83db2efd90764fdb8daa1681135c04a55d046d2)
+(version 0.4 and earlier) were written by humans. This includes most of the
+entire original first implementation of the library and its API as well as most
+of the header files and critical performance code for the version 1.0 rewrite.
+
+All AI work was monitored by the author and independently tested prior to
+release.
+
+
 ## Installation
 
 ```sh
