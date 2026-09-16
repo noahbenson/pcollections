@@ -99,8 +99,10 @@ else:
         _warnings.warn(
             f"pcollections: the C backend could not be loaded ({_e!r}), so "
             f"the much slower pure-Python backend is in use (see "
-            f"pcollections.backend_error). Set PCOLLECTIONS_NO_C_EXTENSIONS=1 "
-            f"to choose the pure-Python backend without this warning.",
+            f"pcollections.backend_error). Set PCOLLECTIONS_REQUIRE_C=1 to "
+            f"make this an error, or PCOLLECTIONS_NO_C_EXTENSIONS=1 to choose "
+            f"the pure-Python backend without this warning. See "
+            f"https://nben.net/pcollections/install.html.",
             RuntimeWarning, stacklevel=2)
         del _warnings, _e
         _backend = _load_python_backend()

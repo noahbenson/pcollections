@@ -21,6 +21,16 @@ not backward compatible; they are marked **(breaking)**.
 - Type stubs are included.
 - Python 3.8 through 3.15 are supported, including the free-threaded
   builds of 3.13 and later. Python 3.7 is no longer supported. **(breaking)**
+- Setting `PCOLLECTIONS_REQUIRE_C=1` when building `pcollections` makes the
+  build fail if the C extension doesn't compile.
+- On Python 3.8, only the first interpreter in a process that imports
+  `pcollections` gets the C backend; other interpreters use the Python
+  backend.
+
+### Deprecated
+
+- Support for Python 3.8 is deprecated, and will be removed in a future
+  minor release (1.1 or 1.2, for example).
 
 ### Transient collections
 
@@ -54,6 +64,11 @@ not backward compatible; they are marked **(breaking)**.
   `reversed()`, as do their views.
 - All types can be subscripted in type hints (`pdict[str, int]`) and weakly
   referenced.
+- The named set methods (`intersection`, `symmetric_difference`,
+  `isdisjoint`, and the `_update` methods) accept any iterable, as those of
+  `set` do. `isdisjoint` is true when either set is empty, and
+  `pset.symmetric_difference` no longer returns the original set when the
+  result has the same size.
 
 ### Persistent collections
 

@@ -27,14 +27,24 @@ with lazy collections whose values are computed only when they are needed.
 pip install pcollections
 ```
 
-`pcollections` requires Python 3.8 or later and has no dependencies. Wheels
-with the compiled C implementation are available for most platforms; on
-other platforms, `pip` compiles it, or `pcollections` uses its pure-Python
-implementation (see [Backends](guide.md#backends)).
+`pcollections` supports CPython 3.8 through 3.15 (support for 3.8 is
+deprecated) and has no dependencies.
+
+```{important}
+`pcollections` has a C backend and a much slower pure-Python backend, and an
+installation that can't load the C backend still works, using the Python
+backend. Check which one you have:
+
+    python -c "import pcollections; print(pcollections.using_c_extension)"
+
+and see [Installation and backends](install.md) for how to make sure you get
+the C backend.
+```
 
 ```{toctree}
 :maxdepth: 2
 
+install
 guide
 differences
 api

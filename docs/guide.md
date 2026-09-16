@@ -231,15 +231,7 @@ computed values: an `ldict[str, int]` may hold `lazy` objects that compute
 
 `pcollections` is implemented in C, with a pure-Python fallback that has the
 same interface. If the C extension can't be loaded, `pcollections` uses the
-(much slower) Python implementation and issues a `RuntimeWarning`.
-`pcollections.using_c_extension` says which implementation is in use, and
-`pcollections.backend_error` holds the exception that prevented loading the
-C extension. Two environment variables, read when `pcollections` is
-imported, control this:
-
-- `PCOLLECTIONS_NO_C_EXTENSIONS=1` selects the Python implementation without
-  a warning. When set during installation, the C extension isn't built.
-- `PCOLLECTIONS_REQUIRE_C=1` makes importing `pcollections` fail when the C
-  implementation isn't available.
-
-Objects pickled with one implementation can be unpickled with the other.
+(much slower) Python implementation and issues a `RuntimeWarning`;
+`pcollections.using_c_extension` says which implementation is in use. See
+[Installation and backends](install.md) for how to check and choose the
+implementation, and for how the implementations behave in subinterpreters.

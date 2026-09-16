@@ -12,9 +12,34 @@ implemented in C, with a pure-Python fallback, and has no dependencies.
 
 Documentation: <https://nben.net/pcollections/>
 
+## Installation
+
 ```sh
 pip install pcollections
 ```
+
+`pcollections` supports CPython 3.8 through 3.15, including the
+free-threaded builds of 3.13 and later. **Support for Python 3.8 is
+deprecated** and will be removed in a future minor release (1.1 or 1.2, for
+example).
+
+**Check that you have the C backend.** `pcollections` has a C backend and a
+much slower pure-Python backend, and an installation that can't load the C
+backend (because `pip` built it from source without a working C compiler,
+for example) still works, using the Python backend:
+
+```sh
+python -c "import pcollections; print(pcollections.using_c_extension)"
+```
+
+To make sure you get the C backend, install with
+`pip install --only-binary pcollections pcollections` (which uses a prebuilt
+wheel or fails), or set `PCOLLECTIONS_REQUIRE_C=1` when installing and when
+running (which makes a build without the C extension, and an import without
+it, fail). See
+[Installation and backends](https://nben.net/pcollections/install.html).
+
+## Overview
 
 The library implements three persistent types: `plist`, `pset`, and
 `pdict`. These are immutable versions of the builtin `list`, `set`, and `dict`
@@ -130,12 +155,17 @@ extension can't be loaded, `pcollections` uses the (much slower) Python
 backend and issues a `RuntimeWarning`; `pcollections.using_c_extension` says
 which backend is in use, and `pcollections.backend_error` holds the exception
 that prevented loading the C extension. Two environment variables control
-this:
+this, both when `pcollections` is built and when it is imported:
 
-- `PCOLLECTIONS_NO_C_EXTENSIONS=1` selects the Python backend without a
-  warning.
-- `PCOLLECTIONS_REQUIRE_C=1` makes importing `pcollections` fail when the C
-  backend isn't available.
+- `PCOLLECTIONS_REQUIRE_C=1` makes building `pcollections` fail if the C
+  extension doesn't compile, and importing it fail if the C backend can't be
+  loaded.
+- `PCOLLECTIONS_NO_C_EXTENSIONS=1` builds `pcollections` without the C
+  extension, and selects the Python backend without a warning.
+
+On Python 3.8, only the first interpreter in a process that imports
+`pcollections` gets the C backend; other interpreters (subinterpreters, for
+example) use the Python backend.
 
 Objects pickled with one backend can be unpickled with the other.
 
