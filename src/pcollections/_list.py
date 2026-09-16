@@ -47,18 +47,22 @@ class plist(PersistentSequence):
             raise TypeError(msg)
         arg = args[0]
         # If arg is a tlist, this is a special case.
-        if isinstance(arg, tlist):
+        # Storage is shared only with a collection that is not lazy: reading
+        # from a lazy collection computes its values (see _lazy.py).
+        if type(arg) is cls:
+            return arg
+        elif getattr(type(arg), '_holds_lazy', False):
+            pass
+        elif isinstance(arg, tlist):
             (th, start, _) = arg._snapshot()
             if len(th) == 0:
                 return cls.empty
             return cls._new(th, start)
-        elif isinstance(arg, cls):
-            return arg
         elif isinstance(arg, plist):
             if len(arg) == 0:
                 return cls.empty
             else:
-                return cls._new(arg._phamt, arg._start)        
+                return cls._new(arg._phamt, arg._start)
         # We just want to build a PHAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)
         for (ii,val) in enumerate(iter(arg)):
@@ -240,8 +244,9 @@ class tlist(TransientSequence):
         elif n == 0: return cls.empty()
         else: raise TypeError(f"tlist expects at most 1 argument, got {n}")
         arg = args[0]
-        # If this is a plist, we know what to do with it.
-        if isinstance(arg, plist):
+        # If this is a (non-lazy) plist, share its storage.
+        if (isinstance(arg, plist)
+                and not getattr(type(arg), '_holds_lazy', False)):
             return cls._new(THAMT(arg._phamt), arg._start)
         # We just want to build a THAMT out of this arg of iterables.
         thamt = THAMT(PHAMT.empty)

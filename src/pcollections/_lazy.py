@@ -4,8 +4,11 @@
 # The lazy dictionary and list implementations.
 # By Noah C. Benson
 
-from functools import partial
-from threading import RLock
+from sys import _getframe
+from threading import Lock, get_ident
+
+from . import _lazybase
+from ._lazybase import LazyError, lazy_error_unwrap
 
 # See _list.py's import comment: llist/tllist reuse plist/tlist's FAT-backed
 # value-table encoding directly (self._phamt), and tldict wraps tdict's
@@ -15,10 +18,10 @@ from ._trie import (
     AMT,
     TAMT,
     FAT,
+    TFAT,
     FAT as PHAMT,
     TFAT as THAMT
 )
-from ._compact import is_tombstone
 
 from .util import seqstr
 from ._list import (
@@ -38,152 +41,137 @@ from ._dict import (
 #===============================================================================
 # Lazy Value Type
 
-class LazyError(RuntimeError):
-    """A runtime error that occurs while evaluating a lazy value.
+_PENDING, _RUNNING, _READY, _FAILED = range(4)
 
-    See also: `lazy`.
-    """
-    __slots__ = 'partial'
-    def __init__(self, partial):
-        self.partial = partial
-    def __str__(self):
-        if isinstance(self.partial, partial):
-            (fn, args, kwargs) = (p.func, p.args, p.keywords)
-        else:
-            (fn, args, kwargs) = self.partial
-        fnname = getattr(fn, '__name__', '<anonymous>')
-        errmsg = ('lazy raised error during call to '
-                  f'{fnname}{tuple(args)}')
-        if len(kwargs) > 0:
-            opts = ', '.join([f'{k}={v}' for (k,v) in kwargs.items()])
-            errmsg = f'{errmsg[:-1]}, {opts})'
-        return errmsg
-    def __repr__(self):
-        return str(self)
-class LazyErrorUnwrapper:
-    """A function or context manager for unwrapping ``LazyError`` exceptions.
-
-    ``lazy_error_unwrap(error)`` returns the cause of the given ``error`` if
-    ``error`` is a ``LazyError`` object; otherwise, ``error`` is returned
-    as-is.
-
-    ``lazy_error_unwrap`` is a context manager that unwraps any ``LazyError``
-    that is raised during its execution and ensures that the cause of the
-    lazy error is raised instead.
-
-    Examples
-    --------
-    >>> from pcollections import lazy_error_unwrap, ldict, lazy
-    >>> d = ldict(x=lazy(lambda:0[0]))
-
-    After the above line of code, ``d['x']`` will trigger a ``LazyError``
-    caused by a ``TypeError`` because ``0[0]`` raises a ``TypeError``.
-    
-    >>> try:
-    ...     with lazy_error_unwrap:
-    ...         d['x']
-    ... except TypeError:
-    ...     print("TypeError raised.")
-    TypeError raised.
-
-    Usually ``d['x']`` would raise a ``LazyError``, not a ``TypeError``, but
-    because ``d['x']`` was evaluated in the ``lazy_error_unwrap`` context, the
-    ``LazyError`` was unwrapped and the ``TypeError`` was raised instead.
-    """
-    __slots__ = ()
-    def __call__(self, err):
-        if type(err) is LazyError:
-            return err.__context__
-        else:
-            return err
-    def __enter__(self):
-        return
-    def __exit__(self, ex_type, ex_val, tb):
-        if ex_type is LazyError:
-            raise ex_val.__context__
-        else:
-            return False
-lazy_error_unwrap = LazyErrorUnwrapper()
 class lazy:
-    """A callable like `partial` for lazily-computed values.
+    """A value computed on first request, like a `partial` with no free
+    arguments.
 
-    The `lazy` type is constructed identically to the `partial` type. Unlike
-    `partial`, however, `lazy` values must have their entire argument lists
-    instantiated at the time of construction--i.e., it is not possible to call
-    a lazy partial with additional arguments.
+    `l = lazy(fn, *args, **kwargs)` stores the callable `fn` and its
+    arguments. The first call `l()` computes `fn(*args, **kwargs)`, caches
+    the result, and releases `fn` and its arguments; later calls return the
+    cached result. The computation runs at most once, even when several
+    threads request the value at the same time: the others wait for it.
 
-    `l = lazy(fn, *args, **kwargs)` stores the given callable `fn` with the
-    given `args` and `kwargs` as arguments. When the lazy value of `l` is later
-    requested (via `l()`), the value is cached, and the partial data is
-    forgotten.
+    If the computation raises an `Exception`, the lazy value fails: this and
+    every later call raise a new `LazyError` whose `__cause__` is the
+    original exception, without running the computation again. A
+    computation that requests its own value raises `LazyError`. Any other
+    exception (such as `KeyboardInterrupt`) propagates unchanged and leaves
+    the value uncomputed.
+
+    Two threads that each compute a lazy value needed by the other's
+    computation deadlock. This cannot happen when lazy values are built from
+    immutable data, since a lazy value can then only depend on lazy values
+    that existed before it.
+
+    A `lazy` records where it was created, for its error messages. When the
+    class attribute `lazy.trace` is true (initially, if the
+    PCOLLECTIONS_LAZY_TRACE environment variable is set), it also records the
+    full stack.
+
+    Pickling a `lazy` computes it and pickles the result.
+
+    `lazy` may be subclassed; a subclass may override `__call__`, calling
+    `super().__call__()` to compute the value.
     """
-    __slots__ = ('partial', 'value')
-    def __new__(cls, fn, *args, **kw):
-        # Make sure the function is callable.
+    __slots__ = ('_func', '_args', '_kwargs', '_value', '_state', '_owner',
+                 '_lock', '_error', '_error_tb', '_origin_code',
+                 '_origin_line', '_origin_stack')
+    trace = _lazybase.TRACE_DEFAULT
+    def __new__(cls, *args, **kwargs):
+        if not args:
+            raise TypeError("lazy() missing required positional argument: 'fn'")
+        fn = args[0]
         if not callable(fn):
-            raise TypeError(f"lazy({fn}) must be given a callable function")
-        # Allocate an object.
-        obj = object.__new__(cls)
-        # Create the partial object.
-        part = partial(fn, *args, **kw)
-        # We want to prepare an error to raise if something happens during the
-        # calculation of the lazy value in the __call__ method.
-        try:
-            raise LazyError((fn, args, kw))
-        except LazyError as e:
-            error = e
-        # Set the appropriate members.
-        object.__setattr__(obj, 'partial', (part, RLock(), error))
-        # We set value to an RLock for use in the calculation.
-        object.__setattr__(obj, 'value', None)
-        # That's all that is needed.
-        return obj
+            raise TypeError(f"lazy({fn!r}) must be given a callable function")
+        self = object.__new__(cls)
+        self._func = fn
+        self._args = args[1:]
+        self._kwargs = kwargs
+        self._value = None
+        self._state = _PENDING
+        self._owner = None
+        self._lock = Lock()
+        self._error = None
+        self._error_tb = None
+        frame = _getframe(1)
+        self._origin_code = frame.f_code
+        self._origin_line = frame.f_lineno
+        self._origin_stack = (_lazybase.capture_stack(frame) if lazy.trace
+                              else None)
+        return self
+    @classmethod
+    def _from_value(cls, value):
+        self = object.__new__(cls)
+        self._func = self._args = self._kwargs = None
+        self._value = value
+        self._state = _READY
+        self._owner = None
+        self._lock = Lock()
+        self._error = self._error_tb = None
+        self._origin_code = self._origin_stack = None
+        self._origin_line = 0
+        return self
+    def _make_error(self, kind):
+        return _lazybase.make_error(
+            kind, self._func, self._args, self._kwargs, self._origin_code,
+            self._origin_line, self._origin_stack, self._error,
+            self._error_tb)
     def __call__(self):
-        part = self.partial
-        if part is None:
-            return self.value
-        else:
-            (part, rlock, init_error) = part
-            # Acquire the rlock then re-check that the lazy hasn't already been
-            # calculated (at which point self.partial will be None).
-            rlock.acquire()
-            try:
-                if self.partial is None:
-                    val = self.value
+        state = self._state
+        if state == _READY:
+            return self._value
+        if state == _FAILED:
+            raise self._make_error('failed')
+        me = get_ident()
+        if state == _RUNNING and self._owner == me:
+            raise self._make_error('recursive')
+        with self._lock:
+            state = self._state
+            if state == _READY:
+                return self._value
+            if state == _PENDING:
+                self._owner = me
+                self._state = _RUNNING
+                try:
+                    value = self._func(*self._args, **self._kwargs)
+                except Exception as e:
+                    self._error = e
+                    self._error_tb = e.__traceback__
+                    self._state = _FAILED
+                    self._owner = None
+                except BaseException:
+                    self._owner = None
+                    self._state = _PENDING
+                    raise
                 else:
-                    val = part()
-                    # We've successfully calculated the value; set the members
-                    # appropriately.
-                    object.__setattr__(self, 'value', val)
-                    object.__setattr__(self, 'partial', None)
-                return val
-            except Exception as partial_eror:
-                # If an exception occurs, we want to raise an error that traces
-                # back to the initialization of this object.
-                raise init_error
-            finally:
-                rlock.release()
+                    self._value = value
+                    self._func = self._args = self._kwargs = None
+                    self._origin_code = self._origin_stack = None
+                    self._state = _READY
+                    self._owner = None
+                    return value
+        # The value failed; raised outside the except clause so that the
+        # error's only link to the failure is its __cause__.
+        raise self._make_error('failed')
+    def _state_name(self):
+        state = self._state
+        return ('ready' if state == _READY else
+                'failed' if state == _FAILED else 'waiting')
     def __repr__(self):
-        s = 'ready' if self.is_ready() else 'waiting'
-        return f"lazy(<{id(self)}>: {s})"
+        return f"lazy(<{id(self)}>: {self._state_name()})"
     def __str__(self):
         return f"lazy(<{id(self)}>)"
+    def __reduce__(self):
+        state = getattr(self, '__dict__', None) or None
+        return (_lazybase.ready_lazy, (type(self), self()), state)
     def is_ready(self):
-        """Returns `True` if the lazy value is cached and `False` otherwise.
-
-        Returns
-        -------
-        boolean
-            `True` if the given lazy object has cached its value and `False`
-            otherwise.
-        """
-        return self.partial is None
+        """Returns `True` if the value has been computed, otherwise `False`."""
+        return self._state == _READY
 def unlazy(obj):
-    """Returns the cached value of a lazy object or the object if not lazy."""
-    if isinstance(obj, lazy):
-       return obj()
-    else:
-       return obj
+    """Returns the value of `obj` if it is a `lazy`, otherwise `obj`."""
+    return obj() if isinstance(obj, lazy) else obj
 def reprlazy(obj):
     """Returns `'<lazy>'` if `obj` is a `lazy` object, otherwise `repr(obj)`."""
     if isinstance(obj, lazy):
@@ -197,372 +185,268 @@ def strlazy(obj):
     else:
         return str(obj)
 def holdlazy(obj, require_lazy=False):
-    """Returns a persistent version of a lazy collection whose lazy values
-    remain unevaluated `lazy` objects.
+    """Returns a lazy collection as a plain collection that holds its `lazy`
+    values uncomputed.
 
-    When one typically converts a lazy collection (either an `ldict` or `llist`
-    object), into a persistent collection (`pdict(ld)` or `ldict(ll)` for lazy
-    dict `ld` and lazy list `ll`), the lazy values in the collection are
-    evaluated, forcing their computation. It is sometimes desirable to obtain an
-    equivalent persistent collection that does not evaluate the `lazy` values,
-    however, and the `holdlazy` function allows this by converting `ldict` and
-    `llist` objects into their equivalent `pdict` and `plist` types without
-    dereferencing the `lazy` values.
+    Reading from a lazy collection (`ldict`, `llist`, `tldict`, or
+    `tllist`), including converting it to another collection, computes its
+    lazy values. `holdlazy(coll)` instead returns the equivalent plain
+    collection (`pdict`, `plist`, `tdict`, or `tlist`), whose values are the
+    `lazy` objects themselves. It never shares mutable storage with `coll`.
 
-    In truth, `holdlazy(obj)` looks for an attribute `__holdlazy__` and, if it
-    finds that attribute, runs it as a method and returns the result. If the
-    attribute is not found either the object is returned as-is or an error is
-    raised, depending on the `require_lazy` parameter. By default,
-    `require_lazy` is `False`, meaning that an object that is does not define
-    `__holdlazy__` is considered to be already held and thus is returned
-    as-is. If `require_lazy` is set to `True`, then a `TypeError` is raised if
-    `__holdlazy__` is not defined.
+    `holdlazy(obj)` calls `obj.__holdlazy__()` if `obj`'s type defines that
+    method. Otherwise, it returns `obj` unchanged, or, if `require_lazy` is
+    true, raises `TypeError`.
     """
-    try:
-        return obj.__holdlazy__()
-    except AttributeError:
-        if require_lazy:
-            raise TypeError(
-                f"__holdlazy__ method not found for type {type(obj)}")
-        else:
-            return obj
-    
+    method = getattr(type(obj), '__holdlazy__', None)
+    if method is not None:
+        return method(obj)
+    if require_lazy:
+        raise TypeError(f"__holdlazy__ method not found for type {type(obj)}")
+    return obj
+
 
 #===============================================================================
-# The Lazy List Type
+# The lazy collections
+#
+# The lazy collections follow one rule: every read from a lazy collection
+# computes the lazy values it returns. Reads include indexing, `get`,
+# iteration over values and items, `values()`, `items()`, `pop`, equality,
+# hashing, and conversion to another collection. `repr` and `str` show
+# lazy values without computing them. The raw `lazy` objects are available
+# through `getlazy`, `holdlazy`, and the `held_*` methods.
+#
+# Lazy values stored in any other collection are ordinary objects.
+
+def _seqstr_lazy(coll, maxlen=None):
+    if maxlen is None:
+        return seqstr(coll, tostr=reprlazy)
+    return seqstr(coll, maxlen=maxlen, tostr=reprlazy)
 
 class llist(plist):
-    """A persistent lazy list type.
+    """A persistent list whose `lazy` elements are computed when read.
 
-    The `llist` type is identical to the `plist` type, with the exception that
-    any `lazy` value contained in an `llist` is dereferenced prior to being
-    returned by item extraction from the list or iteration. Essentially, an
-    `llist` containing a lazy value behaves equivalently to a `plist` whose
-    values were all precalculated. Note that hashing an `llist` object results
-    in all lazy values being calculated.
-
-    The `llist.transient` method returns a normal `tlist`, but one the lazy
-    values are not dereferenced, meaning that laziness is respected for
-    edits. However, if one requests a lazy value from the transient list, the
-    `lazy` object itself will be returned. In order to recreate a lazy list
-    (instead of a persistent list) from the transient list, one must use
-    `llist(t)` instead of `t.persistent()`; the latter call will return a
-    `plist` containing `lazy` objects.
+    `llist` is a `plist` whose reads (indexing, iteration, comparison,
+    hashing, and conversion to other collections) compute the `lazy`
+    elements they return. `llist(x)` keeps the lazy elements of `x`
+    uncomputed. `getlazy(i)` and `held_plist()` return the raw `lazy`
+    objects.
     """
     empty = None
     __slots__ = ()
+    _holds_lazy = True
     def __new__(cls, *args, **kw):
         return plist.__new__(cls, *map(holdlazy, args), **kw)
     def __iter__(self):
-        it = plist.__iter__(self)
-        return map(lambda u: u() if isinstance(u, lazy) else u, it)
+        return map(unlazy, plist.__iter__(self))
     def __getitem__(self, k):
-        el = plist.__getitem__(self, k)
-        return el() if isinstance(el, lazy) else el
+        return unlazy(plist.__getitem__(self, k))
     def __str__(self):
-        # We have a max length of 60 characters, not counting the delimiters.
-        return f"[|{seqstr(self.as_plist(), maxlen=60, tostr=reprlazy)}|]"
+        return f"[|{_seqstr_lazy(self.held_plist(), 60)}|]"
     def __repr__(self):
-        return f"[|{seqstr(self.as_plist())}|]"
+        return f"[|{_seqstr_lazy(self.held_plist())}|]"
+    def __reduce__(self):
+        return (type(self), (list(self),))
     def is_lazy(self, index):
-        """Determines if the given key is mapped to a `lazy` value.
-
-        `is_lazy` determines whether the associated key is mapped to a `lazy`
-        object, but it does not determine if the lazy value is cached. To query
-        whether a key is mapped to a value that is uncached, see the `is_ready`
-        method.
-        """
-        v = plist.__getitem__(self, index)
-        return isinstance(v, lazy)
+        """Returns `True` if the element at `index` is a `lazy` object."""
+        return isinstance(plist.__getitem__(self, index), lazy)
     def is_ready(self, index):
-        """Determines if the given key's value can be immediately returned.
-
-        `is_ready` determines whether the associated key is either mapped to a
-        non-`lazy` value or is mapped to a `lazy` value that is cached.
-        """
+        """Returns `True` if the element at `index` is not a `lazy` object or
+        is a `lazy` object whose value has been computed."""
         v = plist.__getitem__(self, index)
-        if isinstance(v, lazy):
-            return v.is_ready()
-        else:
-            return True
+        return v.is_ready() if isinstance(v, lazy) else True
     def ready_all(self):
-        "Caches all lazy items then returns the list."
-        for el in self._phamt:
+        """Computes all lazy elements, then returns the list."""
+        for el in plist.__iter__(self):
             if isinstance(el, lazy):
                 el()
         return self
-    def as_plist(self):
-        """Returns a `plist`  of the lazy list with `lazy` values uncached.
-
-        Whereas `plist(l)` will return a `plist` whose values are all the cached
-        values of the `llist` `l`, the method `l.as_plist()` returns a copy of
-        `l` where indices of `l` that lazily compute their values are mapped to
-        their associated `lazy` objects. This is essentially a way to expose the
-        raw values of a lazy list.
-        """
+    def held_plist(self):
+        """Returns a `plist` of the list's elements with `lazy` elements left
+        uncomputed."""
         return plist._new(self._phamt, self._start)
-    def __holdlazy__(self):
-        return self.as_plist()
+    __holdlazy__ = held_plist
     def getlazy(self, index):
-        """Like getitem, but returns lazy objects instead of their results.
-
-        For an `llist` variable `l`, `l.getlazy(ii)` is equivalent to `l[ii]`
-        except that if the index `ii` maps to a lazy value, then `l.getlazy`
-        will return the lazy object rather than evaluating it and returning the
-        reified value.
-        """
+        """Like `self[index]`, but returns a `lazy` element itself rather than
+        its value."""
         return plist.__getitem__(self, index)
     def clear(self):
         return llist.empty
     def transient(self):
+        """Returns a `tllist` copy of the list in constant time."""
         return tllist._new(THAMT(self._phamt), self._start, self)
-# Setup the llist.empty static member.
 llist.empty = llist._new(PHAMT.empty, 0)
 
-# The Transient Lazy List Type -------------------------------------------------
 class tllist(tlist):
-    """A transient lazy list type.
+    """A transient list whose `lazy` elements are computed when read.
 
-    Transient lazy lists are like transient lists (`tlist`) with the only
-    difference being that they automatically return the reified values of lazy
-    elements instead of the `lazy` objects themselves.
+    `tllist` is to `llist` as `tlist` is to `plist`.
     """
     __slots__ = ()
+    _holds_lazy = True
+    def __new__(cls, *args, **kw):
+        return tlist.__new__(cls, *map(holdlazy, args), **kw)
     def __iter__(self):
         return map(unlazy, tlist.__iter__(self))
-    def persistent(self):
-        """Efficiently copies the tllist into an llist and returns the llist."""
-        return self._persistent_as(llist)
     def __getitem__(self, k):
         return unlazy(tlist.__getitem__(self, k))
-    def getlazy(self, k):
-        """Returns an element of the list without dereferecing lazy elements."""
-        return tlist.__getitem__(self, k)
-        
-
-
-#===============================================================================
-# The Lazy Dictionary Type
+    def __str__(self):
+        return f"[<{_seqstr_lazy(self.held_tlist(), 60)}>]"
+    def __repr__(self):
+        return f"[<{_seqstr_lazy(self.held_tlist())}>]"
+    def __reduce__(self):
+        return (type(self), (list(self),))
+    def pop(self, index=-1):
+        return unlazy(tlist.pop(self, index))
+    def persistent(self):
+        """Returns an `llist` copy of the list."""
+        return self._persistent_as(llist)
+    def is_lazy(self, index):
+        """Returns `True` if the element at `index` is a `lazy` object."""
+        return isinstance(tlist.__getitem__(self, index), lazy)
+    def is_ready(self, index):
+        """Returns `True` if the element at `index` is not a `lazy` object or
+        is a `lazy` object whose value has been computed."""
+        v = tlist.__getitem__(self, index)
+        return v.is_ready() if isinstance(v, lazy) else True
+    def ready_all(self):
+        """Computes all lazy elements, then returns the list."""
+        for el in list(tlist.__iter__(self)):
+            if isinstance(el, lazy):
+                el()
+        return self
+    def held_tlist(self):
+        """Returns a `tlist` of the list's elements with `lazy` elements left
+        uncomputed. The two lists do not share mutable storage."""
+        (th, start, _) = self._snapshot()
+        return tlist._new(THAMT(th), start)
+    __holdlazy__ = held_tlist
+    def getlazy(self, index):
+        """Like `self[index]`, but returns a `lazy` element itself rather than
+        its value."""
+        return tlist.__getitem__(self, index)
 
 class ldict_items(pdict_items):
     __slots__ = ()
     def _from_kv(self, kv):
-        (k,v) = kv
-        if isinstance(v, lazy):
-            return (k, v())
-        else:
-            return kv
+        v = kv[1]
+        return (kv[0], v()) if isinstance(v, lazy) else kv
 class ldict_values(pdict_values):
     __slots__ = ()
     def _from_kv(self, kv):
-        v = kv[1]
-        if isinstance(v, lazy):
-            v = v()
-        return v
+        return unlazy(kv[1])
 class ldict(pdict):
-    """A persistent lazy dict type.
+    """A persistent dict whose `lazy` values are computed when read.
 
-    The `ldict` type is identical to the `pdict` type, with the exception that
-    any `lazy` value contained in an `ldict` is dereferenced prior to being
-    returned by item extraction from the dict or iteration. Essentially, an
-    `ldict` containing a lazy value behaves equivalently to a `pdict` whose
-    values were all precalculated. Note that hashing an `ldict` object results
-    in all lazy values being calculated.
-
-    The `ldict.transient` method returns a normal `tdict`, but one the lazy
-    values are not dereferenced, meaning that laziness is respected for
-    edits. However, if one requests a lazy value from the transient dict, the
-    `lazy` object itself will be returned. In order to recreate a lazy dict
-    (instead of a persistent dict) from the transient dict, one must use
-    `ldict(t)` instead of `t.persistent()`; the latter call will return a
-    `pdict` containing `lazy` objects.
+    `ldict` is a `pdict` whose reads (indexing, `get`, `values()`,
+    `items()`, comparison, hashing, and conversion to other collections)
+    compute the `lazy` values they return. `ldict(x)` keeps the lazy values
+    of `x` uncomputed. `getlazy(k)` and `held_pdict()` return the raw `lazy`
+    objects.
     """
     empty = None
     __slots__ = ()
+    _holds_lazy = True
     def __new__(cls, *args, **kw):
         return pdict.__new__(cls, *map(holdlazy, args), **kw)
     def __getitem__(self, key):
-        v = pdict.__getitem__(self, key)
-        if isinstance(v, lazy):
-            v = v()
-        return v
+        return unlazy(pdict.__getitem__(self, key))
     def __str__(self):
-        # We have a max length of 60 characters, not counting the delimiters.
-        return f"{{|{seqstr(self.as_pdict(), maxlen=60, tostr=reprlazy)}|}}"
+        return f"{{|{_seqstr_lazy(self.held_pdict(), 60)}|}}"
     def __repr__(self):
-        return f"{{|{seqstr(self.as_pdict())}|}}"
+        return f"{{|{_seqstr_lazy(self.held_pdict())}|}}"
     def get(self, key, default=None):
-        v = pdict.get(self, key, default)
-        if isinstance(v, lazy):
-            v = v()
-        return v
+        return unlazy(pdict.get(self, key, default))
     def items(self):
         return ldict_items(self)
     def values(self):
         return ldict_values(self)
-    def is_lazy(self, index):
-        """Determines if the given key is mapped to a `lazy` value.
-
-        `is_lazy` determines whether the associated key is mapped to a `lazy`
-        object, but it does not determine if the lazy value is cached. To query
-        whether a key is mapped to a value that is uncached, see the `is_ready`
-        method.
-        """
-        v = pdict.__getitem__(self, index)
-        return isinstance(v, lazy)
-    def is_ready(self, index):
-        """Determines if the given key's value can be immediately returned.
-
-        `is_ready` determines whether the associated key is either mapped to a
-        non-`lazy` value or is mapped to a `lazy` value that is cached.
-        """
-        v = pdict.__getitem__(self, index)
-        if isinstance(v, lazy):
-            return v.is_ready()
-        else:
-            return True
+    def is_lazy(self, key):
+        """Returns `True` if `key` is mapped to a `lazy` object."""
+        return isinstance(pdict.__getitem__(self, key), lazy)
+    def is_ready(self, key):
+        """Returns `True` if `key` is mapped to a value that is not a `lazy`
+        object or is a `lazy` object whose value has been computed."""
+        v = pdict.__getitem__(self, key)
+        return v.is_ready() if isinstance(v, lazy) else True
     def ready_all(self):
-        "Caches all lazy items then returns the dictionary."
-        for (_ii, (kv, _next)) in self._els:
-            if is_tombstone(kv):
-                continue
-            (k,v) = kv
+        """Computes all lazy values, then returns the dict."""
+        for v in pdict_values(self):
             if isinstance(v, lazy):
                 v()
         return self
-    def as_pdict(self):
-        """Returns a `pdict`  of the lazy dict with `lazy` values uncached.
-
-        Whereas `pdict(ld)` will return a `pdict` whose values are all the
-        cached values of the `ldict` `ld`, the method `ld.as_pdict()` returns a
-        copy of `ld` where keys of `ld` that lazily compute their values are
-        mapped to their associated `lazy` objects. This is essentially a way to
-        expose the raw values of a lazy dictionary.
-        """
+    def held_pdict(self):
+        """Returns a `pdict` of the dict's items with `lazy` values left
+        uncomputed."""
         return pdict._new(self._els, self._idx, self._top, self._count,
                           self._ndeleted)
-    def __holdlazy__(self):
-        return self.as_pdict()
+    __holdlazy__ = held_pdict
     def getlazy(self, key, default=None):
-        """Like get, but returns lazy objects instead of their results.
-
-        For an `ldict` variable `d`, `d.getlazy(k, default)` is equivalent to
-        `d.get(k, default)` except that if the key `k` maps to a lazy value,
-        then `d.getlazy` will return the lazy object rather than evaluating it
-        and returning the reified value.
-        """
+        """Like `get`, but returns a `lazy` value itself rather than its
+        value."""
         return pdict.get(self, key, default)
     def clear(self):
         return ldict.empty
     def transient(self):
-        return tldict._new(THAMT(self._els), THAMT(self._idx), self._top,
+        """Returns a `tldict` copy of the dict in constant time."""
+        return tldict._new(TFAT(self._els), TAMT(self._idx), self._top,
                            self._count, self._ndeleted, self)
-# Make the empty pdict.
 ldict.empty = ldict._new(FAT.empty, AMT.empty, 0, 0, 0)
 
-# The Transient Lazy Dictionary Type -------------------------------------------
 class tldict_items(tdict_items):
     __slots__ = ()
     def _from_kv(self, kv):
-        if isinstance(kv[1], lazy):
-            return (kv[0], kv[1]())
-        else:
-            return kv
+        v = kv[1]
+        return (kv[0], v()) if isinstance(v, lazy) else kv
 class tldict_values(tdict_values):
     __slots__ = ()
-    def _from_kv(self, arg):
-        return unlazy(arg[1])
-    def __contains__(self, v):
-        for (kv,_) in self._els:
-            if not isinstance(kv[1], lazy):
-                if kv[1] == v:
-                    return True
-        for (kv,_) in self._els:
-            if isinstance(kv[1], lazy):
-                if kv[1]() == v:
-                    return True
-        return False
+    def _from_kv(self, kv):
+        return unlazy(kv[1])
 class tldict(tdict):
-    """A transient lazy dict type.
+    """A transient dict whose `lazy` values are computed when read.
 
-    Transient lazy dicts are like transient dicts (`tdict`) with the only
-    difference being that they automatically return the reified values of lazy
-    keys instead of the `lazy` objects themselves.
+    `tldict` is to `ldict` as `tdict` is to `pdict`.
     """
     __slots__ = ()
+    _holds_lazy = True
     def __new__(cls, *args, **kw):
         return tdict.__new__(cls, *map(holdlazy, args), **kw)
     def __str__(self):
-        # We have a max length of 60 characters, not counting the delimiters.
-        return f"{{|{seqstr(self.as_tdict(), maxlen=60, tostr=reprlazy)}|}}"
+        return f"{{<{_seqstr_lazy(self.held_tdict(), 60)}>}}"
     def __repr__(self):
-        return f"{{|{seqstr(self.as_tdict())}|}}"
+        return f"{{<{_seqstr_lazy(self.held_tdict())}>}}"
     def persistent(self):
-        """Efficiently copies the tldict into an ldict and returns the ldict."""
+        """Returns an `ldict` copy of the dict."""
         return self._persistent_as(ldict)
     def is_lazy(self, key):
-        """Determines if the given key is mapped to a `lazy` value.
-
-        `is_lazy` determines whether the associated key is mapped to a `lazy`
-        object, but it does not determine if the lazy value is cached. To query
-        whether a key is mapped to a value that is uncached, see the `is_ready`
-        method.
-        """
-        v = tdict.__getitem__(self, key)
-        return isinstance(v, lazy)
+        """Returns `True` if `key` is mapped to a `lazy` object."""
+        return isinstance(tdict.__getitem__(self, key), lazy)
     def is_ready(self, key):
-        """Determines if the given key's value can be immediately returned.
-
-        `is_ready` determines whether the associated key is either mapped to a
-        non-`lazy` value or is mapped to a `lazy` value that is cached.
-        """
+        """Returns `True` if `key` is mapped to a value that is not a `lazy`
+        object or is a `lazy` object whose value has been computed."""
         v = tdict.__getitem__(self, key)
-        if isinstance(v, lazy):
-            return v.is_ready()
-        else:
-            return True
+        return v.is_ready() if isinstance(v, lazy) else True
     def ready_all(self):
-        "Caches all lazy items then returns the dictionary."
-        for (_ii, (kv, _next)) in self._els:
-            if is_tombstone(kv):
-                continue
-            (k,v) = kv
+        """Computes all lazy values, then returns the dict."""
+        for v in list(tdict_values(self)):
             if isinstance(v, lazy):
                 v()
         return self
-    def as_tdict(self):
-        """Returns a `tdict` of the lazy dict with `lazy` values uncached.
-
-        Whereas `tdict(tld)` will return a `tdict` whose values are all the
-        cached values of the `tldict` `tld`, the method `tld.as_tdict()` returns
-        a copy of `td` where keys of `tld` that lazily compute their values are
-        mapped to their associated `lazy` objects. This is essentially a way to
-        expose the raw values of a lazy dictionary.
-        """
-        # The copy gets a snapshot of the tries, so that changing either
-        # transient leaves the other unchanged.
+    def held_tdict(self):
+        """Returns a `tdict` of the dict's items with `lazy` values left
+        uncomputed. The two dicts do not share mutable storage."""
         (els, idx, top, count, ndeleted, _) = self._snapshot()
-        return tdict._new(THAMT(els), TAMT(idx), top, count, ndeleted)
-    def __holdlazy__(self):
-        return self.as_tdict()
-    def getlazy(self, k, default=None):
-        """Like get, but returns lazy objects instead of their results.
-
-        For a `tldict` variable `d`, `d.getlazy(k, default)` is equivalent to
-        `d.get(k, default)` except that if the key `k` maps to a lazy value,
-        then `d.getlazy` will return the lazy object rather than evaluating it
-        and returning the reified value.
-        """
-        return tdict.get(self, k, default)
-    def __getitem__(self, k):
-        return unlazy(tdict.__getitem__(self, k))
-    def get(self, k, default=None):
-        return unlazy(tdict.get(self, k, default))
+        return tdict._new(TFAT(els), TAMT(idx), top, count, ndeleted)
+    __holdlazy__ = held_tdict
+    def getlazy(self, key, default=None):
+        """Like `get`, but returns a `lazy` value itself rather than its
+        value."""
+        return tdict.get(self, key, default)
+    def __getitem__(self, key):
+        return unlazy(tdict.__getitem__(self, key))
+    def get(self, key, default=None):
+        return unlazy(tdict.get(self, key, default))
     def pop(self, *args):
-        # NB: this must delegate to tdict.pop (like __getitem__/get above
-        # delegate to tdict.__getitem__/tdict.get), not call self.pop(...)
-        # again -- the latter was an infinite-recursion bug (every call
-        # would just re-invoke this same override).
         return unlazy(tdict.pop(self, *args))
     def items(self):
         return tldict_items(self)

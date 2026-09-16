@@ -59,12 +59,18 @@
       ((uint64_t)InterlockedExchangeAdd64((ptr), 1))
 #  define PCOLL_ATOMIC_U64_FETCH_SUB1(ptr) \
       ((uint64_t)InterlockedExchangeAdd64((ptr), -1))
+#  define PCOLL_ATOMIC_U64_LOAD(ptr) \
+      ((uint64_t)InterlockedExchangeAdd64((ptr), 0))
+#  define PCOLL_ATOMIC_U64_STORE(ptr, v) \
+      ((void)InterlockedExchange64((ptr), (LONG64)(v)))
 #else
 #  include <stdatomic.h>
    typedef _Atomic uint64_t pcoll_atomic_u64_t;
 #  define PCOLL_ATOMIC_U64_FETCH_ADD1(ptr) atomic_fetch_add((ptr), 1)
 #  define PCOLL_ATOMIC_U64_FETCH_SUB1(ptr) \
       atomic_fetch_sub_explicit((ptr), 1, memory_order_acq_rel)
+#  define PCOLL_ATOMIC_U64_LOAD(ptr) atomic_load(ptr)
+#  define PCOLL_ATOMIC_U64_STORE(ptr, v) atomic_store((ptr), (uint64_t)(v))
 #endif
 
 

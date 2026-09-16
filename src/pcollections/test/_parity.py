@@ -52,15 +52,8 @@ _IGNORE = {
     '__class_getitem__', '__init_subclass__', '__subclasshook__',
     '__firstlineno__', '__static_attributes__',
     '__annotate_func__', '__annotations_cache__',
-    # `lazy.__slots__ = ('partial', 'value')` in _lazy.py: these are raw
-    # instance storage (what a lazy computation is waiting on / has cached),
-    # analogous to pdict's `_els`/`_idx` but, unlike those, not given a
-    # leading underscore in the reference -- an inconsistency in _lazy.py's
-    # own naming, not part of the documented public API. The C `lazy` type
-    # deliberately does not expose these as raw attributes (its internal
-    # state is a completely different mutex/atomic-flag representation, not
-    # a stored tuple), so they're excluded here rather than replicated.
-    'partial', 'value',
+    # lazy.trace is a class attribute holding a setting.
+    'trace',
 }
 
 

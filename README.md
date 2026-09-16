@@ -34,6 +34,34 @@ items are the results of complex or long-running computations that only get
 computed once requested. The persistent data structures allow the arguments to
 these lazy functions to be safe from mutation.
 
+### Lazy values
+
+- A `lazy` is an ordinary object in any collection other than the lazy
+  collections: `pdict(x=lazy(f))['x']` is the `lazy` itself.
+- Every read from a lazy collection computes the lazy values it returns. That
+  includes indexing, `get`, `values()`, `items()`, iteration, `pop`,
+  comparison, hashing, pickling, and converting to another collection:
+  `pdict(ld)` computes the values of the `ldict` `ld`. `str` and `repr` show
+  `<lazy>` without computing anything.
+- The lazy constructors (`ldict(x)`, `llist(x)`, `tldict(x)`, `tllist(x)`)
+  keep lazy values uncomputed. To get the raw `lazy` objects out of a lazy
+  collection, use `getlazy`, `holdlazy(coll)`, or the `held_pdict`,
+  `held_tdict`, `held_plist`, and `held_tlist` methods.
+- A value is computed at most once, even when several threads request it at
+  the same time. If the computation raises an exception, the failure is
+  remembered: every request raises a new `LazyError` whose `__cause__` is the
+  original exception, and whose message says where the `lazy` was created.
+  Set `lazy.trace = True` (or the environment variable
+  `PCOLLECTIONS_LAZY_TRACE=1`) to also record the full stack at creation.
+  `with lazy_error_unwrap:` re-raises the original exception instead.
+- A lazy value whose computation requests its own value raises `LazyError`.
+  Two threads that each compute a lazy value needed by the other deadlock;
+  this can't happen when lazy values are built from immutable data, because a
+  lazy value can then only depend on lazy values that existed before it.
+- Pickling a `lazy` computes it and pickles its value.
+- `lazy` can be subclassed. A subclass may override `__call__` and call
+  `super().__call__()`; lazy collections and `unlazy` call the override.
+
 Finally, the persistent and lazy types have transient correlaries that enable
 more efficient batch-mutation of the persistent types. The transient types
 `tlist`, `tset`, `tdict`, `tllist`, and `tldict` all have interfaces equivalent

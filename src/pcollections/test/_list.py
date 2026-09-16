@@ -349,10 +349,10 @@ class _LListTestMixin:
         self.assertEqual(p1[0], 1)
         self.assertEqual(p1[1], 11)
         self.assertEqual(counter.count, 11)
-        # Converstion via as_plist preserves the lazy items.
+        # Converstion via held_plist preserves the lazy items.
         counter.count = 0
         p1 = self.llist([self.lazy(counter, 1), self.lazy(counter, 10)])
-        t1 = p1.as_plist()
+        t1 = p1.held_plist()
         self.assertIsInstance(t1, self.plist)
         self.assertIsInstance(t1[0], self.lazy)
         self.assertIsInstance(t1[1], self.lazy)

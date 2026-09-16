@@ -983,7 +983,9 @@ static PyObject* tdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       PCOLL_BEGIN_LOCK(arg);
       rc = tdict_share(t, &els, &idx);
       if (rc == 0) {
-         orig = t->orig;
+         // The cached original is a pdict, so it is kept only when making a
+         // plain tdict.
+         orig = (type == ST(TDictType)) ? t->orig : NULL;
          Py_XINCREF(orig);
          top = t->top; count = t->count; ndeleted = t->ndeleted;
       }
@@ -998,11 +1000,12 @@ static PyObject* tdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       // be a subclass (e.g. tdict(some_pdict) called by way of
       // tldict.__new__ delegating to tdict.__new__).
       PDictObject* p = (PDictObject*)arg;
+      PyObject* orig = (type == ST(TDictType)) ? arg : NULL;
       trienode_incref(p->els);
       trienode_incref(p->idx);
-      Py_INCREF(arg);
+      Py_XINCREF(orig);
       obj = tdict_wrap_astype(type, p->els, p->idx, p->top, p->count,
-                                p->ndeleted, arg);
+                                p->ndeleted, orig);
    } else {
       obj = tdict_build_from_arg_astype(type, arg);
    }
@@ -1343,7 +1346,9 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
       // lazy.c.h's tldict for why that's the reference's actual, if slightly
       // surprising, behavior for a *transient* lazy-dict argument, as
       // opposed to a *persistent* one).
-      if (PyObject_TypeCheck(arg, ST(TDictType))) {
+      // Storage is shared only with a collection that is not lazy: reading
+      // from a lazy collection computes its values (see _lazy.py).
+      if (PyObject_TypeCheck(arg, ST(TDictType)) && !pcoll_holds_lazy(arg)) {
          TDictObject* t2 = (TDictObject*)arg;
          Trie_t els, idx;
          Py_ssize_t top = 0, count = 0, ndeleted = 0;

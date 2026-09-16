@@ -721,7 +721,7 @@ static PyObject* tlist_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    // rebuilding from iteration). Deliberately also matches any future plist
    // subclass (e.g. llist), sharing its root raw/undereferenced -- see
    // dict.c.h's analogous comment on tdict_new's pdict-argument branch.
-   if (PyObject_TypeCheck(arg, ST(PListType))) {
+   if (PyObject_TypeCheck(arg, ST(PListType)) && !pcoll_holds_lazy(arg)) {
       // Direct constructor call: shares the plist's (already fully
       // persistent) root immediately -- no copying, no freezing needed.
       // Lazily claimed/copied node-by-node the moment any mutation actually
@@ -1254,11 +1254,15 @@ static PyObject* tlist_iter(TListObject* self) {
 //   isinstance(arg, plist)  -> cls.empty or cls._new(arg's root, arg._start)
 //   else                    -> build fresh from a general iterable
 static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
-   // isinstance(arg, tlist) -- a real isinstance check (matches any tlist
-   // subclass, e.g. the future tllist), mirroring the reference's own
-   // isinstance-based fast path; raw-shares the frozen root without
-   // dereferencing any lazily-held values (see dict.c.h's analogous comment
-   // on pdict_new_dispatch's tdict-argument branch for the rationale).
+   // An object of exactly the requested type is returned as-is. Otherwise,
+   // storage is shared only with a list that is not lazy: reading from a
+   // lazy collection computes its values (see _lazy.py).
+   if (Py_TYPE(arg) == type) {
+      Py_INCREF(arg);
+      return arg;
+   }
+   if (pcoll_holds_lazy(arg))
+      return plist_from_iterable_astype(type, arg);
    if (PyObject_TypeCheck(arg, ST(TListType))) {
       TListObject* t = (TListObject*)arg;
       Trie_t root;
@@ -1276,16 +1280,6 @@ static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
       }
       return plist_wrap_astype(type, root, start, length);
    }
-   // isinstance(arg, cls): arg is already the exact runtime type we're
-   // being asked to build -- return it unchanged (matches reference's
-   // `elif isinstance(arg, cls): return arg`).
-   if (PyObject_TypeCheck(arg, type)) {
-      Py_INCREF(arg);
-      return arg;
-   }
-   // isinstance(arg, plist) but NOT already an instance of `type` -- only
-   // reachable when `type` is a strict plist subclass and `arg` is some
-   // other plist/plist-subclass instance not caught above.
    if (PyObject_TypeCheck(arg, ST(PListType))) {
       PListObject* p = (PListObject*)arg;
       if (p->length == 0) return plist_type_empty(type);

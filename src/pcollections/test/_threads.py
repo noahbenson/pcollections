@@ -234,11 +234,19 @@ class _ThreadTests:
                         try:
                             td[k] = step
                             tl[k] = step
-                            if step % 50 == 0:
-                                ts.discard(k)
-                                ts.add(k)
                         except (RuntimeError, IndexError):
                             pass
+                        if step % 50 == 0:
+                            try:
+                                ts.discard(k)
+                            except RuntimeError:
+                                pass
+                            while True:
+                                try:
+                                    ts.add(k)
+                                    break
+                                except RuntimeError:
+                                    pass
                 else:
                     for step in range(40):
                         for coll in (td, ts, tl):
@@ -253,6 +261,35 @@ class _ThreadTests:
             assert sorted(td) == list(range(500))
             assert sorted(ts) == list(range(500))
             assert len(tl) == 500
+            print('ok')
+        """)
+
+    def test_shared_lazy_values(self):
+        self.run_threaded("""
+            lazy, ldict = B['lazy'], B['ldict']
+            LazyError = B['LazyError']
+            counts = [0] * 400
+            lock = threading.Lock()
+            def compute(i):
+                with lock:
+                    counts[i] += 1
+                if i % 7 == 0:
+                    raise ValueError(i)
+                # Depend on earlier values (never on later ones).
+                return i + (d[i - 1] if i % 7 != 1 and i > 0 else 0)
+            d = None
+            d = ldict((i, lazy(compute, i)) for i in range(400))
+            def worker(seed):
+                r = random.Random(seed)
+                for step in range(2000):
+                    i = r.randrange(400)
+                    try:
+                        v = d[i]
+                        assert v >= i
+                    except LazyError as e:
+                        assert isinstance(e.__cause__, (ValueError, LazyError))
+            run_threads(worker)
+            assert max(counts) == 1, counts
             print('ok')
         """)
 

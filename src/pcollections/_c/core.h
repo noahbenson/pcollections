@@ -300,7 +300,6 @@ typedef struct pcoll_state {
    // lazy.c.h
    PyTypeObject* LazyType;
    PyTypeObject* LazyErrorType;
-   PyTypeObject* LazyErrorUnwrapperType;
    PyTypeObject* UnlazyIterType;
    PyTypeObject* LDictType;
    PyTypeObject* TLDictType;
@@ -309,12 +308,13 @@ typedef struct pcoll_state {
    struct PDictObject* g_ldict_empty;
    struct PListObject* g_llist_empty;
    PyObject* g_lazy_error_unwrap;
-   PyObject* g_functools_partial_type;
+   PyObject* g_make_lazy_error;
+   PyObject* g_capture_stack;
+   PyObject* g_ready_lazy;
+   PyObject* g_str_trace;
    PyObject* g_ItemsView;
    PyObject* g_ValuesView;
    PyObject* g_reprlazy_func;
-   PyObject* g_pdict_get;
-   PyObject* g_tdict_get;
    PyObject* g_tdict_pop;
    // trie nodes: one FAT node type per cell size (1, 2, or 3 pointers),
    // and the canonical empty FAT for each leaf size.
@@ -327,6 +327,9 @@ typedef struct pcoll_state {
    // shared
    PyObject* g_seqstr;
 } pcoll_state;
+
+// Whether `obj` is a lazy collection (lazy.c.h).
+static int pcoll_holds_lazy(PyObject* obj);
 
 // Applies X to every object field of the state (module m_traverse/m_clear).
 #define PCOLL_STATE_FOREACH(X, st) \
@@ -355,7 +358,6 @@ typedef struct pcoll_state {
    X((st)->g_pset_empty);\
    X((st)->LazyType);\
    X((st)->LazyErrorType);\
-   X((st)->LazyErrorUnwrapperType);\
    X((st)->UnlazyIterType);\
    X((st)->LDictType);\
    X((st)->TLDictType);\
@@ -364,12 +366,13 @@ typedef struct pcoll_state {
    X((st)->g_ldict_empty);\
    X((st)->g_llist_empty);\
    X((st)->g_lazy_error_unwrap);\
-   X((st)->g_functools_partial_type);\
+   X((st)->g_make_lazy_error);\
+   X((st)->g_capture_stack);\
+   X((st)->g_ready_lazy);\
+   X((st)->g_str_trace);\
    X((st)->g_ItemsView);\
    X((st)->g_ValuesView);\
    X((st)->g_reprlazy_func);\
-   X((st)->g_pdict_get);\
-   X((st)->g_tdict_get);\
    X((st)->g_tdict_pop);\
    X((st)->FatNode1Type);\
    X((st)->FatNode2Type);\

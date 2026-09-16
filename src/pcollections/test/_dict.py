@@ -274,15 +274,15 @@ class _LDictTestMixin:
         t1 = p1.transient()
         self.assertEqual(t1['a'], 1)
         self.assertEqual(t1['b'], 11)
-        # The as_pdict method can be used to reveeal lazy elements.
+        # The held_pdict method can be used to reveeal lazy elements.
         counter.count = 0
         p1 = ldict(a=lazy(counter, 1), b=lazy(counter, 10))
-        t1 = p1.as_pdict()
+        t1 = p1.held_pdict()
         self.assertIsInstance(t1, pdict)
         self.assertEqual(set(t1.keys()), set(p1.keys()))
         self.assertIsInstance(t1['a'], lazy)
         self.assertIsInstance(t1['b'], lazy)
-        # The holdlazy function serves the same purpose as the as_pdict method.
+        # The holdlazy function serves the same purpose as the held_pdict method.
         h1 = holdlazy(p1)
         self.assertIsInstance(h1, pdict)
         self.assertTrue(all(h1[k] is t1[k] for k in h1.keys()))

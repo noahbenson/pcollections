@@ -148,7 +148,8 @@ class pdict(PersistentMapping):
             # is a special case.
             if isinstance(arg, Sized) and len(arg) == 0:
                 return cls.empty
-            elif isinstance(arg, tdict):
+            elif (isinstance(arg, tdict)
+                  and not getattr(type(arg), '_holds_lazy', False)):
                 (els, idx, top, count, ndeleted, _) = arg._snapshot()
                 if count == 0:
                     return cls.empty
@@ -323,47 +324,6 @@ class pdict(PersistentMapping):
         return cls._new(els, idx, top, count, ndeleted)
     # We include reimplements for some of these because we can improve them in
     # some non-trivial way.
-    def pop(self, key, *args):
-        """Returns a tuple of the value mapped to the given key and a copy of
-        the pdict with that key removed.
-
-        If the key is not found, the second argument is returned, if given,
-        otherwise, a `KeyError` is raised.
-        """
-        nargs = len(args)
-        if nargs > 1:
-            raise TypeError(f"pop expected at most 2 arguments, got {nargs}")
-        h = hash(key)
-        ii = self._idx.get(h, None)
-        ii_prev = None
-        kv_prev = None
-        while ii is not None:
-            (kv,ii_next) = self._els[ii]
-            (k,v) = kv
-            if key == k:
-                # We remove this entry! (See drop()'s comment on tombstoning.)
-                if ii_prev is None:
-                    if ii_next is None:
-                        new_idx = self._idx.dissoc(h)
-                    else:
-                        new_idx = self._idx.assoc(h, ii_next)
-                    new_els = self._els
-                else:
-                    new_idx = self._idx
-                    new_els = self._els.assoc(ii_prev, (kv_prev, ii_next))
-                new_els = new_els.assoc(ii, (TOMBSTONE, None))
-                new_pdict = self._maybe_compacted(
-                    new_els, new_idx, self._top,
-                    self._count - 1, self._ndeleted + 1)
-                return (v, new_pdict)
-            ii_prev = ii
-            kv_prev = kv
-            ii = ii_next
-        # It's not here!
-        if nargs == 0:
-            raise KeyError(key)
-        else:
-            return (args[0], self)
     def keys(self):
         return pdict_keys(self)
     def items(self):
@@ -471,12 +431,17 @@ class tdict(TransientMapping):
         else:
             raise TypeError(f"pdict expects at most 1 argument, got {n}")
         # If arg is a tdict or pdict, this is a special case.
+        # The cached persistent original is kept only for a plain tdict, whose
+        # persistent type it is.
         if type(arg) is tdict:
             (els, idx, top, count, ndeleted, orig) = arg._snapshot()
+            if cls is not tdict:
+                orig = None
             obj = cls._new(TFAT(els), TAMT(idx), top, count, ndeleted, orig)
         elif type(arg) is pdict:
             obj = cls._new(TFAT(arg._els), TAMT(arg._idx), arg._top,
-                           arg._count, arg._ndeleted, arg)
+                           arg._count, arg._ndeleted,
+                           arg if cls is tdict else None)
         else:
             obj = cls._new(TFAT(FAT.empty), TAMT(AMT.empty), 0, 0, 0)
             if isinstance(arg, Mapping):
