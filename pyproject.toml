@@ -58,12 +58,20 @@ repository = "https://github.com/noahbenson/pcollections"
 changelog = "https://nben.net/pcollections/changelog.html"
 
 # Wheel builds (.github/workflows/deploy.yml, via cibuildwheel): CPython
-# only, 64-bit only, including the free-threaded 3.14 and 3.15 builds. A
-# wheel whose C extension failed to compile fails its test command, so it is
-# never published; that platform gets the sdist instead.
+# only, 64-bit only, including the free-threaded 3.14 and 3.15 builds.
+# .github/workflows/deploy.yml checks the full set of wheels
+# (tools/check_dists.py) before publishing.
 [tool.cibuildwheel]
 build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
 skip = "*_i686 *-win32"
-test-environment = { PCOLLECTIONS_REQUIRE_C = "1" }
+# A wheel whose C extension doesn't compile fails to build.
+environment = { PCOLLECTIONS_REQUIRE_C = "1" }
+# Each wheel's tests import the installed wheel from outside the source tree
+# and fail unless its C extension loads. The randomized stress tests run
+# fewer steps here; the CI test jobs run them in full.
+test-environment = { PCOLLECTIONS_REQUIRE_C = "1", PCOLLECTIONS_STRESS_STEPS = "10000" }
 test-extras = ["test"]
-test-command = "python -m pcollections.test"
+test-command = [
+  "python -c \"import pcollections, pcollections._c._core as c; assert pcollections.using_c_extension; print('C backend:', c.__file__)\"",
+  "python -m pcollections.test",
+]

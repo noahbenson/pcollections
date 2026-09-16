@@ -44,11 +44,22 @@ _c_headers = [os.path.join(_c_dir, name)
               for name in ('core.h', 'trie.h', 'amt.h', 'fat.h', 'uintbits.h',
                            'dict.c.h', 'list.c.h', 'set.c.h', 'lazy.c.h')]
 
+def _env_flag(name):
+    value = os.environ.get(name, '').strip().lower()
+    return value not in ('', '0', 'false', 'no', 'off')
+
 # PCOLLECTIONS_NO_C_EXTENSIONS=1 builds and installs without the C backend,
 # even where it would compile. CI's "python-only" job uses this to test the
 # pure-Python backend on its own.
-_no_c_ext = (os.environ.get('PCOLLECTIONS_NO_C_EXTENSIONS', '')
-             not in ('', '0', 'false', 'False'))
+_no_c_ext = _env_flag('PCOLLECTIONS_NO_C_EXTENSIONS')
+
+# PCOLLECTIONS_REQUIRE_C=1 makes a failure to compile the C extension fail
+# the build, instead of producing an installation that silently uses the
+# pure-Python backend.
+_require_c = _env_flag('PCOLLECTIONS_REQUIRE_C')
+if _no_c_ext and _require_c:
+    raise SystemExit("PCOLLECTIONS_NO_C_EXTENSIONS and PCOLLECTIONS_REQUIRE_C "
+                     "are both set")
 
 ext_modules = [] if _no_c_ext else [
     Extension(
@@ -58,7 +69,7 @@ ext_modules = [] if _no_c_ext else [
         include_dirs=[_c_dir],
         extra_compile_args=[] if _is_windows else ['-std=c11'],
         extra_link_args=[] if _is_windows else ['-pthread'],
-        optional=True,
+        optional=not _require_c,
     )
 ]
 
