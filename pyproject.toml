@@ -1,23 +1,22 @@
 [build-system]
-requires = ["setuptools>=61,<77", "wheel"]
+# Python 3.8 is supported by setuptools only up to 75.3; newer Pythons use a
+# setuptools that understands SPDX license expressions (see setup.py).
+requires = [
+    "setuptools>=77.0.3; python_version>='3.9'",
+    "setuptools>=61,<75.4; python_version<'3.9'",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pcollections"
-# The version lives in src/pcollections/__init__.py (as __version__) and is
-# read from there by setup.py, which supplies it to setuptools at build
-# time -- declared dynamic here so pyproject.toml's static metadata and
-# setup.py's setup() call don't both try to set it (setuptools treats that
-# as a conflict). setup.py is also where the optional C extension
-# (pcollections._c._core) and the src/ package layout are
-# configured, since pyproject.toml's [project] table alone can't express
-# either of those.
-dynamic = ["version"]
+# setup.py supplies the version (read from src/pcollections/__init__.py) and
+# the license metadata (whose format depends on the setuptools version), and
+# configures the src/ layout and the optional C extension.
+dynamic = ["version", "license"]
 description = "A persistent collections library for Python"
 authors = [
     {name="Noah C. Benson", email="nben@uw.edu"}
 ]
-license = {file = "LICENSE"}
 readme = "README.md"
 requires-python = ">=3.8"
 
@@ -33,6 +32,9 @@ classifiers = [
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
     'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: Free Threading :: 3 - Stable',
+    'Programming Language :: C',
+    'Typing :: Typed',
     'Topic :: Software Development',
     'Topic :: Software Development :: Libraries',
     'Topic :: Software Development :: Libraries :: Python Modules',
@@ -42,31 +44,25 @@ classifiers = [
     'Operating System :: MacOS'
 ]
 
-# pcollections used to depend on the external `phamt` package (PHAMT/THAMT)
-# for the pure-Python fallback's underlying persistent trie. That dependency
-# has been removed: pcollections/_trie.py now ships an in-tree, dependency-
-# free port of the same AMT/FAT tries pcollections/_c uses (see that file's
-# module docstring), so pcollections has no required third-party
-# dependencies at all.
 dependencies = []
+
+[project.optional-dependencies]
+test = ["hypothesis"]
+docs = ["sphinx>=7", "furo", "myst-parser"]
 
 [project.urls]
 homepage = "https://github.com/noahbenson/pcollections"
-documentation = "https://github.com/noahbenson/pcollections"
+documentation = "https://nben.net/pcollections/"
 repository = "https://github.com/noahbenson/pcollections"
+changelog = "https://nben.net/pcollections/changelog.html"
 
-# Used by `.github/workflows/deploy.yml`'s wheel-building job (pypa/cibuildwheel).
-# pcollections._c._core is CPython-C-API code, so we only
-# target CPython (skip PyPy/GraalPy: their C-API emulation layers add real
-# risk for hand-written extension code like this for a benefit our pure-Python
-# fallback already covers reasonably well) and 64-bit platforms (skip 32-bit:
-# untested, and increasingly rare as an install target). manylinux and
-# musllinux (Alpine) builds are both included, since cibuildwheel produces
-# them for free from the same job. See the note by CIBW_TEST_COMMAND in
-# deploy.yml on why a platform where the C extension fails to compile simply
-# doesn't get a wheel (falls back to the sdist install path) rather than
-# shipping a platform-tagged wheel that's silently pure-Python inside.
+# Wheel builds (.github/workflows/deploy.yml, via cibuildwheel): CPython only,
+# 64-bit only, including the free-threaded 3.14 build. A wheel whose C
+# extension failed to compile fails its test command, so it is never
+# published; that platform gets the sdist instead.
 [tool.cibuildwheel]
-build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*"
-skip = "pp* *_i686 *-win32"
-test-command = "python -c \"import pcollections, sys; sys.exit(0 if pcollections.using_c_extension else 1)\" && python -m pcollections.test"
+build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-*"
+skip = "*_i686 *-win32"
+test-environment = { PCOLLECTIONS_REQUIRE_C = "1" }
+test-extras = ["test"]
+test-command = "python -m pcollections.test"

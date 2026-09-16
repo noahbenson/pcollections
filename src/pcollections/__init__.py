@@ -117,22 +117,14 @@ if not using_c_extension:
     del _obj
 del _backend, _load_c_backend, _load_python_backend, _env_flag
 
-# We don't include the abc types in the __all__; they are probably not as
-# frequently used and don't really need to be here. One can always `import
-# pcollections.abc` if they are needed.
-#
-# from .abc import (
-#     Persistent,         Transient,
-#     PersistentSequence, TransientSequence,
-#     PersistentSet,      TransientSet,
-#     PersistentMapping,  TransientMapping)
-
+# The abstract base classes are in pcollections.abc.
 __all__ = (
     "plist", "tlist",
     "pset",  "tset",
     "pdict", "tdict",
     "llist", "tllist",
     "ldict", "tldict",
-    "lazy", "unlazy", "holdlazy")
+    "lazy", "unlazy", "holdlazy",
+    "LazyError", "lazy_error_unwrap")
 
-__version__ = "0.5.0"
+__version__ = "1.0.0"

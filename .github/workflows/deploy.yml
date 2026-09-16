@@ -1,33 +1,27 @@
 ################################################################################
 # deploy.yml
-# GitHub Actions Workflow for deploying pcollections to PyPI.
+# GitHub Actions workflow that publishes pcollections to PyPI.
 # by Noah C. Benson
+#
+# Publishing uses PyPI's trusted publishing, so no API token is stored in the
+# repository. On PyPI, the pcollections project must list this repository,
+# this workflow (deploy.yml), and the environment `pypi` as a trusted
+# publisher.
 
 name: Deploy to PyPI
 
-# We only run this manually.
 on:
   workflow_dispatch:
 
 jobs:
-  # Run the full cross-platform/version test matrix (tests.yml) before doing
-  # anything else -- tests.yml already declares `workflow_call` specifically
-  # so it can be reused like this. Now that pcollections ships C extensions
-  # with real per-platform compilation concerns (see setup.py), gating a
-  # release on just one platform's tests (as this workflow used to do) isn't
-  # enough: a release should mean every OS/arch/version combination tests.yml
-  # covers -- both the C-accelerated and pure-Python-fallback outcomes --
-  # actually passed.
+  # The full test matrix must pass first.
   test-matrix:
     name: Full test matrix
     uses: ./.github/workflows/tests.yml
 
-  # Builds the source distribution. Installers who don't get one of the
-  # prebuilt wheels below (build-wheels) fall back to this: pip compiles the
-  # C extensions itself at install time, or falls back further to the
-  # pure-Python implementation if it can't (see setup.py/pcollections/
-  # __init__.py) -- so the sdist remains the universal fallback regardless
-  # of what wheels get published.
+  # The source distribution. Platforms without a wheel install from it,
+  # compiling the C extension (or using the pure-Python backend if that
+  # fails).
   build-sdist:
     name: Source distribution
     needs: test-matrix
@@ -35,39 +29,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Python Environment
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3
-          architecture: x64
-      - name: Install build
-        run: pip install --upgrade build
-      - name: Build Source Distribution
-        run: python -m build --sdist
-      - name: Upload sdist artifact
+          python-version: '3.x'
+      - name: Build the sdist
+        run: |
+          pip install --upgrade build
+          python -m build --sdist
+      - name: Upload the sdist
         uses: actions/upload-artifact@v4
         with:
           name: dist-sdist
           path: dist/*.tar.gz
 
-  # Builds prebuilt binary wheels (with the compiled C extensions) via
-  # cibuildwheel, one job per OS runner, matching the platforms tests.yml
-  # covers (see the comment there on why Linux/arm64 and macOS/arm64 are
-  # both included rather than treating "arm64" as one target). Build
-  # selection/skip rules and the version range live in pyproject.toml's
-  # [tool.cibuildwheel] table.
-  #
-  # Importantly: CIBW_TEST_COMMAND (test-command in pyproject.toml) asserts
-  # `pcollections.using_c_extension` is true after installing the wheel it
-  # just built, in addition to running the actual test suite. Since
-  # pcollections/__init__.py is deliberately designed to fall back silently
-  # to the pure-Python implementation if the C extensions aren't there (see
-  # setup.py's optional_build_ext), a wheel whose C compile quietly failed
-  # would otherwise still "work" and pass its tests -- it just wouldn't
-  # contain what its platform tag promises. Failing the test command turns
-  # that into a build failure for that one platform (so a wheel with no C
-  # extension is never published) rather than a silent downgrade; the sdist
-  # above remains available for that platform/version regardless.
+  # Binary wheels, one job per runner. The build selection and the test
+  # command are in pyproject.toml ([tool.cibuildwheel]); the test command
+  # requires the C backend, so a wheel whose extension didn't compile is
+  # never published.
   build-wheels:
     name: Wheels / ${{ matrix.os }}
     needs: test-matrix
@@ -79,44 +58,38 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - windows-latest
-          - macos-13
+          - macos-15-intel
           - macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2
-      - name: Upload wheel artifacts
+        uses: pypa/cibuildwheel@v4.2
+      - name: Upload the wheels
         uses: actions/upload-artifact@v4
         with:
           name: dist-wheels-${{ matrix.os }}
           path: ./wheelhouse/*.whl
 
-  # Gathers the sdist and every platform's wheels and uploads everything to
-  # PyPI in one pass, after both build jobs above succeed.
+  # Uploads the sdist and all wheels to PyPI.
   publish:
     name: Publish to PyPI
     needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
-    env:
-      TWINE_USERNAME: __token__
-      TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      TWINE_DEST: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pcollections/
+    permissions:
+      # Required for trusted publishing.
+      id-token: write
     steps:
-      - name: Setup Python Environment
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3
-          architecture: x64
-      - name: Install Twine
-        run: pip install --upgrade twine
-      - name: Download all distributions
+      - name: Download the distributions
         uses: actions/download-artifact@v4
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: List distributions to be uploaded
+      - name: List the distributions
         run: ls -la dist
-      - name: Upload Source Distribution and Wheels
-        run: twine upload -r $TWINE_DEST dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

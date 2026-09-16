@@ -18,6 +18,7 @@
 import os
 import platform
 
+import setuptools
 from setuptools import setup, Extension
 
 # Get the version from src/pcollections/__init__.py.
@@ -61,11 +62,22 @@ ext_modules = [] if _no_c_ext else [
     )
 ]
 
-# All other static metadata (name, description, authors, license,
-# classifiers, dependencies, urls, ...) lives in pyproject.toml's [project]
-# table; only `version` (read dynamically above) and the build configuration
-# that pyproject.toml's [project] table can't express -- the src/ package
-# layout and the optional C extension -- are set here.
+# License metadata. setuptools 77 and later take an SPDX expression (PEP 639);
+# the older setuptools used for Python 3.8 builds takes the older fields.
+def _setuptools_version():
+    parts = []
+    for part in setuptools.__version__.split('.')[:2]:
+        digits = ''.join(ch for ch in part if ch.isdigit())
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+if _setuptools_version() >= (77, 0):
+    license_args = {'license_expression': 'MIT', 'license_files': ['LICENSE']}
+else:
+    license_args = {'license': 'MIT', 'license_files': ['LICENSE']}
+
+# All other static metadata (name, description, authors,
+# classifiers, dependencies, urls, ...) lives in pyproject.toml.
 setup(
     version=version,
     package_dir={'': 'src'},
@@ -75,12 +87,10 @@ setup(
               'pcollections.test',
               'pcollections._c'],
     package_data={
-        '': ['LICENSE.txt'],
-        # Ship the C headers/sources too (not just the compiled .so, which
-        # setuptools already includes for us): useful for source
-        # distributions and for anyone building the extensions themselves.
+        'pcollections': ['py.typed', '*.pyi'],
         'pcollections._c': ['*.h', '*.c'],
     },
     ext_modules=ext_modules,
     zip_safe=False,
+    **license_args,
     include_package_data=True)

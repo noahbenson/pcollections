@@ -1,208 +1,127 @@
 ################################################################################
 # tests.yml
-# GitHub Actions Workflow for running the tests for the pcollections library.
+# GitHub Actions workflow that runs the pcollections tests.
 # by Noah C. Benson
 
 name: CI
 
-# We run on pushes and pull requests to main, dev, and any dev/* branch
-# (e.g. dev/c). Branch filters match whole names, so 'dev' alone would not
-# match 'dev/c'.
 on:
   push:
     branches: [ main, dev, 'dev/**' ]
     paths-ignore:
       - '**/README.md'
       - '**/.gitignore'
+      - 'docs/**'
       - '.github/workflows/deploy.yml'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [ main, dev, 'dev/**' ]
     paths-ignore:
       - '**/README.md'
       - '**/.gitignore'
+      - 'docs/**'
       - '.github/workflows/deploy.yml'
-  # We sometimes want to run this manually.
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
-  # We also sometimes want to run this from another workflow.
+  # deploy.yml runs this workflow before building a release.
   workflow_call:
 
-# Our only job in this case is to test the code.
 jobs:
+  # The C backend on every supported OS, architecture, and Python version.
+  # The pure-Python backend is tested in the same run (the test suite runs
+  # every test against every available backend).
   test:
-    name: ${{matrix.version}}/${{matrix.os}}/${{matrix.arch}} - ${{github.event_name}}
+    name: ${{ matrix.version }}/${{ matrix.os }}/${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        version:
-          - '3.8'
-          - '3.9'
-          - '3.10'
-          - '3.11'
-          - '3.12'
-          - '3.13'
-          - '3.14'
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-15-intel
-        arch:
-          - 'x64'
+        version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14',
+                  '3.13t', '3.14t']
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        arch: ['x64']
         include:
-          # 3.7 is no longer supported.
-          #- {"os": "macos-15-intel", "arch": "x64", "version": "3.7"}
-          #- {"os": "windows-latest", "arch": "x64", "version": "3.7"}
-          # Apple Silicon (arm64): pcollections now ships C extensions, and
-          # Apple Silicon's stricter alignment/atomics behavior is exactly
-          # the kind of thing that can differ from x64 for lazy.c's
-          # stdatomic.h-based thread-safety code, so this isn't just a
-          # "same code, different label" matrix entry.
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.8"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.9"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.10"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.11"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.12"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.13"}
-          - {"os": "macos-latest", "arch": "arm64", "version": "3.14"}
-          # Linux/arm64 (GitHub-hosted arm64 Ubuntu runners): a second,
-          # independent arm64 target with a different OS/libc/compiler
-          # (glibc + gcc, vs. macOS's libc++/clang) than macos-latest/arm64
-          # above -- worth covering separately for a project with real C
-          # extensions rather than assuming "arm64 is arm64."
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.8"}
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.9"}
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.10"}
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.11"}
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.12"}
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.13"}
-          - {"os": "ubuntu-24.04-arm", "arch": "arm64", "version": "3.14"}
-    # The job environment.
+          - {os: macos-latest, arch: arm64, version: '3.8'}
+          - {os: macos-latest, arch: arm64, version: '3.9'}
+          - {os: macos-latest, arch: arm64, version: '3.10'}
+          - {os: macos-latest, arch: arm64, version: '3.11'}
+          - {os: macos-latest, arch: arm64, version: '3.12'}
+          - {os: macos-latest, arch: arm64, version: '3.13'}
+          - {os: macos-latest, arch: arm64, version: '3.14'}
+          - {os: macos-latest, arch: arm64, version: '3.14t'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.8'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.9'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.10'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.11'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.12'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.13'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.14'}
+          - {os: ubuntu-24.04-arm, arch: arm64, version: '3.14t'}
     env:
-      OS: ${{ matrix.os }}
-      ARCH: ${{ matrix.arch }}
-      PYTHON: ${{ matrix.version }}
-    # The steps in the job.
+      # Importing pcollections fails if the C backend didn't build.
+      PCOLLECTIONS_REQUIRE_C: '1'
+      PYTHONFAULTHANDLER: '1'
     steps:
-      # Check out the repository (goes to $GITHUB_WORKSPACE)
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: '2'
-      # Setup the Python Environment.
-      - name: Setup Python Environment
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.version }}
           architecture: ${{ matrix.arch }}
-      - name: Upgrade Setuptools
-        run: |
-          python -m pip install --upgrade setuptools
-      # Log the Python Version
       - name: Display Python version
-        run: python --version
-      - name: Diagnose C extension build (Windows)
-        if: runner.os == 'Windows'
-        continue-on-error: true
+        run: python -VV
+      - name: Install
         run: |
-          python setup.py build_ext --inplace --verbose
-      # Run the actual tests.
-      - name: Run Tests
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Check the backend
+        shell: python
         run: |
-          pip install -e .
-          #pip install coverage
+          import sys, sysconfig, pcollections
+          print("C backend:", pcollections.using_c_extension)
+          if sysconfig.get_config_var("Py_GIL_DISABLED"):
+              # Importing the C backend must not re-enable the GIL.
+              print("GIL enabled:", sys._is_gil_enabled())
+              assert not sys._is_gil_enabled()
+      - name: Run tests
+        run: |
           cd ~
-          #coverage run -m pcollections.test
           python -m pcollections.test
-      # pcollections._c (dict/list/set/lazy) is an optional set of C
-      # extension modules: pcollections/__init__.py falls back to the
-      # pure-Python implementation when they aren't built for a given
-      # platform/toolchain (e.g. likely on Windows, where MSVC's
-      # <stdatomic.h> support is limited -- see setup.py), and
-      # pcollections.test above already runs against whichever backend(s)
-      # ended up available. This step doesn't gate the job (a pure-Python
-      # fallback is a valid, fully-tested outcome, not a failure) -- it
-      # just surfaces which backend this job actually exercised, so that's
-      # visible at a glance in the Actions log/summary instead of only
-      # showing up as an absence of C-specific tests deep in the test
-      # output.
-      # The C extensions build on every platform in this matrix, so a silent
-      # fallback to the pure-Python backend here is a build failure.
-      - name: Confirm the C backend is in use
-        run: |
-          python -c "import pcollections, sys; print('pcollections.using_c_extension =', pcollections.using_c_extension); sys.exit(0 if pcollections.using_c_extension else 1)"
-#      - name: Process Code Coverage
-#        uses: codecov/codecov-action@v1
 
-  # The `test` job above always builds the C extensions when the platform's
-  # toolchain allows it (`optional=True` in setup.py just means a build
-  # *failure* doesn't fail the job) -- and every test in pcollections.test
-  # is parametrized over whichever backends are available (see
-  # pcollections/test/_backends.py), so the pure-Python implementation
-  # already runs in every job above too, just *alongside* the C one
-  # wherever the C build happens to succeed. That's not the same as
-  # actually verifying the pure-Python fallback works completely on its
-  # own: as of the Windows/MSVC fixes, the C extensions now build
-  # successfully everywhere `test` runs, so there is no longer any job
-  # above where pcollections ever falls back to pure Python at all. This
-  # job forces that scenario deliberately (via setup.py's
-  # PCOLLECTIONS_NO_C_EXTENSIONS escape hatch) instead of depending on
-  # some platform's C build happening to fail, across every Python version
-  # this project supports. OS coverage is deliberately skipped here (a
-  # single ubuntu-latest is enough): the pure-Python implementation has no
-  # platform-specific code at all, so unlike `test` above, multiplying this
-  # job across OSes would only add CI time, not real coverage.
+  # The pure-Python backend on its own, with the C extension not built.
   test-python-only:
-    name: ${{matrix.version}}/python-only - ${{github.event_name}}
+    name: ${{ matrix.version }}/python-only
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        version:
-          - '3.8'
-          - '3.9'
-          - '3.10'
-          - '3.11'
-          - '3.12'
-          - '3.13'
-          - '3.14'
+        version: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14',
+                  '3.14t']
     env:
-      PYTHON: ${{ matrix.version }}
       PCOLLECTIONS_NO_C_EXTENSIONS: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: '2'
-      - name: Setup Python Environment
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.version }}
-      - name: Upgrade Setuptools
-        run: |
-          python -m pip install --upgrade setuptools
-      - name: Display Python version
-        run: python --version
-      - name: Install (no C extensions)
-        run: |
-          pip install -e .
-      # Fail loudly if the C backend somehow ended up available anyway --
-      # that would mean PCOLLECTIONS_NO_C_EXTENSIONS didn't actually
-      # suppress the build, silently turning this job back into a
-      # duplicate of `test` above instead of the python-only check it's
-      # meant to be.
-      - name: Confirm the C backend is absent
+      - name: Install (without the C extension)
+        run: pip install -e ".[test]"
+      - name: Check the backend
         run: |
           python -c "import pcollections, sys; sys.exit(0 if not pcollections.using_c_extension else 1)"
-      - name: Run Tests (pure Python only)
+      - name: Run tests
         run: |
           cd ~
           python -m pcollections.test
 
-  # Builds the C extensions with AddressSanitizer and UndefinedBehaviorSanitizer
-  # and runs the full suite. PYTHONMALLOC=malloc routes Python's own
-  # allocations through malloc so ASan can see them too.
+  # The C extension built with AddressSanitizer and UndefinedBehaviorSanitizer.
+  # PYTHONMALLOC=malloc routes Python's allocations through malloc so that
+  # ASan sees them too.
   test-sanitizers:
-    name: sanitizers (ASan+UBSan) - ${{github.event_name}}
+    name: sanitizers (ASan+UBSan)
     runs-on: ubuntu-latest
     env:
       CFLAGS: '-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined'
@@ -210,31 +129,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Python Environment
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install with sanitizers
+        run: pip install -e .
+      - name: Run tests
         run: |
-          pip install -e .
-      - name: Run Tests
-        run: |
-          # The instrumented extensions only load when the ASan runtime is
-          # loaded first, so the backend check has to happen here too.
+          # The instrumented extension loads only if the ASan runtime is
+          # loaded first.
           export LD_PRELOAD="$(gcc -print-file-name=libasan.so)"
           export ASAN_OPTIONS=detect_leaks=0
           export UBSAN_OPTIONS=print_stacktrace=1
           export PYTHONMALLOC=malloc
+          export PCOLLECTIONS_REQUIRE_C=1
           cd ~
-          python -c "import pcollections, sys; sys.exit(0 if pcollections.using_c_extension else 1)"
           python -m pcollections.test
 
-  # Runs the suite on a debug build of CPython, whose internal consistency
-  # checks (garbage-collector reference accounting in particular) catch
-  # refcounting mistakes that a release build silently tolerates.
+  # A debug build of CPython, whose consistency checks catch reference
+  # counting mistakes that a release build tolerates.
   test-debug-python:
-    name: debug CPython - ${{github.event_name}}
+    name: debug CPython
     runs-on: ubuntu-24.04
+    env:
+      PCOLLECTIONS_REQUIRE_C: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -247,8 +166,32 @@ jobs:
           python3.12d -m venv ~/dbgenv
           ~/dbgenv/bin/python -c "import sys; assert hasattr(sys, 'gettotalrefcount')"
           ~/dbgenv/bin/pip install .
-          ~/dbgenv/bin/python -c "import pcollections, sys; sys.exit(0 if pcollections.using_c_extension else 1)"
-      - name: Run Tests
+      - name: Run tests
         run: |
           cd ~
-          ~/dbgenv/bin/python -m pcollections.test
+          ~/dbgenv/bin/python -X dev -m pcollections.test
+
+  # The type stubs (src/pcollections/__init__.pyi): stubtest compares them
+  # with the installed package, and mypy checks typecheck/usage.py against
+  # them.
+  typecheck:
+    name: type stubs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install
+        run: pip install . mypy
+      - name: Compare the stubs with the package
+        run: |
+          printf '[mypy]\nignore_missing_imports = True\n[mypy-pcollections.*]\nignore_errors = True\n' > /tmp/stubtest.ini
+          python -m mypy.stubtest pcollections --ignore-missing-stub \
+            --mypy-config-file /tmp/stubtest.ini \
+            --allowlist typecheck/stubtest-allowlist.txt
+      - name: Check typed usage
+        run: |
+          MYPYPATH=src mypy --strict typecheck/usage.py
