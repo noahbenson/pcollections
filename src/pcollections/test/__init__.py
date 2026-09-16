@@ -38,6 +38,7 @@ from . import _gc
 from . import _threads
 from . import _lazy
 from . import _api
+from . import _stress
 
 
 def suite():
@@ -54,7 +55,7 @@ class _TestModuleNamespace:
     `TestLoader.loadTestsFromModule` can find them all at once."""
     def __init__(self):
         for mod in (_dict, _list, _set, _parity, _trie, _regress, _interp, _pickle, _gc,
-                    _threads, _lazy, _api):
+                    _threads, _lazy, _api, _stress):
             for (name, val) in vars(mod).items():
                 if isinstance(val, type) and name.startswith('Test'):
                     setattr(self, name, val)
