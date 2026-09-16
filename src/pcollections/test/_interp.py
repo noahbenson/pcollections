@@ -115,6 +115,10 @@ class TestSubinterpreters(unittest.TestCase):
         env['PYTHONPATH'] = os.pathsep.join(
             [_PKG_PARENT] + ([env['PYTHONPATH']] if env.get('PYTHONPATH') else []))
         env['PYTHONFAULTHANDLER'] = '1'
+        if py38:
+            # The subinterpreters use the pure-Python backend on 3.8, which
+            # PCOLLECTIONS_REQUIRE_C would turn into an ImportError.
+            env.pop('PCOLLECTIONS_REQUIRE_C', None)
         proc = subprocess.run(
             [sys.executable, '-c', src],
             env=env, capture_output=True, text=True, errors='replace',
