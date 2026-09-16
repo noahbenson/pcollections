@@ -276,7 +276,10 @@ static Py_hash_t plist_hash(PListObject* self) {
    TriePath path;
    int ok;
    Py_hash_t h;
-   if (self->hashcode != -1) return self->hashcode;
+   {
+      Py_hash_t cached = PCOLL_HASH_LOAD(self->hashcode);
+      if (cached != -1) return cached;
+   }
    n = self->length;
    tup = PyTuple_New(n);
    if (!tup) return -1;
@@ -291,7 +294,7 @@ static Py_hash_t plist_hash(PListObject* self) {
    if (h == -1) return -1;
    h += 1;
    if (h == -1) h = -2;
-   self->hashcode = h;
+   PCOLL_HASH_STORE(self->hashcode, h);
    return h;
 }
 
@@ -599,6 +602,7 @@ typedef struct {
                           // reference implementation does. Never set by the
                           // tlist(plist_instance) constructor path -- see
                           // that constructor's comment.
+   pcoll_tguard guard;    // see core.h.
 } TListObject;
 
 // `type` must be TListType or a subtype of it (see the analogous note on
@@ -651,9 +655,10 @@ static void tlist_dealloc(TListObject* self) {
    Py_DECREF(tp);
 }
 
-static Py_ssize_t tlist_length(TListObject* self) {
+static Py_ssize_t tlist_length_impl(TListObject* self) {
    return self->length;
 }
+PCOLL_LOCKED0(Py_ssize_t, tlist_length, tlist_length_impl, TListObject*)
 
 // Every real mutation invalidates any cached `_orig` plist -- see this
 // file's header comment on the `orig` field.
@@ -742,7 +747,7 @@ static PyObject* tlist_str(TListObject* self) {
    return seq_str((PyObject*)self, "[<", ">]", 1);
 }
 
-static PyObject* tlist_item(TListObject* self, Py_ssize_t i) {
+static PyObject* tlist_item_impl(TListObject* self, Py_ssize_t i) {
    void* valptr;
    Py_ssize_t idx;
    int found;
@@ -757,14 +762,20 @@ static PyObject* tlist_item(TListObject* self, Py_ssize_t i) {
    Py_INCREF(val);
    return val;
 }
+PCOLL_LOCKED1(PyObject*, tlist_item, tlist_item_impl, TListObject*, Py_ssize_t)
+
+static PyObject* tlist_getslice_impl(TListObject* self, PyObject* key) {
+   Py_ssize_t n;
+   Trie_t work = fat_getslice(self->root, self->start, key, self->length, &n);
+   if (!work) return NULL;
+   return tlist_wrap(work, LIST_START_MID, n, NULL);
+}
+PCOLL_LOCKED1(PyObject*, tlist_getslice, tlist_getslice_impl,
+              TListObject*, PyObject*)
 
 static PyObject* tlist_subscript(TListObject* self, PyObject* key) {
    if (PySlice_Check(key)) {
-      Py_ssize_t n;
-      Trie_t work = fat_getslice(self->root, self->start, key, self->length,
-                                 &n);
-      if (!work) return NULL;
-      return tlist_wrap(work, LIST_START_MID, n, NULL);
+      return tlist_getslice(self, key);
    } else {
       Py_ssize_t i = PyNumber_AsSsize_t(key, PyExc_IndexError);
       if (i == -1 && PyErr_Occurred()) return NULL;
@@ -772,48 +783,85 @@ static PyObject* tlist_subscript(TListObject* self, PyObject* key) {
    }
 }
 
-static int tlist_ass_item(TListObject* self, Py_ssize_t i, PyObject* v) {
-   Py_ssize_t idx;
-   if (v == NULL) {
-      // `del tl[i]` via the sequence protocol.
-      if (normalize_index(i, self->length, "tlist", &idx) < 0) return -1;
-      if (self->length - idx <= idx) {
-         Py_ssize_t ii;
-         for (ii = idx; ii < self->length - 1; ++ii) {
-            void* valptr; PyObject* val;
-            trieint_t k = self->start + (trieint_t)ii;
-            fat_lookup(self->root, k + 1, &valptr);
-            val = *(PyObject**)valptr;
-            self->root = tfat_setitem(self->root, k, &val, pyobj_incref,
-                                      pyobj_decref);
-         }
-         self->root = tfat_delitem(self->root,
-                                   self->start + (trieint_t)(self->length - 1),
-                                   pyobj_incref, pyobj_decref);
-      } else {
-         Py_ssize_t ii;
-         for (ii = idx; ii > 0; --ii) {
-            void* valptr; PyObject* val;
-            trieint_t k = self->start + (trieint_t)ii;
-            fat_lookup(self->root, k - 1, &valptr);
-            val = *(PyObject**)valptr;
-            self->root = tfat_setitem(self->root, k, &val, pyobj_incref,
-                                      pyobj_decref);
-         }
-         self->root = tfat_delitem(self->root, self->start, pyobj_incref,
-                                   pyobj_decref);
-         self->start += 1;
+// The bodies of the tlist modifications, run with the guard held and the
+// index already normalized.
+static void tlist_delete_guarded(TListObject* self, Py_ssize_t idx) {
+   Py_ssize_t ii;
+   tguard_keys_changed(&self->guard);
+   // Shift whichever side of idx is shorter over the deleted element.
+   if (self->length - idx <= idx) {
+      for (ii = idx; ii < self->length - 1; ++ii) {
+         void* valptr; PyObject* val;
+         trieint_t k = self->start + (trieint_t)ii;
+         fat_lookup(self->root, k + 1, &valptr);
+         val = *(PyObject**)valptr;
+         tfat_setitem_at(&self->root, k, &val, pyobj_incref, pyobj_decref);
       }
       self->length -= 1;
-      tlist_invalidate_orig(self);
-      return 0;
+      tfat_delitem_at(&self->root, self->start + (trieint_t)self->length,
+                      pyobj_incref, pyobj_decref);
+   } else {
+      for (ii = idx; ii > 0; --ii) {
+         void* valptr; PyObject* val;
+         trieint_t k = self->start + (trieint_t)ii;
+         fat_lookup(self->root, k - 1, &valptr);
+         val = *(PyObject**)valptr;
+         tfat_setitem_at(&self->root, k, &val, pyobj_incref, pyobj_decref);
+      }
+      self->start += 1;
+      self->length -= 1;
+      tfat_delitem_at(&self->root, self->start - 1, pyobj_incref, pyobj_decref);
    }
-   if (normalize_index(i, self->length, "tlist", &idx) < 0) return -1;
-   self->root = tfat_setitem(self->root, self->start + (trieint_t)idx, &v,
-                             pyobj_incref, pyobj_decref);
    tlist_invalidate_orig(self);
+}
+static void tlist_insert_guarded(TListObject* self, Py_ssize_t index,
+                                 PyObject* obj) {
+   Py_ssize_t ii, n = self->length;
+   tguard_keys_changed(&self->guard);
+   if (n - index <= index) {
+      for (ii = n; ii > index; --ii) {
+         void* valptr; PyObject* val;
+         trieint_t k = self->start + (trieint_t)(ii - 1);
+         fat_lookup(self->root, k, &valptr);
+         val = *(PyObject**)valptr;
+         tfat_setitem_at(&self->root, k + 1, &val, pyobj_incref, pyobj_decref);
+      }
+   } else {
+      for (ii = 0; ii < index; ++ii) {
+         void* valptr; PyObject* val;
+         trieint_t k = self->start + (trieint_t)ii;
+         fat_lookup(self->root, k, &valptr);
+         val = *(PyObject**)valptr;
+         tfat_setitem_at(&self->root, k - 1, &val, pyobj_incref, pyobj_decref);
+      }
+      self->start -= 1;
+   }
+   // The slot at `index` now holds a duplicate of a neighbor (or, at either
+   // end, nothing); either way the element count is as below once it's set.
+   self->length += 1;
+   tfat_setitem_at(&self->root, self->start + (trieint_t)index, &obj,
+                   pyobj_incref, pyobj_decref);
+   tlist_invalidate_orig(self);
+}
+
+static int tlist_ass_item_impl(TListObject* self, Py_ssize_t i, PyObject* v) {
+   Py_ssize_t idx;
+   if (normalize_index(i, self->length, "tlist", &idx) < 0) return -1;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return -1;
+   if (v == NULL) {
+      // `del tl[i]` via the sequence protocol.
+      tlist_delete_guarded(self, idx);
+   } else {
+      tguard_changed(&self->guard);
+      tfat_setitem_at(&self->root, self->start + (trieint_t)idx, &v,
+                      pyobj_incref, pyobj_decref);
+      tlist_invalidate_orig(self);
+   }
+   tguard_exit(&self->guard);
    return 0;
 }
+PCOLL_LOCKED2(int, tlist_ass_item, tlist_ass_item_impl,
+              TListObject*, Py_ssize_t, PyObject*)
 
 static int tlist_ass_subscript(TListObject* self, PyObject* key, PyObject* v) {
    if (PySlice_Check(key)) {
@@ -828,77 +876,67 @@ static int tlist_ass_subscript(TListObject* self, PyObject* key, PyObject* v) {
    }
 }
 
-static PyObject* tlist_append(TListObject* self, PyObject* obj) {
-   self->root = tfat_setitem(self->root,
-                             self->start + (trieint_t)self->length,
-                             &obj, pyobj_incref, pyobj_decref);
-   self->length += 1;
-   tlist_invalidate_orig(self);
-   Py_RETURN_NONE;
-}
-
-static PyObject* tlist_prepend(TListObject* self, PyObject* obj) {
-   self->start -= 1;
-   self->root = tfat_setitem(self->root, self->start, &obj, pyobj_incref,
-                             pyobj_decref);
-   self->length += 1;
-   tlist_invalidate_orig(self);
-   Py_RETURN_NONE;
-}
-
-static PyObject* tlist_insert(TListObject* self, PyObject* args) {
-   Py_ssize_t index, n;
-   PyObject* obj;
-   if (!PyArg_ParseTuple(args, "nO", &index, &obj)) return NULL;
-   n = self->length;
+static PyObject* tlist_insert_impl(TListObject* self, Py_ssize_t index,
+                                   PyObject* obj) {
+   Py_ssize_t n = self->length;
    if (index < -n) index = -n;
    else if (index > n) index = n;
    if (index < 0) index += n;
-   if (n - index <= index) {
-      Py_ssize_t ii;
-      for (ii = n; ii > index; --ii) {
-         void* valptr; PyObject* val;
-         trieint_t k = self->start + (trieint_t)(ii - 1);
-         fat_lookup(self->root, k, &valptr);
-         val = *(PyObject**)valptr;
-         self->root = tfat_setitem(self->root, k + 1, &val, pyobj_incref,
-                                   pyobj_decref);
-      }
-      self->root = tfat_setitem(self->root, self->start + (trieint_t)index,
-                                &obj, pyobj_incref, pyobj_decref);
-   } else {
-      Py_ssize_t ii;
-      for (ii = 0; ii < index; ++ii) {
-         void* valptr; PyObject* val;
-         trieint_t k = self->start + (trieint_t)ii;
-         fat_lookup(self->root, k, &valptr);
-         val = *(PyObject**)valptr;
-         self->root = tfat_setitem(self->root, k - 1, &val, pyobj_incref,
-                                   pyobj_decref);
-      }
-      self->start -= 1;
-      self->root = tfat_setitem(self->root, self->start + (trieint_t)index,
-                                &obj, pyobj_incref, pyobj_decref);
-   }
-   self->length += 1;
-   tlist_invalidate_orig(self);
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return NULL;
+   tlist_insert_guarded(self, index, obj);
+   tguard_exit(&self->guard);
    Py_RETURN_NONE;
 }
+PCOLL_LOCKED2(PyObject*, tlist_insert_locked, tlist_insert_impl,
+              TListObject*, Py_ssize_t, PyObject*)
 
-static PyObject* tlist_clear_method(TListObject* self, PyObject* Py_UNUSED(ignored)) {
+static PyObject* tlist_append(TListObject* self, PyObject* obj) {
+   return tlist_insert_locked(self, PY_SSIZE_T_MAX, obj);
+}
+
+static PyObject* tlist_prepend(TListObject* self, PyObject* obj) {
+   return tlist_insert_locked(self, 0, obj);
+}
+
+static PyObject* tlist_insert(TListObject* self, PyObject* args) {
+   Py_ssize_t index;
+   PyObject* obj;
+   if (!PyArg_ParseTuple(args, "nO", &index, &obj)) return NULL;
+   return tlist_insert_locked(self, index, obj);
+}
+
+static PyObject* tlist_clear_impl(TListObject* self) {
    Trie_t old_root = self->root;
    PyObject* old_orig = self->orig;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return NULL;
+   tguard_keys_changed(&self->guard);
    self->root = fat_empty(PYLEAFSIZE);
    self->start = LIST_START_MID;
    self->length = 0;
    self->orig = NULL;
+   tguard_exit(&self->guard);
    fatnode_decref(old_root, pyobj_decref);
    Py_XDECREF(old_orig);
    Py_RETURN_NONE;
 }
+PCOLL_LOCKED0(PyObject*, tlist_clear_locked, tlist_clear_impl, TListObject*)
+static PyObject* tlist_clear_method(TListObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tlist_clear_locked(self);
+}
 
-static PyObject* tlist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored)) {
+// Freezes the transient's trie and returns a new reference to it, for
+// sharing with another collection. Returns NULL (with RuntimeError set) if a
+// modification is in progress. The caller holds the transient's lock.
+static Trie_t tlist_share(TListObject* self) {
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
+   fat_freeze(self->root);
+   trienode_incref(self->root);
+   return self->root;
+}
+
+static PyObject* tlist_persistent_impl(TListObject* self) {
    Trie_t root;
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
    if (self->length == 0) {
       Py_INCREF(ST(g_plist_empty));
       return (PyObject*)ST(g_plist_empty);
@@ -907,24 +945,32 @@ static PyObject* tlist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored
       Py_INCREF(self->orig);
       return self->orig;
    }
-   root = self->root;
-   fat_freeze(root);
-   trienode_incref(root);
+   root = tlist_share(self);
+   if (!root) return NULL;
    return plist_wrap(root, self->start, self->length);
 }
+PCOLL_LOCKED0(PyObject*, tlist_persistent_locked, tlist_persistent_impl,
+              TListObject*)
+static PyObject* tlist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tlist_persistent_locked(self);
+}
 
-static PyObject* tlist_pop(TListObject* self, PyObject* args) {
-   Py_ssize_t index = -1, idx;
+static PyObject* tlist_pop_impl(TListObject* self, Py_ssize_t index) {
+   Py_ssize_t idx;
    PyObject* val;
-   if (!PyArg_ParseTuple(args, "|n", &index)) return NULL;
    if (normalize_index(index, self->length, "pop", &idx) < 0) return NULL;
-   val = tlist_item(self, idx);  // new reference
-   if (!val) return NULL;
-   if (tlist_ass_item(self, idx, NULL) < 0) {
-      Py_DECREF(val);
-      return NULL;
-   }
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return NULL;
+   val = tlist_item_impl(self, idx);  // new reference
+   if (val) tlist_delete_guarded(self, idx);
+   tguard_exit(&self->guard);
    return val;
+}
+PCOLL_LOCKED1(PyObject*, tlist_pop_locked, tlist_pop_impl,
+              TListObject*, Py_ssize_t)
+static PyObject* tlist_pop(TListObject* self, PyObject* args) {
+   Py_ssize_t index = -1;
+   if (!PyArg_ParseTuple(args, "|n", &index)) return NULL;
+   return tlist_pop_locked(self, index);
 }
 
 static PyObject* plist_transient(PListObject* self, PyObject* Py_UNUSED(ignored)) {
@@ -1083,10 +1129,13 @@ static PyObject* tlist_richcompare(TListObject* self, PyObject* other, int op) {
 
 typedef struct {
    PyObject_HEAD
-   PyObject* owner;   // strong ref to the plist/tlist being iterated, keyed
-                      // off of *type* below to know which; keeps root alive.
+   PyObject* owner;   // strong ref to the plist/tlist being iterated; keeps
+                      // root alive.
    TriePath path;
    int state;         // 0 = not yet started, 1 = active, 2 = exhausted.
+   bool transient;    // whether owner is a tlist.
+   Py_ssize_t index;  // the index of the next element (tlist only).
+   uint64_t version;  // the owner's guard version at the last step.
 } SeqIterObject;
 
 static void seqiter_dealloc(SeqIterObject* self) {
@@ -1102,26 +1151,37 @@ static int seqiter_traverse(SeqIterObject* self, visitproc visit, void* arg) {
    return 0;
 }
 
-static Trie_t seqiter_owner_root(SeqIterObject* self) {
-   // isinstance-style check (not exact-type): self->owner may legitimately
-   // be a plist/tlist *subclass* instance (e.g. llist/tllist) now that
-   // PListType/TListType are subclassable -- see dict.c.h's analogous fix to
-   // dictiter_owner_els for the same reasoning.
-   if (PyObject_TypeCheck(self->owner, ST(PListType)))
-      return ((PListObject*)self->owner)->root;
-   else
-      return ((TListObject*)self->owner)->root;
-}
-
-static PyObject* seqiter_next(SeqIterObject* self) {
+// A plist iterator walks the trie. A tlist iterator behaves like a list
+// iterator: it yields the element at its current index, whatever the list
+// holds there now, and stops for good once the index reaches the end. It
+// walks the trie while the list is unchanged, and finds its place again by
+// index after any change.
+static PyObject* seqiter_next_impl(SeqIterObject* self) {
    int ok;
    PyObject* val;
    if (self->state == 2) return NULL;
-   if (self->state == 0) {
-      ok = fat_firstpath(seqiter_owner_root(self), &self->path);
-      self->state = 1;
+   if (!self->transient) {
+      if (self->state == 0) {
+         ok = fat_firstpath(((PListObject*)self->owner)->root, &self->path);
+         self->state = 1;
+      } else {
+         ok = fat_nextpath(&self->path);
+      }
    } else {
-      ok = fat_nextpath(&self->path);
+      TListObject* t = (TListObject*)self->owner;
+      if (t->root == NULL || self->index >= t->length) {
+         self->state = 2;
+         return NULL;
+      }
+      if (self->state == 0 || t->guard.version != self->version) {
+         ok = fat_seekpath(t->root, t->start + (trieint_t)self->index,
+                           &self->path);
+         self->state = 1;
+         self->version = t->guard.version;
+      } else {
+         ok = fat_nextpath(&self->path);
+      }
+      self->index += 1;
    }
    if (!ok) {
       self->state = 2;
@@ -1130,6 +1190,13 @@ static PyObject* seqiter_next(SeqIterObject* self) {
    val = *(PyObject**)triepath_val(&self->path);
    Py_INCREF(val);
    return val;
+}
+static PyObject* seqiter_next(SeqIterObject* self) {
+   PyObject* r;
+   PCOLL_BEGIN_LOCK2((PyObject*)self, self->owner);
+   r = seqiter_next_impl(self);
+   PCOLL_END_LOCK2();
+   return r;
 }
 
 static PyObject* seqiter_self(PyObject* self) {
@@ -1143,6 +1210,9 @@ static PyObject* make_seqiter(PyTypeObject* itertype, PyObject* owner) {
    Py_INCREF(owner);
    it->owner = owner;
    it->state = 0;
+   it->transient = !PyObject_TypeCheck(owner, ST(PListType));
+   it->index = 0;
+   it->version = 0;
    PyObject_GC_Track(it);
    return (PyObject*)it;
 }
@@ -1192,11 +1262,19 @@ static PyObject* plist_new_dispatch(PyTypeObject* type, PyObject* arg) {
    if (PyObject_TypeCheck(arg, ST(TListType))) {
       TListObject* t = (TListObject*)arg;
       Trie_t root;
-      if (t->length == 0) return plist_type_empty(type);
-      root = t->root;
-      fat_freeze(root);
-      trienode_incref(root);
-      return plist_wrap_astype(type, root, t->start, t->length);
+      trieint_t start = 0;
+      Py_ssize_t length = 0;
+      PCOLL_BEGIN_LOCK(arg);
+      root = tlist_share(t);
+      start = t->start;
+      length = t->length;
+      PCOLL_END_LOCK();
+      if (!root) return NULL;
+      if (length == 0) {
+         fatnode_decref(root, pyobj_decref);
+         return plist_type_empty(type);
+      }
+      return plist_wrap_astype(type, root, start, length);
    }
    // isinstance(arg, cls): arg is already the exact runtime type we're
    // being asked to build -- return it unchanged (matches reference's

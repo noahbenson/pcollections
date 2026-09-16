@@ -912,7 +912,10 @@ static PyType_Spec ldict_spec = {
 static Py_hash_t ldict_hash(PDictObject* self) {
    PyObject *items, *fs, *h;
    Py_hash_t result;
-   if (self->hashcode != -1) return self->hashcode;
+   {
+      Py_hash_t cached = PCOLL_HASH_LOAD(self->hashcode);
+      if (cached != -1) return cached;
+   }
    items = PyObject_CallFunctionObjArgs(ST(g_ItemsView), (PyObject*)self, NULL);
    if (!items) return -1;
    fs = PySet_New(items);
@@ -926,7 +929,7 @@ static Py_hash_t ldict_hash(PDictObject* self) {
    if (result == -1) return -1;
    result += 2; // matches pdict_hash's own frozenset-hash-plus-2 convention.
    if (result == -1) result = -2;
-   self->hashcode = result;
+   PCOLL_HASH_STORE(self->hashcode, result);
    return result;
 }
 
@@ -1015,23 +1018,21 @@ static PyObject* tldict_ready_all(PyObject* self, PyObject* Py_UNUSED(ignored)) 
    Py_INCREF(self);
    return self;
 }
-static PyObject* tldict_as_tdict(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
-   TDictObject* t = (TDictObject*)ST(TDictType)->tp_alloc(ST(TDictType), 0);
-   if (!t) return NULL;
-   trienode_incref(self->els);
-   trienode_incref(self->idx);
-   t->els = self->els;
-   t->idx = self->idx;
-   t->top = self->top;
-   t->count = self->count;
-   t->ndeleted = self->ndeleted;
-   t->orig = NULL; // matches reference's `tdict._new(self._els, self._idx,
-                    // self._top)` -- no cached orig for the plain-tdict
-                    // result of as_tdict().
-   return (PyObject*)t;
+// Returns a plain tdict sharing (a frozen snapshot of) the tldict's tries.
+static PyObject* tldict_as_tdict_impl(TDictObject* self) {
+   Trie_t els, idx;
+   if (tdict_share(self, &els, &idx) < 0) return NULL;
+   return tdict_wrap(els, idx, self->top, self->count, self->ndeleted, NULL);
 }
-static PyObject* tldict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+PCOLL_LOCKED0(PyObject*, tldict_as_tdict_locked, tldict_as_tdict_impl,
+              TDictObject*)
+static PyObject* tldict_as_tdict(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tldict_as_tdict_locked(self);
+}
+static PyObject* tldict_persistent_impl(TDictObject* self) {
    PDictObject* p;
+   Trie_t els, idx;
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
    if (self->count == 0) {
       Py_INCREF(ST(g_ldict_empty));
       return (PyObject*)ST(g_ldict_empty);
@@ -1040,19 +1041,25 @@ static PyObject* tldict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignore
       Py_INCREF(self->orig);
       return self->orig;
    }
-   fat_freeze(self->els);
-   amt_freeze(self->idx);
+   if (tdict_share(self, &els, &idx) < 0) return NULL;
    p = (PDictObject*)ST(LDictType)->tp_alloc(ST(LDictType), 0);
-   if (!p) return NULL;
-   trienode_incref(self->els);
-   trienode_incref(self->idx);
-   p->els = self->els;
-   p->idx = self->idx;
+   if (!p) {
+      fatnode_decref(els, dictentry_decref);
+      amtnode_decref(idx, noop_decref);
+      return NULL;
+   }
+   p->els = els;
+   p->idx = idx;
    p->top = self->top;
    p->count = self->count;
    p->ndeleted = self->ndeleted;
    p->hashcode = -1;
    return (PyObject*)p;
+}
+PCOLL_LOCKED0(PyObject*, tldict_persistent_locked, tldict_persistent_impl,
+              TDictObject*)
+static PyObject* tldict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tldict_persistent_locked(self);
 }
 // Matches _lazy.py's tldict.__str__/__repr__ exactly:
 //   __str__: f"{{|{seqstr(self.as_tdict(), maxlen=60, tostr=reprlazy)}|}}"
@@ -1352,7 +1359,10 @@ static Py_hash_t llist_hash(PListObject* self) {
    PyObject* parts;
    Py_hash_t result;
    Py_ssize_t n, i;
-   if (self->hashcode != -1) return self->hashcode;
+   {
+      Py_hash_t cached = PCOLL_HASH_LOAD(self->hashcode);
+      if (cached != -1) return cached;
+   }
    it = make_unlazy_iter(ST(PListType)->tp_iter((PyObject*)self));
    if (!it) return -1;
    parts = PyList_New(0);
@@ -1379,7 +1389,7 @@ static Py_hash_t llist_hash(PListObject* self) {
    if (result == -1) return -1;
    result += 1; // matches plist_hash's own tuple-hash-plus-1 convention.
    if (result == -1) result = -2;
-   self->hashcode = result;
+   PCOLL_HASH_STORE(self->hashcode, result);
    return result;
 }
 
@@ -1443,8 +1453,10 @@ static PyObject* tllist_iter(TListObject* self) {
 static PyObject* tllist_getlazy(PyObject* self, PyObject* index_obj) {
    return ST(TListType)->tp_as_mapping->mp_subscript(self, index_obj); // raw.
 }
-static PyObject* tllist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored)) {
+static PyObject* tllist_persistent_impl(TListObject* self) {
    PListObject* p;
+   Trie_t root;
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
    if (self->length == 0) {
       Py_INCREF(ST(g_llist_empty));
       return (PyObject*)ST(g_llist_empty);
@@ -1453,15 +1465,23 @@ static PyObject* tllist_persistent(TListObject* self, PyObject* Py_UNUSED(ignore
       Py_INCREF(self->orig);
       return self->orig;
    }
-   fat_freeze(self->root);
+   root = tlist_share(self);
+   if (!root) return NULL;
    p = (PListObject*)ST(LListType)->tp_alloc(ST(LListType), 0);
-   if (!p) return NULL;
-   trienode_incref(self->root);
-   p->root = self->root;
+   if (!p) {
+      fatnode_decref(root, pyobj_decref);
+      return NULL;
+   }
+   p->root = root;
    p->start = self->start;
    p->length = self->length;
    p->hashcode = -1;
    return (PyObject*)p;
+}
+PCOLL_LOCKED0(PyObject*, tllist_persistent_locked, tllist_persistent_impl,
+              TListObject*)
+static PyObject* tllist_persistent(TListObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tllist_persistent_locked(self);
 }
 // See ldict_gc_traverse/ldict_gc_clear's comment.
 static int tllist_gc_traverse(PyObject* self, visitproc visit, void* arg) {

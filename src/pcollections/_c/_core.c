@@ -178,6 +178,11 @@ static PyModuleDef_Slot core_slots[] = {
 #if PY_VERSION_HEX >= 0x030C0000
    {Py_mod_multiple_interpreters, Py_MOD_PER_INTERPRETER_GIL_SUPPORTED},
 #endif
+#ifdef Py_GIL_DISABLED
+   // Safe without the GIL: transients lock themselves (see core.h), and
+   // everything else is immutable or synchronized.
+   {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+#endif
    {0, NULL}
 };
 

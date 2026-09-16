@@ -90,6 +90,8 @@
 #  define PCOLL_ATOMIC_LOAD_ACQUIRE(flag) InterlockedCompareExchange((flag), 0, 0)
 #  define PCOLL_ATOMIC_STORE_RELEASE(flag, val) ((void)InterlockedExchange((flag), (val)))
 #  define PCOLL_ATOMIC_INCREMENT(flag) ((void)InterlockedIncrement(flag))
+   // Sets the flag from 0 to 1; true if it was 0.
+#  define PCOLL_ATOMIC_ACQUIRE(flag) (InterlockedCompareExchange((flag), 1, 0) == 0)
 #  define PCOLL_THREAD_LOCAL __declspec(thread)
 #else
 #  include <stdatomic.h>
@@ -112,8 +114,151 @@
 #  define PCOLL_ATOMIC_LOAD_ACQUIRE(flag) atomic_load_explicit((flag), memory_order_acquire)
 #  define PCOLL_ATOMIC_STORE_RELEASE(flag, val) atomic_store_explicit((flag), (val), memory_order_release)
 #  define PCOLL_ATOMIC_INCREMENT(flag) ((void)atomic_fetch_add((flag), 1))
+   static inline bool pcoll_atomic_acquire(pcoll_atomic_flag_t* flag) {
+      int expected = 0;
+      return atomic_compare_exchange_strong(flag, &expected, 1);
+   }
+#  define PCOLL_ATOMIC_ACQUIRE(flag) pcoll_atomic_acquire(flag)
 #  define PCOLL_THREAD_LOCAL _Thread_local
 #endif
+
+
+//=============================================================================
+// Free-threaded builds.
+// Without the GIL, every method of a transient type runs inside a critical
+// section on the object (as the builtin list and dict do), and iterators lock
+// themselves and their collection. PCOLL_LOCKED0/1/2 define a function
+// `name` that calls `inner` inside such a section; with the GIL they reduce
+// to a plain call. Persistent objects are immutable apart from their cached
+// hash, which is read and written atomically.
+
+#ifdef Py_GIL_DISABLED
+#  define PCOLL_BEGIN_LOCK(o) Py_BEGIN_CRITICAL_SECTION(o)
+#  define PCOLL_END_LOCK() Py_END_CRITICAL_SECTION()
+#  define PCOLL_BEGIN_LOCK2(a, b) Py_BEGIN_CRITICAL_SECTION2(a, b)
+#  define PCOLL_END_LOCK2() Py_END_CRITICAL_SECTION2()
+#  define PCOLL_HASH_LOAD(field) _Py_atomic_load_ssize_relaxed(&(field))
+#  define PCOLL_HASH_STORE(field, v) _Py_atomic_store_ssize_relaxed(&(field), (v))
+#else
+#  define PCOLL_BEGIN_LOCK(o) {
+#  define PCOLL_END_LOCK() }
+#  define PCOLL_BEGIN_LOCK2(a, b) {
+#  define PCOLL_END_LOCK2() }
+#  define PCOLL_HASH_LOAD(field) (field)
+#  define PCOLL_HASH_STORE(field, v) ((field) = (v))
+#endif
+
+#define PCOLL_LOCKED0(R, name, inner, T0)                               \
+   static R name(T0 a0) {                                                \
+      R r;                                                               \
+      PCOLL_BEGIN_LOCK((PyObject*)a0);                                   \
+      r = inner(a0);                                                     \
+      PCOLL_END_LOCK();                                                  \
+      return r;                                                          \
+   }
+#define PCOLL_LOCKED1(R, name, inner, T0, T1)                           \
+   static R name(T0 a0, T1 a1) {                                         \
+      R r;                                                               \
+      PCOLL_BEGIN_LOCK((PyObject*)a0);                                   \
+      r = inner(a0, a1);                                                 \
+      PCOLL_END_LOCK();                                                  \
+      return r;                                                          \
+   }
+#define PCOLL_LOCKED2(R, name, inner, T0, T1, T2)                       \
+   static R name(T0 a0, T1 a1, T2 a2) {                                  \
+      R r;                                                               \
+      PCOLL_BEGIN_LOCK((PyObject*)a0);                                   \
+      r = inner(a0, a1, a2);                                             \
+      PCOLL_END_LOCK();                                                  \
+      return r;                                                          \
+   }
+
+
+//=============================================================================
+// Transient guards.
+// Transients are for use by one thread at a time. They must not be corrupted
+// when that rule is broken, or when user code that runs during an operation
+// (a key's __hash__ or __eq__, an object's __del__) touches the transient
+// being operated on. Every transient therefore carries a guard:
+//
+//  - `busy` is set for the duration of each modification. A modification
+//    that finds it already set (reentrantly, or from another thread) raises
+//    RuntimeError instead of proceeding.
+//  - `version` changes whenever the contents change, and `keyversion`
+//    whenever the set of keys (or, for lists, the positions) changes. A
+//    lookup that calls user code checks `version` afterward and raises
+//    RuntimeError if the transient changed underneath it; iterators use both
+//    counters to detect changes (see the part files).
+//
+// The busy flag is atomic so that it also catches modifications from
+// another thread, including in free-threaded builds, where a critical section
+// is released whenever its thread blocks.
+
+typedef struct {
+   pcoll_atomic_flag_t busy;
+   uint64_t version;
+   uint64_t keyversion;
+} pcoll_tguard;
+
+// Starts a modification of `self`; returns -1 (with RuntimeError set) if one
+// is already in progress.
+static inline int tguard_enter(pcoll_tguard* g, PyObject* self) {
+   if (PCOLL_ATOMIC_ACQUIRE(&g->busy)) return 0;
+   PyErr_Format(PyExc_RuntimeError,
+                "%.200s was modified during another modification of it"
+                " (transients are not safe for concurrent or reentrant"
+                " modification)", Py_TYPE(self)->tp_name);
+   return -1;
+}
+static inline void tguard_exit(pcoll_tguard* g) {
+   PCOLL_ATOMIC_STORE_RELEASE(&g->busy, 0);
+}
+// Fails like tguard_enter() if a modification is in progress, without
+// starting one (for operations such as persistent() that must not observe a
+// half-finished modification).
+static inline int tguard_check(pcoll_tguard* g, PyObject* self) {
+   if (!PCOLL_ATOMIC_LOAD_ACQUIRE(&g->busy)) return 0;
+   PyErr_Format(PyExc_RuntimeError,
+                "%.200s was used during a modification of it",
+                Py_TYPE(self)->tp_name);
+   return -1;
+}
+static inline void tguard_changed(pcoll_tguard* g) {
+   g->version++;
+}
+static inline void tguard_keys_changed(pcoll_tguard* g) {
+   g->version++;
+   g->keyversion++;
+}
+// Raises the error for a lookup whose collection changed during a call to
+// user code.
+static inline int tguard_lookup_error(const char* tp_name) {
+   PyErr_Format(PyExc_RuntimeError, "%.200s changed during a lookup",
+                tp_name);
+   return -1;
+}
+
+// In-place FAT updates of a transient's root. tfat_setitem()/tfat_delitem()
+// may release the old root; the collection keeps pointing at it until the
+// call returns, and releasing it can run arbitrary code (__del__) that looks
+// at the collection. These keep the old root alive until the collection
+// points at the new one.
+static inline void tfat_setitem_at(Trie_t* slot, trieint_t key, void* val,
+                                   void (*leaf_incref)(void*),
+                                   void (*leaf_decref)(void*)) {
+   Trie_t old = *slot;
+   trienode_incref(old);
+   *slot = tfat_setitem(old, key, val, leaf_incref, leaf_decref);
+   fatnode_decref(old, leaf_decref);
+}
+static inline void tfat_delitem_at(Trie_t* slot, trieint_t key,
+                                   void (*leaf_incref)(void*),
+                                   void (*leaf_decref)(void*)) {
+   Trie_t old = *slot;
+   trienode_incref(old);
+   *slot = tfat_delitem(old, key, leaf_incref, leaf_decref);
+   fatnode_decref(old, leaf_decref);
+}
 
 
 //=============================================================================

@@ -13,6 +13,7 @@ from threading import RLock
 # imported under the PHAMT/THAMT names this file already uses throughout.
 from ._trie import (
     AMT,
+    TAMT,
     FAT,
     FAT as PHAMT,
     TFAT as THAMT
@@ -331,12 +332,7 @@ class tllist(tlist):
         return map(unlazy, tlist.__iter__(self))
     def persistent(self):
         """Efficiently copies the tllist into an llist and returns the llist."""
-        if len(self._thamt) == 0:
-            return llist.empty
-        elif self._orig is None:
-            return llist._new(self._thamt.persistent(), self._start)
-        else:
-            return self._orig
+        return self._persistent_as(llist)
     def __getitem__(self, k):
         return unlazy(tlist.__getitem__(self, k))
     def getlazy(self, k):
@@ -503,16 +499,7 @@ class tldict(tdict):
         return f"{{|{seqstr(self.as_tdict())}|}}"
     def persistent(self):
         """Efficiently copies the tldict into an ldict and returns the ldict."""
-        if len(self) == 0:
-            return ldict.empty
-        elif self._orig is not None:
-            return self._orig
-        else:
-            return ldict._new(self._els.persistent(),
-                              self._idx.persistent(),
-                              self._top,
-                              self._count,
-                              self._ndeleted)
+        return self._persistent_as(ldict)
     def is_lazy(self, key):
         """Determines if the given key is mapped to a `lazy` value.
 
@@ -552,8 +539,10 @@ class tldict(tdict):
         mapped to their associated `lazy` objects. This is essentially a way to
         expose the raw values of a lazy dictionary.
         """
-        return tdict._new(self._els, self._idx, self._top, self._count,
-                          self._ndeleted)
+        # The copy gets a snapshot of the tries, so that changing either
+        # transient leaves the other unchanged.
+        (els, idx, top, count, ndeleted, _) = self._snapshot()
+        return tdict._new(THAMT(els), TAMT(idx), top, count, ndeleted)
     def __holdlazy__(self):
         return self.as_tdict()
     def getlazy(self, k, default=None):

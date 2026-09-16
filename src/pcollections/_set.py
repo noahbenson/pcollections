@@ -17,6 +17,8 @@ from ._compact import (
 )
 
 from .abc  import (PersistentSet, TransientSet)
+from ._guard import (TransientIter, new_busy_flag, begin_update, end_update,
+                     changed_during_lookup)
 from .util import (setcmp)
 
 
@@ -59,14 +61,10 @@ class pset(PersistentSet):
             raise TypeError(f"pset expects at most 1 argument, got {n}")
         # If arg is a tset, this is a special case.
         if isinstance(arg, tset):
-            if len(arg) == 0:
+            (els, idx, top, count, ndeleted, _) = arg._snapshot()
+            if count == 0:
                 return cls.empty
-            else:
-                return cls._new(arg._els.persistent(),
-                                arg._idx.persistent(),
-                                arg._top,
-                                arg._count,
-                                arg._ndeleted)
+            return cls._new(els, idx, top, count, ndeleted)
         # If it's a pset, we can just return it as-is.
         if isinstance(arg, pset):
             return arg
@@ -207,13 +205,17 @@ class tset(TransientSet):
         object.__setattr__(new_tset, '_top', top)
         object.__setattr__(new_tset, '_count', count)
         object.__setattr__(new_tset, '_ndeleted', ndeleted)
+        object.__setattr__(new_tset, '_version', 0)
+        object.__setattr__(new_tset, '_kversion', 0)
+        object.__setattr__(new_tset, '_busy', new_busy_flag())
         object.__setattr__(new_tset, '_orig', orig)
         return new_tset
     @classmethod
     def empty(cls):
         """Returns an empty tset."""
         return cls._new(TFAT(FAT.empty), TAMT(AMT.empty), 0, 0, 0)
-    __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_orig")
+    __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_version",
+                 "_kversion", "_busy", "_orig")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("tset() takes no keyword arguments")
@@ -235,48 +237,68 @@ class tset(TransientSet):
         return t
     def __len__(self):
         return self._count
-    def __contains__(self, el):
-        h = hash(el)
-        ii = self._idx.get(h, None)
-        while ii is not None:
-            (x,ii) = self._els[ii]
-            if el == x:
-                return True
-        return False
-    def __iter__(self):
-        return (
-            x
-            for (_ii, (x, _next)) in self._els
-            if not is_tombstone(x)
-        )
-    def add(self, obj):
-        """Returns a copy of the tset that includes the given object."""
-        # Get the hash and initial index (if there is one).
-        h = hash(obj)
-        ii_first = self._idx.get(h, None)
-        if ii_first is None:
-            # The object's hash is not here yet, so we can append to els and
-            # insert it into idx.
-            self._els[self._top] = (obj, None)
-            self._idx[h] = self._top
-        else:
-            # First make sure it's not already in the set.
-            ii = ii_first
-            ii_prev = None
-            while ii is not None:
-                (x,ii_next) = self._els[ii]
-                if obj == x:
-                    return None
-                ii_prev = ii
-                x_prev = x
-                ii = ii_next
-            # If we reach this point, we can add the object to the end of the
-            # list.
-            self._els[self._top] = (obj, None)
-            self._els[ii_prev] = (x_prev, self._top)
-        object.__setattr__(self, '_top', self._top + 1)
-        object.__setattr__(self, '_count', self._count + 1)
+    def _changed(self):
+        object.__setattr__(self, '_version', self._version + 1)
+        object.__setattr__(self, '_kversion', self._kversion + 1)
         object.__setattr__(self, '_orig', None)
+    def _chain(self, h, obj):
+        """Walks the collision chain for `obj`, whose hash is `h`; see
+        `tdict._chain`. Returns `(ii, ii_next, ii_prev, x_prev)`."""
+        v = self._version
+        if v & 1:
+            changed_during_lookup(self)
+        try:
+            ii = self._idx.get(h, None)
+        except (LookupError, TypeError):
+            # Another thread changed the collection as we read it.
+            if self._version == v:
+                raise
+            changed_during_lookup(self)
+        ii_prev = x_prev = None
+        while ii is not None:
+            try:
+                (x, ii_next) = self._els[ii]
+            except LookupError:
+                # Another thread changed the tset as we read it.
+                if self._version == v:
+                    raise
+                changed_during_lookup(self)
+            if self._version != v:
+                changed_during_lookup(self)
+            eq = x is obj or bool(obj == x)
+            if self._version != v:
+                changed_during_lookup(self)
+            if eq:
+                return (ii, ii_next, ii_prev, x_prev)
+            (ii_prev, x_prev, ii) = (ii, x, ii_next)
+        return (None, None, ii_prev, x_prev)
+    def __contains__(self, el):
+        return self._chain(hash(el), el)[0] is not None
+    def __iter__(self):
+        return TransientIter(self, _identity)
+    def add(self, obj):
+        """Adds the given object to the tset."""
+        h = hash(obj)
+        begin_update(self)
+        try:
+            self._add(h, obj)
+        finally:
+            end_update(self)
+    def _add(self, h, obj):
+        (ii, _, ii_prev, x_prev) = self._chain(h, obj)
+        if ii is not None:
+            return None
+        self._changed()
+        top = self._top
+        self._els[top] = (obj, None)
+        if ii_prev is None:
+            # The hash is new: start a chain.
+            self._idx[h] = top
+        else:
+            # Add the element to the end of the chain.
+            self._els[ii_prev] = (x_prev, top)
+        object.__setattr__(self, '_top', top + 1)
+        object.__setattr__(self, '_count', self._count + 1)
     def _maybe_compact(self):
         if should_compact(self._count, self._ndeleted):
             new_els, new_idx, new_top = _compact_els(self._els)
@@ -289,64 +311,72 @@ class tset(TransientSet):
 
         If the element is not a member, `discard` simply returns.
         """
-        # Get the hash and initial index (if there is one).
         h = hash(obj)
-        ii = self._idx.get(h, None)
-        # First make sure it's not already in the set.
-        ii_prev = None
-        x_prev = None
-        while ii is not None:
-            (x,ii_next) = self._els[ii]
-            if obj == x:
-                # We remove this object! (See pset.discard()'s comment on
-                # tombstoning.)
-                if ii_prev is None:
-                    # We're removing from the front of the list.
-                    if ii_next is None:
-                        del self._idx[h]
-                    else:
-                        self._idx[h] = ii_next
-                    self._els[ii] = (TOMBSTONE, None)
-                else:
-                    # We're removing from the end or the middle.
-                    self._els[ii_prev] = (x_prev, ii_next)
-                    self._els[ii] = (TOMBSTONE, None)
-                object.__setattr__(self, '_count', self._count - 1)
-                object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
-                object.__setattr__(self, '_orig', None)
-                self._maybe_compact()
-                return None
-            ii_prev = ii
-            x_prev = x
-            ii = ii_next
-        # If we reach this point, then obj isn't in the set, so we just return.
+        begin_update(self)
+        try:
+            self._discard(h, obj)
+        finally:
+            end_update(self)
+    def _discard(self, h, obj):
+        (ii, ii_next, ii_prev, x_prev) = self._chain(h, obj)
+        if ii is None:
+            return None
+        # We remove this object! (See pset.discard()'s comment on
+        # tombstoning.)
+        self._changed()
+        if ii_prev is None:
+            # We're removing from the front of the chain.
+            if ii_next is None:
+                del self._idx[h]
+            else:
+                self._idx[h] = ii_next
+        else:
+            # We're removing from the end or the middle.
+            self._els[ii_prev] = (x_prev, ii_next)
+        self._els[ii] = (TOMBSTONE, None)
+        object.__setattr__(self, '_count', self._count - 1)
+        object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
+        self._maybe_compact()
         return None
     def clear(self):
         """Clears the tset."""
-        object.__setattr__(self, '_els', TFAT(FAT.empty))
-        object.__setattr__(self, '_idx', TAMT(AMT.empty))
-        object.__setattr__(self, '_top', 0)
-        object.__setattr__(self, '_count', 0)
-        object.__setattr__(self, '_ndeleted', 0)
-        object.__setattr__(self, '_orig', None)
+        begin_update(self)
+        try:
+            self._changed()
+            object.__setattr__(self, '_els', TFAT(FAT.empty))
+            object.__setattr__(self, '_idx', TAMT(AMT.empty))
+            object.__setattr__(self, '_top', 0)
+            object.__setattr__(self, '_count', 0)
+            object.__setattr__(self, '_ndeleted', 0)
+        finally:
+            end_update(self)
+    def _snapshot(self):
+        """Returns `(els, idx, top, count, ndeleted, orig)`, with the tries
+        frozen, for sharing with another collection."""
+        begin_update(self, False)
+        try:
+            return (self._els.persistent(), self._idx.persistent(),
+                    self._top, self._count, self._ndeleted, self._orig)
+        finally:
+            end_update(self)
     def persistent(self):
         """Efficiently returns a persistent set that is a copy of the tset."""
-        if len(self) == 0:
+        (els, idx, top, count, ndeleted, orig) = self._snapshot()
+        if count == 0:
             return pset.empty
-        elif self._orig is None:
-            return pset._new(self._els.persistent(),
-                             self._idx.persistent(),
-                             self._top,
-                             self._count,
-                             self._ndeleted)
+        elif orig is not None:
+            return orig
         else:
-            return self._orig
+            return pset._new(els, idx, top, count, ndeleted)
 
 
 #===============================================================================
 # Compaction.
 # Mirrors _dict.py's _compact_els() -- see that function's comment -- just
 # replaying live elements through tset.add() instead of tdict.__setitem__.
+
+def _identity(x):
+    return x
 
 def _compact_els(els):
     t = tset.empty()

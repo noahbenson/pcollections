@@ -131,24 +131,39 @@ static int set_hash_key(PyObject* key, trieint_t* out) {
 // reading uninitialized stack garbage whenever the target was actually
 // found; getting this right from the start here avoids repeating that).
 static int set_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
-                           PyObject* key, trieint_t* out_index,
-                           trieint_t* out_prev) {
+                          PyObject* key, trieint_t* out_index,
+                          trieint_t* out_prev,
+                          const pcoll_tguard* g, PyObject* owner) {
    void* found;
    trieint_t ii;
    trieint_t prev = SET_NO_NEXT;
+   uint64_t version = g ? g->version : 0;
    if (!amt_lookup(idx, hkey, &found)) {
       if (out_prev) *out_prev = SET_NO_NEXT;
       return 0;
    }
    ii = *(trieint_t*)found;
    while (1) {
-      void* ep;
+      void* ep = NULL;
       SetEntry* e;
+      PyObject* ekey;
       int eq;
       fat_lookup(els, ii, &ep);
       e = (SetEntry*)ep;
-      eq = PyObject_RichCompareBool(key, e->key, Py_EQ);
-      if (eq < 0) return -1;
+      ekey = e->key;
+      if (ekey == key) {
+         eq = 1;
+      } else {
+         Py_INCREF(ekey);
+         eq = PyObject_RichCompareBool(key, ekey, Py_EQ);
+         Py_DECREF(ekey);
+         if (g && g->version != version) {
+            if (eq >= 0)
+               tguard_lookup_error(Py_TYPE(owner)->tp_name);
+            return -1;
+         }
+         if (eq < 0) return -1;
+      }
       if (eq) {
          if (out_index) *out_index = ii;
          if (out_prev) *out_prev = prev;
@@ -160,6 +175,21 @@ static int set_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
    }
    if (out_prev) *out_prev = prev;
    return 0;
+}
+
+// Returns the index of the last entry in the chain for `hkey`, or
+// SET_NO_NEXT if there is no such chain. Calls no user code.
+static trieint_t set_chain_tail(Trie_t els, Trie_t idx, trieint_t hkey) {
+   void* found;
+   trieint_t ii;
+   if (!amt_lookup(idx, hkey, &found)) return SET_NO_NEXT;
+   ii = *(trieint_t*)found;
+   while (1) {
+      void* ep = NULL;
+      fat_lookup(els, ii, &ep);
+      if (((SetEntry*)ep)->next == SET_NO_NEXT) return ii;
+      ii = ((SetEntry*)ep)->next;
+   }
 }
 
 
@@ -254,30 +284,19 @@ static int set_rebuild_compacted(Trie_t els, Trie_t idx,
          amtnode_decref(new_idx, noop_decref);
          return -1;
       }
-      // Every key here is, by construction, not yet present in the fresh
-      // tables, so this always appends a brand new chain link.
-      set_chain_find(new_els, new_idx, hkey, e->key, NULL, &prev);
+      // The elements are distinct, so each one starts a new chain or
+      // extends an existing one; no comparisons are needed.
+      prev = set_chain_tail(new_els, new_idx, hkey);
       if (prev == SET_NO_NEXT) {
-         void* found;
-         if (!amt_lookup(new_idx, hkey, &found)) {
-            trieint_t idxval = newtop;
-            new_idx = tamt_setitem(new_idx, hkey, &idxval, noop_incref, noop_decref);
-         } else {
-            void* ep; SetEntry patched;
-            trieint_t tailidx = *(trieint_t*)found;
-            fat_lookup(new_els, tailidx, &ep);
-            memcpy(&patched, ep, sizeof(SetEntry));
-            patched.next = newtop;
-            new_els = tfat_setitem(new_els, tailidx, &patched,
-                                    setentry_incref, setentry_decref);
-         }
+         trieint_t idxval = newtop;
+         new_idx = tamt_setitem(new_idx, hkey, &idxval, noop_incref, noop_decref);
       } else {
          void* ep; SetEntry patched;
          fat_lookup(new_els, prev, &ep);
          memcpy(&patched, ep, sizeof(SetEntry));
          patched.next = newtop;
          new_els = tfat_setitem(new_els, prev, &patched,
-                                 setentry_incref, setentry_decref);
+                                setentry_incref, setentry_decref);
       }
       newentry.key = e->key;
       newentry.next = SET_NO_NEXT;
@@ -324,7 +343,8 @@ static Py_hash_t pset_hash(PSetObject* self) {
    Py_hash_t result;
    TriePath iter;
    int ok;
-   if (self->hashcode != -1) return self->hashcode;
+   result = PCOLL_HASH_LOAD(self->hashcode);
+   if (result != -1) return result;
    fs = PySet_New(NULL);
    if (!fs) return -1;
    for (ok = fat_firstpath(self->els, &iter); ok; ok = fat_nextpath(&iter)) {
@@ -346,14 +366,14 @@ static Py_hash_t pset_hash(PSetObject* self) {
    // pset and an empty pdict don't collide with frozenset() itself).
    result += 1;
    if (result == -1) result = -2;
-   self->hashcode = result;
+   PCOLL_HASH_STORE(self->hashcode, result);
    return result;
 }
 
 static int pset_contains(PSetObject* self, PyObject* el) {
    trieint_t hkey;
    if (set_hash_key(el, &hkey) < 0) return -1;
-   return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL);
+   return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL, NULL, NULL);
 }
 
 static PyObject* pset_add(PSetObject* self, PyObject* obj) {
@@ -364,7 +384,8 @@ static PyObject* pset_add(PSetObject* self, PyObject* obj) {
    Py_ssize_t new_top = self->top, new_count = self->count;
    Py_ssize_t new_ndeleted = self->ndeleted;
    if (set_hash_key(obj, &hkey) < 0) return NULL;
-   found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev);
+   found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev,
+                          NULL, NULL);
    if (found < 0) return NULL;
    if (found) {
       Py_INCREF(self);
@@ -420,7 +441,8 @@ static PyObject* pset_discard(PSetObject* self, PyObject* obj) {
    Trie_t new_els, new_idx;
    Py_ssize_t new_count, new_ndeleted;
    if (set_hash_key(obj, &hkey) < 0) return NULL;
-   found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev);
+   found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev,
+                          NULL, NULL);
    if (found < 0) return NULL;
    if (!found) {
       Py_INCREF(self);
@@ -558,6 +580,7 @@ typedef struct {
    PyObject* orig;          // cached pset (owned ref), or NULL -- see
                             // TDictObject's matching field in dict.c.h for the
                             // exact caching/invalidation convention.
+   pcoll_tguard guard;      // see core.h.
 } TSetObject;
 
 static int tset_traverse(TSetObject* self, visitproc visit, void* arg) {
@@ -582,13 +605,15 @@ static void tset_dealloc(TSetObject* self) {
    PyObject_GC_Del(self);
    Py_DECREF(tp);
 }
-static Py_ssize_t tset_length(TSetObject* self) {
+static Py_ssize_t tset_length_impl(TSetObject* self) {
    return self->count;
 }
+PCOLL_LOCKED0(Py_ssize_t, tset_length, tset_length_impl, TSetObject*)
 static PyObject* tset_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
                             Py_ssize_t count, Py_ssize_t ndeleted,
                             PyObject* orig) {
    TSetObject* self = PyObject_GC_New(TSetObject, ST(TSetType));
+   if (self) memset(&self->guard, 0, sizeof(self->guard));
    if (!self) {
       fatnode_decref(els, setentry_decref);
       amtnode_decref(idx, noop_decref);
@@ -616,101 +641,111 @@ static PyObject* tset_empty(void) {
 static int tset_maybe_compact(TSetObject* self) {
    Trie_t c_els, c_idx; Py_ssize_t c_top;
    if (!set_should_compact(self->count, self->ndeleted)) return 0;
-   if (set_rebuild_compacted(self->els, self->idx, &c_els, &c_idx, &c_top) < 0)
+   Trie_t old_els = self->els, old_idx = self->idx;
+   if (set_rebuild_compacted(old_els, old_idx, &c_els, &c_idx, &c_top) < 0)
       return -1;
-   fatnode_decref(self->els, setentry_decref);
-   amtnode_decref(self->idx, noop_decref);
    self->els = c_els; self->idx = c_idx; self->top = c_top; self->ndeleted = 0;
+   fatnode_decref(old_els, setentry_decref);
+   amtnode_decref(old_idx, noop_decref);
    return 0;
 }
 
-// The shared insertion primitive behind both tset.add() and the general
-// iterable-builder below. Returns 0 on success (including the "already
-// present" no-op case) or -1 (with an exception set) on failure.
-static int tset_add_element(TSetObject* self, PyObject* obj) {
-   trieint_t hkey;
-   trieint_t found_index, prev;
-   int found;
-   if (set_hash_key(obj, &hkey) < 0) return -1;
-   found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev);
-   if (found < 0) return -1;
-   if (found) return 0;
-   {
-      SetEntry entry;
-      entry.key = obj; entry.next = SET_NO_NEXT;
-      self->els = tfat_setitem(self->els, (trieint_t)self->top, &entry,
-                                setentry_incref, setentry_decref);
-      if (prev == SET_NO_NEXT) {
-         trieint_t idxval = (trieint_t)self->top;
-         self->idx = tamt_setitem(self->idx, hkey, &idxval, noop_incref, noop_decref);
-      } else {
-         void* ep; SetEntry patched;
-         fat_lookup(self->els, prev, &ep);
-         memcpy(&patched, ep, sizeof(SetEntry));
-         patched.next = (trieint_t)self->top;
-         self->els = tfat_setitem(self->els, prev, &patched,
-                                   setentry_incref, setentry_decref);
-      }
+// The bodies of tset.add() and tset.discard(), run with the guard held.
+static int tset_add_guarded(TSetObject* self, trieint_t hkey, PyObject* obj) {
+   trieint_t found_index, prev, newindex;
+   SetEntry entry;
+   int found = set_chain_find(self->els, self->idx, hkey, obj, &found_index,
+                              &prev, &self->guard, (PyObject*)self);
+   if (found) return found < 0 ? -1 : 0;
+   tguard_keys_changed(&self->guard);
+   newindex = (trieint_t)self->top;
+   entry.key = obj; entry.next = SET_NO_NEXT;
+   tfat_setitem_at(&self->els, newindex, &entry,
+                   setentry_incref, setentry_decref);
+   if (prev == SET_NO_NEXT) {
+      self->idx = tamt_setitem(self->idx, hkey, &newindex, noop_incref, noop_decref);
+   } else {
+      void* ep; SetEntry patched;
+      fat_lookup(self->els, prev, &ep);
+      memcpy(&patched, ep, sizeof(SetEntry));
+      patched.next = newindex;
+      tfat_setitem_at(&self->els, prev, &patched,
+                      setentry_incref, setentry_decref);
    }
    self->top += 1;
    self->count += 1;
    tset_invalidate_orig(self);
+   return tset_maybe_compact(self);
+}
+static int tset_discard_guarded(TSetObject* self, trieint_t hkey, PyObject* obj) {
+   trieint_t found_index, prev;
+   void* ep; SetEntry entry; SetEntry tombstone;
+   int found = set_chain_find(self->els, self->idx, hkey, obj, &found_index,
+                              &prev, &self->guard, (PyObject*)self);
+   if (found <= 0) return found;
+   tguard_keys_changed(&self->guard);
+   fat_lookup(self->els, found_index, &ep);
+   memcpy(&entry, ep, sizeof(SetEntry));
+   set_make_tombstone(&tombstone);
+   if (prev == SET_NO_NEXT) {
+      if (entry.next == SET_NO_NEXT)
+         self->idx = tamt_delitem(self->idx, hkey, noop_incref, noop_decref);
+      else {
+         trieint_t idxval = entry.next;
+         self->idx = tamt_setitem(self->idx, hkey, &idxval, noop_incref, noop_decref);
+      }
+   } else {
+      void* pp; SetEntry pentry;
+      fat_lookup(self->els, prev, &pp);
+      memcpy(&pentry, pp, sizeof(SetEntry));
+      pentry.next = entry.next;
+      tfat_setitem_at(&self->els, prev, &pentry,
+                      setentry_incref, setentry_decref);
+   }
+   self->count -= 1;
+   self->ndeleted += 1;
+   // OVERWRITE found_index's slot with a tombstone -- never delete it; see
+   // the tombstone comment near setentry_is_tombstone().
+   tfat_setitem_at(&self->els, found_index, &tombstone,
+                   setentry_incref, setentry_decref);
+   tset_invalidate_orig(self);
    if (tset_maybe_compact(self) < 0) return -1;
-   return 0;
+   return 1;
+}
+// Adds (add = 1) or discards (add = 0) `obj`. Returns -1 on error.
+static int tset_update_one(TSetObject* self, PyObject* obj, int add) {
+   trieint_t hkey;
+   int rc;
+   if (set_hash_key(obj, &hkey) < 0) return -1;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return -1;
+   rc = add ? tset_add_guarded(self, hkey, obj)
+            : tset_discard_guarded(self, hkey, obj);
+   tguard_exit(&self->guard);
+   return rc;
+}
+PCOLL_LOCKED2(int, tset_update_one_locked, tset_update_one,
+              TSetObject*, PyObject*, int)
+static int tset_add_element(TSetObject* self, PyObject* obj) {
+   return tset_update_one_locked(self, obj, 1);
 }
 
 static PyObject* tset_add(TSetObject* self, PyObject* obj) {
-   if (tset_add_element(self, obj) < 0) return NULL;
+   if (tset_update_one_locked(self, obj, 1) < 0) return NULL;
    Py_RETURN_NONE;
 }
 
 static PyObject* tset_discard(TSetObject* self, PyObject* obj) {
-   trieint_t hkey;
-   trieint_t found_index, prev;
-   int found;
-   if (set_hash_key(obj, &hkey) < 0) return NULL;
-   found = set_chain_find(self->els, self->idx, hkey, obj, &found_index, &prev);
-   if (found < 0) return NULL;
-   if (!found) Py_RETURN_NONE;
-   {
-      void* ep; SetEntry entry; SetEntry tombstone;
-      fat_lookup(self->els, found_index, &ep);
-      memcpy(&entry, ep, sizeof(SetEntry));
-      set_make_tombstone(&tombstone);
-      if (prev == SET_NO_NEXT) {
-         if (entry.next == SET_NO_NEXT)
-            self->idx = tamt_delitem(self->idx, hkey, noop_incref, noop_decref);
-         else {
-            trieint_t idxval = entry.next;
-            self->idx = tamt_setitem(self->idx, hkey, &idxval, noop_incref, noop_decref);
-         }
-      } else {
-         void* pp; SetEntry pentry;
-         fat_lookup(self->els, prev, &pp);
-         memcpy(&pentry, pp, sizeof(SetEntry));
-         pentry.next = entry.next;
-         self->els = tfat_setitem(self->els, prev, &pentry,
-                                   setentry_incref, setentry_decref);
-      }
-      // OVERWRITE found_index's slot with a tombstone via tfat_setitem() --
-      // must never be tfat_delitem(), which would shift every later index
-      // down by one; see the tombstone comment near setentry_is_tombstone()
-      // at the top of this file.
-      self->els = tfat_setitem(self->els, found_index, &tombstone,
-                                setentry_incref, setentry_decref);
-   }
-   self->count -= 1;
-   self->ndeleted += 1;
-   tset_invalidate_orig(self);
-   if (tset_maybe_compact(self) < 0) return NULL;
+   if (tset_update_one_locked(self, obj, 0) < 0) return NULL;
    Py_RETURN_NONE;
 }
 
-static int tset_contains(TSetObject* self, PyObject* el) {
+static int tset_contains_impl(TSetObject* self, PyObject* el) {
    trieint_t hkey;
    if (set_hash_key(el, &hkey) < 0) return -1;
-   return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL);
+   return set_chain_find(self->els, self->idx, hkey, el, NULL, NULL,
+                         &self->guard, (PyObject*)self);
 }
+PCOLL_LOCKED1(int, tset_contains, tset_contains_impl, TSetObject*, PyObject*)
 
 // Builds a fresh, freshly-populated tset out of a general Python iterable of
 // elements. Mirrors tset.__new__'s general-argument fallback in _set.py
@@ -730,6 +765,20 @@ static PyObject* tset_build_from_arg(PyObject* arg) {
    Py_DECREF(iterator);
    if (PyErr_Occurred()) { Py_DECREF(obj); return NULL; }
    return obj;
+}
+
+// Freezes the transient's tries and returns new references to them, for
+// sharing with another collection. Returns -1 (with RuntimeError set) if a
+// modification is in progress. The caller holds the transient's lock.
+static int tset_share(TSetObject* self, Trie_t* els, Trie_t* idx) {
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return -1;
+   fat_freeze(self->els);
+   amt_freeze(self->idx);
+   trienode_incref(self->els);
+   trienode_incref(self->idx);
+   *els = self->els;
+   *idx = self->idx;
+   return 0;
 }
 
 // Forward-declared: implemented after PSetType/pset_transient exist (the
@@ -762,14 +811,20 @@ static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       // matching _dict.py's own tdict.__new__ exactly. Adding it here too
       // keeps pset/tset "mostly identical to the dict types" as asked.)
       TSetObject* t = (TSetObject*)arg;
-      Trie_t els = t->els, idx = t->idx;
-      PyObject* orig = t->orig;
-      fat_freeze(els);
-      amt_freeze(idx);
-      trienode_incref(els);
-      trienode_incref(idx);
-      Py_XINCREF(orig);
-      return tset_wrap(els, idx, t->top, t->count, t->ndeleted, orig);
+      Trie_t els, idx;
+      PyObject* orig = NULL;
+      Py_ssize_t top = 0, count = 0, ndeleted = 0;
+      int rc;
+      PCOLL_BEGIN_LOCK(arg);
+      rc = tset_share(t, &els, &idx);
+      if (rc == 0) {
+         orig = t->orig;
+         Py_XINCREF(orig);
+         top = t->top; count = t->count; ndeleted = t->ndeleted;
+      }
+      PCOLL_END_LOCK();
+      if (rc < 0) return NULL;
+      return tset_wrap(els, idx, top, count, ndeleted, orig);
    }
    if (Py_TYPE(arg) == ST(PSetType)) {
       // tset(some_pset): exactly pset.transient()'s own O(1) sharing logic.
@@ -778,8 +833,9 @@ static PyObject* tset_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
    return tset_build_from_arg(arg);
 }
 
-static PyObject* tset_persistent(TSetObject* self, PyObject* Py_UNUSED(ignored)) {
+static PyObject* tset_persistent_impl(TSetObject* self) {
    Trie_t els, idx;
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
    if (self->count == 0) {
       Py_INCREF(ST(g_pset_empty));
       return (PyObject*)ST(g_pset_empty);
@@ -788,12 +844,13 @@ static PyObject* tset_persistent(TSetObject* self, PyObject* Py_UNUSED(ignored))
       Py_INCREF(self->orig);
       return self->orig;
    }
-   els = self->els; idx = self->idx;
-   fat_freeze(els);
-   amt_freeze(idx);
-   trienode_incref(els);
-   trienode_incref(idx);
+   if (tset_share(self, &els, &idx) < 0) return NULL;
    return pset_wrap(els, idx, self->top, self->count, self->ndeleted);
+}
+PCOLL_LOCKED0(PyObject*, tset_persistent_locked, tset_persistent_impl,
+              TSetObject*)
+static PyObject* tset_persistent(TSetObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tset_persistent_locked(self);
 }
 
 static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored)) {
@@ -809,17 +866,24 @@ static PyObject* pset_transient(PSetObject* self, PyObject* Py_UNUSED(ignored)) 
                      self->ndeleted, (PyObject*)self);
 }
 
-static PyObject* tset_clear_method(TSetObject* self, PyObject* Py_UNUSED(ignored)) {
+static PyObject* tset_clear_impl(TSetObject* self) {
    Trie_t els = self->els, idx = self->idx;
    PyObject* orig = self->orig;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return NULL;
+   tguard_keys_changed(&self->guard);
    self->els = fat_empty(SETELSLEAFSIZE);
    self->idx = amt_empty(SETIDXLEAFSIZE);
    self->top = 0; self->count = 0; self->ndeleted = 0;
    self->orig = NULL;
+   tguard_exit(&self->guard);
    fatnode_decref(els, setentry_decref);
    amtnode_decref(idx, noop_decref);
    Py_XDECREF(orig);
    Py_RETURN_NONE;
+}
+PCOLL_LOCKED0(PyObject*, tset_clear_locked, tset_clear_impl, TSetObject*)
+static PyObject* tset_clear_method(TSetObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tset_clear_locked(self);
 }
 
 static PyObject* tset_iter(TSetObject* self);
@@ -934,7 +998,14 @@ typedef struct {
    PyObject* owner;    // strong ref to the pset/tset being walked -- keeps
                        // `els` alive for the duration.
    TriePath path;
-   int state;          // 0 = not yet started, 1 = active, 2 = exhausted.
+   int state;          // 0 = not yet started, 1 = active, 2 = exhausted,
+                       // 3 = failed (the transient changed).
+   bool transient;     // whether owner is a tset.
+   // For a transient owner: see dict.c.h's DictIterObject.
+   Py_ssize_t count;
+   uint64_t version;
+   uint64_t keyversion;
+   trieint_t nextkey;
 } SetIterObject;
 
 static void setiter_dealloc(SetIterObject* self) {
@@ -949,28 +1020,61 @@ static int setiter_traverse(SetIterObject* self, visitproc visit, void* arg) {
    Py_VISIT(self->owner);
    return 0;
 }
-static Trie_t setiter_owner_els(SetIterObject* self) {
-   if (PyObject_TypeCheck(self->owner, ST(PSetType)))
-      return ((PSetObject*)self->owner)->els;
-   else
-      return ((TSetObject*)self->owner)->els;
-}
-static PyObject* setiter_next(SetIterObject* self) {
-   int ok;
+static PyObject* setiter_yield(SetIterObject* self, int ok) {
    SetEntry* e;
-   if (self->state == 2) return NULL;
-   if (self->state == 0) {
-      ok = fat_firstpath(setiter_owner_els(self), &self->path);
-      self->state = 1;
-   } else {
-      ok = fat_nextpath(&self->path);
-   }
    while (ok && setentry_is_tombstone((SetEntry*)triepath_val(&self->path)))
       ok = fat_nextpath(&self->path);
    if (!ok) { self->state = 2; return NULL; }
    e = (SetEntry*)triepath_val(&self->path);
+   self->nextkey = triepath_key(&self->path) + 1;
    Py_INCREF(e->key);
    return e->key;
+}
+// See dictiter_next_impl() in dict.c.h.
+static PyObject* setiter_next_impl(SetIterObject* self) {
+   if (self->state == 2) return NULL;
+   if (!self->transient) {
+      PSetObject* p = (PSetObject*)self->owner;
+      if (self->state == 0) {
+         self->state = 1;
+         return setiter_yield(self, fat_firstpath(p->els, &self->path));
+      }
+      return setiter_yield(self, fat_nextpath(&self->path));
+   } else {
+      TSetObject* t = (TSetObject*)self->owner;
+      const char* name = Py_TYPE(t)->tp_name;
+      int ok;
+      if (t->els == NULL) { self->state = 2; return NULL; }
+      if (self->state != 3 && t->count != self->count) {
+         self->state = 3;
+         PyErr_Format(PyExc_RuntimeError,
+                      "%.200s changed size during iteration", name);
+         return NULL;
+      }
+      if (self->state == 3 || t->guard.keyversion != self->keyversion) {
+         self->state = 3;
+         PyErr_Format(PyExc_RuntimeError,
+                      "%.200s changed during iteration", name);
+         return NULL;
+      }
+      if (self->state == 0) {
+         self->state = 1;
+         ok = fat_firstpath(t->els, &self->path);
+      } else if (t->guard.version != self->version) {
+         ok = fat_seekpath(t->els, self->nextkey, &self->path);
+      } else {
+         ok = fat_nextpath(&self->path);
+      }
+      self->version = t->guard.version;
+      return setiter_yield(self, ok);
+   }
+}
+static PyObject* setiter_next(SetIterObject* self) {
+   PyObject* r;
+   PCOLL_BEGIN_LOCK2((PyObject*)self, self->owner);
+   r = setiter_next_impl(self);
+   PCOLL_END_LOCK2();
+   return r;
 }
 static PyObject* setiter_self(PyObject* self) { Py_INCREF(self); return self; }
 
@@ -980,6 +1084,19 @@ static PyObject* make_setiter(PyTypeObject* itertype, PyObject* owner_set) {
    Py_INCREF(owner_set);
    it->owner = owner_set;
    it->state = 0;
+   it->transient = !PyObject_TypeCheck(owner_set, ST(PSetType));
+   it->count = 0;
+   it->version = 0;
+   it->keyversion = 0;
+   it->nextkey = 0;
+   if (it->transient) {
+      TSetObject* t = (TSetObject*)owner_set;
+      PCOLL_BEGIN_LOCK(owner_set);
+      it->count = t->count;
+      it->version = t->guard.version;
+      it->keyversion = t->guard.keyversion;
+      PCOLL_END_LOCK();
+   }
    PyObject_GC_Track(it);
    return (PyObject*)it;
 }

@@ -835,6 +835,75 @@ static inline int fat_nextpath(TriePath_t path) {
    return 1;
 }
 
+// Completes `path` from `node`, placed at level `top`, down to the first leaf
+// beneath it. Returns 0 only for an empty node.
+static inline int fat_path_descend(TriePath_t path, int top, Trie_t node) {
+   triebits_t bi;
+   while (!fatnode_is_twig(node)) {
+      bi = trienode_first_bitindex(node);
+      path->index[top] = (uint8_t)bi;
+      path->node[top] = node;
+      node = trienode_subt(node, bi);
+      ++top;
+   }
+   bi = trienode_first_bitindex(node);
+   if (bi >= FAT_CELLS)
+      return 0;
+   path->index[top] = (uint8_t)bi;
+   path->node[top] = node;
+   path->steps = (uint8_t)(top + 1);
+   path->value = trienode_leaf(node, bi);
+   return 1;
+}
+// Moves `path` to the first leaf after cell index[top] of node[top], climbing
+// toward the root as needed; levels below `top` are ignored. Returns 0 if
+// there is no such leaf (including when top < 0).
+static inline int fat_path_advance(TriePath_t path, int top) {
+   while (top >= 0) {
+      Trie_t node = path->node[top];
+      triebits_t bi = trienode_next_bitindex(node, path->index[top]);
+      if (bi < FAT_CELLS) {
+         path->index[top] = (uint8_t)bi;
+         if (fatnode_is_twig(node)) {
+            path->steps = (uint8_t)(top + 1);
+            path->value = trienode_leaf(node, bi);
+            return 1;
+         }
+         return fat_path_descend(path, top + 1, trienode_subt(node, bi));
+      }
+      --top;
+   }
+   return 0;
+}
+// Sets `path` to the first leaf of FAT `a` whose key is >= `key`. Returns 0
+// if there is none. Iterators use this to find their place again after the
+// tree they walk has changed.
+static inline int fat_seekpath(Trie_t a, trieint_t key, TriePath_t path) {
+   Trie_t node = a;
+   int top = 0;
+   triebits_t bi;
+   while (1) {
+      path->node[top] = node;
+      if (!fatnode_prefix_match(node, key)) {
+         // Everything beneath the node is either after the key or before it.
+         if (key < node->header.prefix)
+            return fat_path_descend(path, top, node);
+         return fat_path_advance(path, top - 1);
+      }
+      bi = (triebits_t)fatdepth_bitindex(node->header.depth, key);
+      path->index[top] = (uint8_t)bi;
+      if (!((node->header.bits >> bi) & TRIEBITS_1))
+         return fat_path_advance(path, top);
+      if (fatnode_is_twig(node)) {
+         path->steps = (uint8_t)(top + 1);
+         path->value = trienode_leaf(node, bi);
+         return 1;
+      }
+      node = trienode_subt(node, bi);
+      ++top;
+   }
+}
+
 #undef EXTC
 
 #endif  // ifndef _PCOLLECTIONS__C_TRIE_H

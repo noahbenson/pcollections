@@ -199,56 +199,55 @@ static int dict_hash_key(PyObject* key, trieint_t* out) {
 // tfat_setitem/tamt_setitem for transient) around them.
 
 // Looks up `key` (whose hash is already known) by walking its collision
-// chain in `els`, starting from the chain head recorded in `idx`. In BOTH
-// outcomes, *out_prev (if non-NULL) is set to the FAT index of the entry
-// immediately *before* the relevant point in the chain -- DICT_NO_NEXT if
-// there is no such entry (the hash isn't in `idx` at all, or the relevant
-// entry is the chain's own head). On success (`key` found) returns 1, sets
-// *out_index to the FAT index of the matching entry (*out_val, if non-NULL,
-// to that entry's value, borrowed), and *out_prev to the FAT index of the
-// entry immediately preceding *the match* in its chain -- exactly what
-// pdict_drop()/tdict_ass_subscript()'s __delitem__ path need to splice the
-// match back out. On "not found", returns 0 and *out_prev is set to the FAT
-// index of the chain's *last* entry instead -- exactly what's needed to
-// splice a brand new entry onto the end of the chain (or start a fresh one,
-// if *out_prev comes back DICT_NO_NEXT). Returns -1 (no exception set --
-// this never actually fails) only if defensive-programming paranoia demands
-// a tri-state return; in practice this function cannot fail, so callers
-// only ever see 0 or 1.
+// chain in `els`, starting from the chain head recorded in `idx`.
 //
-// NOTE: an earlier version of this function left *out_prev untouched on the
-// found (return 1) path, on the theory that only pdict_set()'s "not found"
-// insertion path ever needed it. That's wrong -- pdict_drop() and
-// tdict_ass_subscript()'s __delitem__ path call this with `found` always
-// true (dropping a key that isn't present short-circuits before ever
-// looking at `prev`) and unconditionally read *out_prev to decide how to
-// splice the match out of its chain, so leaving it unset meant reading
-// uninitialized stack garbage on every single deletion. Confirmed via a
-// dedicated debug walk (see the tombstone comment above) reproducing the
-// exact symptom: dropping a key from a same-hash chain of length > 1 took
-// the "non-head removal" branch (patch the previous link's `.next`) even
-// for chains of length 1, based on whatever garbage `prev` happened to
-// contain -- corrupting `idx` (left pointing at a slot about to become a
-// tombstone) far more often than not.
+// Returns 1 if `key` is found, setting *out_index to the matching entry's FAT
+// index, *out_val (if non-NULL) to its value (borrowed), and *out_prev (if
+// non-NULL) to the index of the entry before it in the chain, or
+// DICT_NO_NEXT if it is the chain's head; these are what a deletion needs to
+// unlink it. Returns 0 if `key` is absent, setting *out_prev to the index of
+// the chain's last entry, or DICT_NO_NEXT if there is no chain for the hash;
+// this is where an insertion links the new entry. Returns -1 with an
+// exception set if a comparison fails.
+//
+// Comparing keys calls user code. For a transient, `g` is its guard and
+// `owner` the transient: if the transient changes during a comparison, the
+// lookup raises RuntimeError rather than keep walking entries that may no
+// longer exist. For a persistent dict both are NULL.
 static int dict_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
-                            PyObject* key, trieint_t* out_index,
-                            PyObject** out_val, trieint_t* out_prev) {
+                           PyObject* key, trieint_t* out_index,
+                           PyObject** out_val, trieint_t* out_prev,
+                           const pcoll_tguard* g, PyObject* owner) {
    void* found;
    trieint_t ii;
    trieint_t prev = DICT_NO_NEXT;
+   uint64_t version = g ? g->version : 0;
    if (!amt_lookup(idx, hkey, &found)) {
       if (out_prev) *out_prev = DICT_NO_NEXT;
       return 0;
    }
    ii = *(trieint_t*)found;
    while (1) {
-      void* ep;
+      void* ep = NULL;
       DictEntry* e;
+      PyObject* ekey;
       int eq;
       fat_lookup(els, ii, &ep);
       e = (DictEntry*)ep;
-      eq = PyObject_RichCompareBool(key, e->key, Py_EQ);
-      if (eq < 0) return -1;
+      ekey = e->key;
+      if (ekey == key) {
+         eq = 1;
+      } else {
+         Py_INCREF(ekey);
+         eq = PyObject_RichCompareBool(key, ekey, Py_EQ);
+         Py_DECREF(ekey);
+         if (g && g->version != version) {
+            if (eq >= 0)
+               tguard_lookup_error(Py_TYPE(owner)->tp_name);
+            return -1;
+         }
+         if (eq < 0) return -1;
+      }
       if (eq) {
          if (out_index) *out_index = ii;
          if (out_val) *out_val = e->val;
@@ -261,6 +260,21 @@ static int dict_chain_find(Trie_t els, Trie_t idx, trieint_t hkey,
    }
    if (out_prev) *out_prev = prev;
    return 0;
+}
+
+// Returns the index of the last entry in the chain for `hkey`, or
+// DICT_NO_NEXT if there is no such chain. Calls no user code.
+static trieint_t dict_chain_tail(Trie_t els, Trie_t idx, trieint_t hkey) {
+   void* found;
+   trieint_t ii;
+   if (!amt_lookup(idx, hkey, &found)) return DICT_NO_NEXT;
+   ii = *(trieint_t*)found;
+   while (1) {
+      void* ep = NULL;
+      fat_lookup(els, ii, &ep);
+      if (((DictEntry*)ep)->next == DICT_NO_NEXT) return ii;
+      ii = ((DictEntry*)ep)->next;
+   }
 }
 
 
@@ -416,33 +430,19 @@ static int dict_rebuild_compacted(Trie_t els, Trie_t idx,
          amtnode_decref(new_idx, noop_decref);
          return -1;
       }
-      // Every key here is, by construction, not yet present in the fresh
-      // tables, so this always appends a brand new chain link -- exactly
-      // the "not found" half of dict_chain_find's contract.
-      dict_chain_find(new_els, new_idx, hkey, e->key, NULL, NULL, &prev);
+      // The keys are distinct, so each one starts a new chain or extends
+      // an existing one; no comparisons (and so no user code) are needed.
+      prev = dict_chain_tail(new_els, new_idx, hkey);
       if (prev == DICT_NO_NEXT) {
-         // Either a genuinely empty chain (first key with this hash) --
-         // check idx directly to tell the two apart -- or the chain's tail.
-         void* found;
-         if (!amt_lookup(new_idx, hkey, &found)) {
-            trieint_t idxval = newtop;
-            new_idx = tamt_setitem(new_idx, hkey, &idxval, noop_incref, noop_decref);
-         } else {
-            void* ep; DictEntry patched;
-            trieint_t tailidx = *(trieint_t*)found;
-            fat_lookup(new_els, tailidx, &ep);
-            memcpy(&patched, ep, sizeof(DictEntry));
-            patched.next = newtop;
-            new_els = tfat_setitem(new_els, tailidx, &patched,
-                                    dictentry_incref, dictentry_decref);
-         }
+         trieint_t idxval = newtop;
+         new_idx = tamt_setitem(new_idx, hkey, &idxval, noop_incref, noop_decref);
       } else {
          void* ep; DictEntry patched;
          fat_lookup(new_els, prev, &ep);
          memcpy(&patched, ep, sizeof(DictEntry));
          patched.next = newtop;
          new_els = tfat_setitem(new_els, prev, &patched,
-                                 dictentry_incref, dictentry_decref);
+                                dictentry_incref, dictentry_decref);
       }
       newentry.key = e->key;
       newentry.val = e->val;
@@ -511,7 +511,8 @@ static Py_hash_t pdict_hash(PDictObject* self) {
    Py_hash_t result;
    TriePath iter;
    int ok;
-   if (self->hashcode != -1) return self->hashcode;
+   result = PCOLL_HASH_LOAD(self->hashcode);
+   if (result != -1) return result;
    fs = PySet_New(NULL);
    if (!fs) return -1;
    for (ok = fat_firstpath(self->els, &iter); ok; ok = fat_nextpath(&iter)) {
@@ -533,7 +534,7 @@ static Py_hash_t pdict_hash(PDictObject* self) {
    if (result == -1) return -1;
    result += 2;
    if (result == -1) result = -2;
-   self->hashcode = result;
+   PCOLL_HASH_STORE(self->hashcode, result);
    return result;
 }
 
@@ -541,9 +542,12 @@ static PyObject* pdict_subscript(PDictObject* self, PyObject* key) {
    trieint_t hkey;
    trieint_t found_index;
    PyObject* val;
+   int found;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
-   if (!dict_chain_find(self->els, self->idx, hkey, key, &found_index, &val, NULL)) {
-      PyErr_SetObject(PyExc_KeyError, key);
+   found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
+                           &val, NULL, NULL, NULL);
+   if (found <= 0) {
+      if (found == 0) PyErr_SetObject(PyExc_KeyError, key);
       return NULL;
    }
    Py_INCREF(val);
@@ -554,9 +558,13 @@ static PyObject* pdict_get(PDictObject* self, PyObject* args) {
    PyObject* deflt = Py_None;
    trieint_t hkey;
    PyObject* val;
+   int found;
    if (!PyArg_ParseTuple(args, "O|O", &key, &deflt)) return NULL;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
-   if (!dict_chain_find(self->els, self->idx, hkey, key, NULL, &val, NULL)) {
+   found = dict_chain_find(self->els, self->idx, hkey, key, NULL, &val,
+                           NULL, NULL, NULL);
+   if (found < 0) return NULL;
+   if (!found) {
       Py_INCREF(deflt);
       return deflt;
    }
@@ -566,7 +574,8 @@ static PyObject* pdict_get(PDictObject* self, PyObject* args) {
 static int pdict_contains(PDictObject* self, PyObject* key) {
    trieint_t hkey;
    if (dict_hash_key(key, &hkey) < 0) return -1;
-   return dict_chain_find(self->els, self->idx, hkey, key, NULL, NULL, NULL);
+   return dict_chain_find(self->els, self->idx, hkey, key, NULL, NULL, NULL,
+                          NULL, NULL);
 }
 
 static PyObject* pdict_set(PDictObject* self, PyObject* args) {
@@ -581,7 +590,7 @@ static PyObject* pdict_set(PDictObject* self, PyObject* args) {
    if (!PyArg_ParseTuple(args, "OO", &key, &val)) return NULL;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
    found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                            &old_val, &prev);
+                           &old_val, &prev, NULL, NULL);
    if (found < 0) return NULL;
    if (found) {
       DictEntry entry;
@@ -650,7 +659,8 @@ static PyObject* pdict_drop(PDictObject* self, PyObject* key) {
    Trie_t new_els, new_idx;
    Py_ssize_t new_count, new_ndeleted;
    if (dict_hash_key(key, &hkey) < 0) return NULL;
-   found = dict_chain_find(self->els, self->idx, hkey, key, &found_index, NULL, &prev);
+   found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
+                           NULL, &prev, NULL, NULL);
    if (found < 0) return NULL;
    if (!found) {
       Py_INCREF(self);
@@ -784,6 +794,7 @@ typedef struct {
    PyObject* orig;          // cached pdict (owned ref), or NULL -- see the
                             // matching field on TListObject in list.c.h for
                             // the exact caching/invalidation convention.
+   pcoll_tguard guard;      // see core.h.
 } TDictObject;
 
 static int tdict_traverse(TDictObject* self, visitproc visit, void* arg) {
@@ -812,9 +823,10 @@ static void tdict_dealloc(TDictObject* self) {
    tp->tp_free((PyObject*)self);
    Py_DECREF(tp);
 }
-static Py_ssize_t tdict_length(TDictObject* self) {
+static Py_ssize_t tdict_length_impl(TDictObject* self) {
    return self->count;
 }
+PCOLL_LOCKED0(Py_ssize_t, tdict_length, tdict_length_impl, TDictObject*)
 // `type` must be TDictType or a subtype of it (see the analogous note on
 // pdict_wrap_astype() above); `tdict_wrap()` below is the TDictType-only
 // convenience wrapper used at call sites that (per the reference _dict.py)
@@ -848,6 +860,20 @@ static void tdict_invalidate_orig(TDictObject* self) {
    PyObject* orig = self->orig;
    self->orig = NULL;
    Py_XDECREF(orig);
+}
+
+// Freezes the transient's tries and returns new references to them, for
+// sharing with another collection. Returns -1 (with RuntimeError set) if a
+// modification is in progress. The caller holds the transient's lock.
+static int tdict_share(TDictObject* self, Trie_t* els, Trie_t* idx) {
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return -1;
+   fat_freeze(self->els);
+   amt_freeze(self->idx);
+   trienode_incref(self->els);
+   trienode_incref(self->idx);
+   *els = self->els;
+   *idx = self->idx;
+   return 0;
 }
 
 static PyObject* tdict_empty_astype(PyTypeObject* type) {
@@ -950,14 +976,20 @@ static PyObject* tdict_new(PyTypeObject* type, PyObject* args, PyObject* kwds) {
       // cached original pdict, this new tdict is (right now) an exact copy
       // of that same pdict too, so it's valid to share that same cache.
       TDictObject* t = (TDictObject*)arg;
-      Trie_t els = t->els, idx = t->idx;
-      PyObject* orig = t->orig;
-      fat_freeze(els);
-      amt_freeze(idx);
-      trienode_incref(els);
-      trienode_incref(idx);
-      Py_XINCREF(orig);
-      obj = tdict_wrap_astype(type, els, idx, t->top, t->count, t->ndeleted, orig);
+      Trie_t els, idx;
+      PyObject* orig = NULL;
+      Py_ssize_t top = 0, count = 0, ndeleted = 0;
+      int rc;
+      PCOLL_BEGIN_LOCK(arg);
+      rc = tdict_share(t, &els, &idx);
+      if (rc == 0) {
+         orig = t->orig;
+         Py_XINCREF(orig);
+         top = t->top; count = t->count; ndeleted = t->ndeleted;
+      }
+      PCOLL_END_LOCK();
+      if (rc < 0) return NULL;
+      obj = tdict_wrap_astype(type, els, idx, top, count, ndeleted, orig);
    } else if (Py_TYPE(arg) == ST(PDictType)) {
       // tdict(some_pdict): the same O(1) sharing logic as pdict_transient()
       // (below), just parameterized by `type` instead of hardcoded to
@@ -1013,153 +1045,185 @@ static PyObject* tdict_str(TDictObject* self) {
    return result;
 }
 
-static PyObject* tdict_subscript(TDictObject* self, PyObject* key) {
-   trieint_t hkey; PyObject* val;
-   if (dict_hash_key(key, &hkey) < 0) return NULL;
-   if (!dict_chain_find(self->els, self->idx, hkey, key, NULL, &val, NULL)) {
-      PyErr_SetObject(PyExc_KeyError, key);
-      return NULL;
+// Looks `key` up in the transient; returns as dict_chain_find() does, with
+// *out_val set to a new reference on success. The hash is computed first,
+// since __hash__ may itself change the transient.
+static int tdict_lookup(TDictObject* self, PyObject* key, PyObject** out_val) {
+   trieint_t hkey;
+   PyObject* val;
+   int found;
+   if (dict_hash_key(key, &hkey) < 0) return -1;
+   found = dict_chain_find(self->els, self->idx, hkey, key, NULL, &val, NULL,
+                           &self->guard, (PyObject*)self);
+   if (found > 0 && out_val) {
+      Py_INCREF(val);
+      *out_val = val;
    }
-   Py_INCREF(val);
+   return found;
+}
+static PyObject* tdict_subscript_impl(TDictObject* self, PyObject* key) {
+   PyObject* val = NULL;
+   int found = tdict_lookup(self, key, &val);
+   if (found == 0) PyErr_SetObject(PyExc_KeyError, key);
    return val;
 }
-static PyObject* tdict_get(TDictObject* self, PyObject* args) {
+PCOLL_LOCKED1(PyObject*, tdict_subscript, tdict_subscript_impl,
+              TDictObject*, PyObject*)
+static PyObject* tdict_get_impl(TDictObject* self, PyObject* args) {
    PyObject* key; PyObject* deflt = Py_None;
-   trieint_t hkey; PyObject* val;
+   PyObject* val = NULL;
+   int found;
    if (!PyArg_ParseTuple(args, "O|O", &key, &deflt)) return NULL;
-   if (dict_hash_key(key, &hkey) < 0) return NULL;
-   if (!dict_chain_find(self->els, self->idx, hkey, key, NULL, &val, NULL)) {
+   found = tdict_lookup(self, key, &val);
+   if (found < 0) return NULL;
+   if (!found) {
       Py_INCREF(deflt);
       return deflt;
    }
-   Py_INCREF(val);
    return val;
 }
-static int tdict_contains(TDictObject* self, PyObject* key) {
-   trieint_t hkey;
-   if (dict_hash_key(key, &hkey) < 0) return -1;
-   return dict_chain_find(self->els, self->idx, hkey, key, NULL, NULL, NULL);
+PCOLL_LOCKED1(PyObject*, tdict_get, tdict_get_impl, TDictObject*, PyObject*)
+static int tdict_contains_impl(TDictObject* self, PyObject* key) {
+   return tdict_lookup(self, key, NULL);
 }
+PCOLL_LOCKED1(int, tdict_contains, tdict_contains_impl, TDictObject*, PyObject*)
 
 // Maybe-compact a tdict in place after a mutation. Always succeeds unless
 // re-hashing a key fails (see dict_rebuild_compacted).
 static int tdict_maybe_compact(TDictObject* self) {
    Trie_t c_els, c_idx; Py_ssize_t c_top;
    if (!dict_should_compact(self->count, self->ndeleted)) return 0;
-   if (dict_rebuild_compacted(self->els, self->idx, &c_els, &c_idx, &c_top) < 0)
+   Trie_t old_els = self->els, old_idx = self->idx;
+   if (dict_rebuild_compacted(old_els, old_idx, &c_els, &c_idx, &c_top) < 0)
       return -1;
-   fatnode_decref(self->els, dictentry_decref);
-   amtnode_decref(self->idx, noop_decref);
    self->els = c_els; self->idx = c_idx; self->top = c_top; self->ndeleted = 0;
+   fatnode_decref(old_els, dictentry_decref);
+   amtnode_decref(old_idx, noop_decref);
    return 0;
 }
 
-static int tdict_ass_subscript(TDictObject* self, PyObject* key, PyObject* val) {
-   trieint_t hkey;
+// The body of tdict_ass_subscript(), run with the guard held.
+static int tdict_ass_subscript_guarded(TDictObject* self, trieint_t hkey,
+                                       PyObject* key, PyObject* val) {
    trieint_t found_index, prev;
    PyObject* old_val;
    int found;
-   if (dict_hash_key(key, &hkey) < 0) return -1;
+   found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
+                           &old_val, &prev, &self->guard, (PyObject*)self);
+   if (found < 0) return -1;
    if (val == NULL) {
       // __delitem__.
-      found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                               NULL, &prev);
-      if (found < 0) return -1;
+      void* ep; DictEntry entry; DictEntry tombstone;
       if (!found) {
          PyErr_SetObject(PyExc_KeyError, key);
          return -1;
       }
-      {
-         void* ep; DictEntry entry; DictEntry tombstone;
-         fat_lookup(self->els, found_index, &ep);
-         memcpy(&entry, ep, sizeof(DictEntry));
-         dict_make_tombstone(&tombstone);
-         if (prev == DICT_NO_NEXT) {
-            if (entry.next == DICT_NO_NEXT)
-               self->idx = tamt_delitem(self->idx, hkey, noop_incref, noop_decref);
-            else {
-               trieint_t idxval = entry.next;
-               self->idx = tamt_setitem(self->idx, hkey, &idxval, noop_incref, noop_decref);
-            }
-         } else {
-            void* pp; DictEntry pentry;
-            fat_lookup(self->els, prev, &pp);
-            memcpy(&pentry, pp, sizeof(DictEntry));
-            pentry.next = entry.next;
-            self->els = tfat_setitem(self->els, prev, &pentry,
-                                      dictentry_incref, dictentry_decref);
+      tguard_keys_changed(&self->guard);
+      fat_lookup(self->els, found_index, &ep);
+      memcpy(&entry, ep, sizeof(DictEntry));
+      dict_make_tombstone(&tombstone);
+      if (prev == DICT_NO_NEXT) {
+         if (entry.next == DICT_NO_NEXT)
+            self->idx = tamt_delitem(self->idx, hkey, noop_incref, noop_decref);
+         else {
+            trieint_t idxval = entry.next;
+            self->idx = tamt_setitem(self->idx, hkey, &idxval, noop_incref, noop_decref);
          }
-         // OVERWRITE found_index's slot with a tombstone via tfat_setitem()
-         // -- must never be tfat_delitem()/fat_butitem(), which would shift
-         // every later index down by one and invalidate idx/collision-chain
-         // pointers; see the tombstone comment near dictentry_is_tombstone().
-         self->els = tfat_setitem(self->els, found_index, &tombstone,
-                                   dictentry_incref, dictentry_decref);
+      } else {
+         void* pp; DictEntry pentry;
+         fat_lookup(self->els, prev, &pp);
+         memcpy(&pentry, pp, sizeof(DictEntry));
+         pentry.next = entry.next;
+         tfat_setitem_at(&self->els, prev, &pentry,
+                         dictentry_incref, dictentry_decref);
       }
       self->count -= 1;
       self->ndeleted += 1;
+      // OVERWRITE found_index's slot with a tombstone -- never delete it,
+      // which would shift every later index down by one and invalidate the
+      // idx/collision-chain pointers; see the tombstone comment near
+      // dictentry_is_tombstone().
+      tfat_setitem_at(&self->els, found_index, &tombstone,
+                      dictentry_incref, dictentry_decref);
       tdict_invalidate_orig(self);
-      if (tdict_maybe_compact(self) < 0) return -1;
-      return 0;
+      return tdict_maybe_compact(self);
    }
    // __setitem__.
-   found = dict_chain_find(self->els, self->idx, hkey, key, &found_index,
-                            &old_val, &prev);
-   if (found < 0) return -1;
    if (found) {
       if (val != old_val) {
          void* ep; DictEntry entry;
+         tguard_changed(&self->guard);
          fat_lookup(self->els, found_index, &ep);
          memcpy(&entry, ep, sizeof(DictEntry));
          entry.val = val;
-         self->els = tfat_setitem(self->els, found_index, &entry,
-                                   dictentry_incref, dictentry_decref);
+         tfat_setitem_at(&self->els, found_index, &entry,
+                         dictentry_incref, dictentry_decref);
          tdict_invalidate_orig(self);
       }
       return 0;
    }
    {
       DictEntry entry;
+      trieint_t newindex = (trieint_t)self->top;
+      tguard_keys_changed(&self->guard);
       entry.key = key; entry.val = val; entry.next = DICT_NO_NEXT;
-      self->els = tfat_setitem(self->els, (trieint_t)self->top, &entry,
-                                dictentry_incref, dictentry_decref);
+      tfat_setitem_at(&self->els, newindex, &entry,
+                      dictentry_incref, dictentry_decref);
       if (prev == DICT_NO_NEXT) {
-         trieint_t idxval = (trieint_t)self->top;
-         self->idx = tamt_setitem(self->idx, hkey, &idxval, noop_incref, noop_decref);
+         self->idx = tamt_setitem(self->idx, hkey, &newindex, noop_incref, noop_decref);
       } else {
          void* ep; DictEntry patched;
          fat_lookup(self->els, prev, &ep);
          memcpy(&patched, ep, sizeof(DictEntry));
-         patched.next = (trieint_t)self->top;
-         self->els = tfat_setitem(self->els, prev, &patched,
-                                   dictentry_incref, dictentry_decref);
+         patched.next = newindex;
+         tfat_setitem_at(&self->els, prev, &patched,
+                         dictentry_incref, dictentry_decref);
       }
+      self->top += 1;
+      self->count += 1;
    }
-   self->top += 1;
-   self->count += 1;
    tdict_invalidate_orig(self);
-   if (tdict_maybe_compact(self) < 0) return -1;
-   return 0;
+   return tdict_maybe_compact(self);
 }
 
-static PyObject* tdict_clear_method(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+static int tdict_ass_subscript_impl(TDictObject* self, PyObject* key, PyObject* val) {
+   trieint_t hkey;
+   int rc;
+   if (dict_hash_key(key, &hkey) < 0) return -1;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return -1;
+   rc = tdict_ass_subscript_guarded(self, hkey, key, val);
+   tguard_exit(&self->guard);
+   return rc;
+}
+PCOLL_LOCKED2(int, tdict_ass_subscript, tdict_ass_subscript_impl,
+              TDictObject*, PyObject*, PyObject*)
+
+static PyObject* tdict_clear_impl(TDictObject* self) {
    Trie_t old_els = self->els, old_idx = self->idx;
    PyObject* old_orig = self->orig;
+   if (tguard_enter(&self->guard, (PyObject*)self) < 0) return NULL;
+   tguard_keys_changed(&self->guard);
    self->els = fat_empty(ELSLEAFSIZE);
    self->idx = amt_empty(IDXLEAFSIZE);
    self->top = 0; self->count = 0; self->ndeleted = 0;
    self->orig = NULL;
+   tguard_exit(&self->guard);
    fatnode_decref(old_els, dictentry_decref);
    amtnode_decref(old_idx, noop_decref);
    Py_XDECREF(old_orig);
    Py_RETURN_NONE;
 }
+PCOLL_LOCKED0(PyObject*, tdict_clear_locked, tdict_clear_impl, TDictObject*)
+static PyObject* tdict_clear_method(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tdict_clear_locked(self);
+}
 
 static PyObject* pdict_wrap(Trie_t els, Trie_t idx, Py_ssize_t top,
                              Py_ssize_t count, Py_ssize_t ndeleted);
 
-static PyObject* tdict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+static PyObject* tdict_persistent_impl(TDictObject* self) {
    Trie_t els, idx;
+   if (tguard_check(&self->guard, (PyObject*)self) < 0) return NULL;
    if (self->count == 0) {
       Py_INCREF(ST(g_pdict_empty));
       return (PyObject*)ST(g_pdict_empty);
@@ -1168,12 +1232,13 @@ static PyObject* tdict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored
       Py_INCREF(self->orig);
       return self->orig;
    }
-   els = self->els; idx = self->idx;
-   fat_freeze(els);
-   amt_freeze(idx);
-   trienode_incref(els);
-   trienode_incref(idx);
+   if (tdict_share(self, &els, &idx) < 0) return NULL;
    return pdict_wrap(els, idx, self->top, self->count, self->ndeleted);
+}
+PCOLL_LOCKED0(PyObject*, tdict_persistent_locked, tdict_persistent_impl,
+              TDictObject*)
+static PyObject* tdict_persistent(TDictObject* self, PyObject* Py_UNUSED(ignored)) {
+   return tdict_persistent_locked(self);
 }
 
 static PyObject* tdict_keys(TDictObject* self, PyObject* Py_UNUSED(ignored));
@@ -1280,12 +1345,22 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
       // opposed to a *persistent* one).
       if (PyObject_TypeCheck(arg, ST(TDictType))) {
          TDictObject* t2 = (TDictObject*)arg;
-         Trie_t els = t2->els, idx = t2->idx;
-         fat_freeze(els);
-         amt_freeze(idx);
-         trienode_incref(els);
-         trienode_incref(idx);
-         return pdict_wrap_astype(type, els, idx, t2->top, t2->count, t2->ndeleted);
+         Trie_t els, idx;
+         Py_ssize_t top = 0, count = 0, ndeleted = 0;
+         int rc;
+         PCOLL_BEGIN_LOCK(arg);
+         rc = tdict_share(t2, &els, &idx);
+         if (rc == 0) {
+            top = t2->top; count = t2->count; ndeleted = t2->ndeleted;
+         }
+         PCOLL_END_LOCK();
+         if (rc < 0) return NULL;
+         if (count == 0 && type != ST(PDictType)) {
+            fatnode_decref(els, dictentry_decref);
+            amtnode_decref(idx, noop_decref);
+            return pdict_type_empty(type);
+         }
+         return pdict_wrap_astype(type, els, idx, top, count, ndeleted);
       }
       if (Py_TYPE(arg) == type) {
          // type(arg) is cls in the reference: arg is already exactly the
@@ -1325,11 +1400,8 @@ static PyObject* pdict_new_dispatch(PyTypeObject* type, PyObject* arg, PyObject*
          Py_DECREF(t);
          result = pdict_type_empty(type);
       } else {
-         Trie_t els = tobj->els, idx = tobj->idx;
-         fat_freeze(els);
-         amt_freeze(idx);
-         trienode_incref(els);
-         trienode_incref(idx);
+         Trie_t els, idx;
+         (void)tdict_share(tobj, &els, &idx);  // tobj is private: cannot fail.
          result = pdict_wrap_astype(type, els, idx, tobj->top, tobj->count,
                                       tobj->ndeleted);
          Py_DECREF(t);
@@ -1365,8 +1437,16 @@ typedef struct {
    PyObject* owner;    // strong ref to the pdict/tdict being walked (never a
                        // view object) -- keeps `els` alive for the duration.
    TriePath path;
-   int state;          // 0 = not yet started, 1 = active, 2 = exhausted.
+   int state;          // 0 = not yet started, 1 = active, 2 = exhausted,
+                       // 3 = failed (the transient changed).
    DictIterMode mode;
+   bool transient;     // whether owner is a tdict.
+   // For a transient owner: its size and guard counters when the iterator
+   // was created or last moved (see dictiter_next()).
+   Py_ssize_t count;
+   uint64_t version;
+   uint64_t keyversion;
+   trieint_t nextkey;  // the key after the last one yielded.
 } DictIterObject;
 
 static void dictiter_dealloc(DictIterObject* self) {
@@ -1381,33 +1461,17 @@ static int dictiter_traverse(DictIterObject* self, visitproc visit, void* arg) {
    Py_VISIT(self->owner);
    return 0;
 }
-static Trie_t dictiter_owner_els(DictIterObject* self) {
-   // PyObject_TypeCheck (isinstance-equivalent), not an exact Py_TYPE()
-   // match: self->owner may now be an ldict/tldict (pcollections._c._core)
-   // rather than a plain pdict/tdict, and must still be routed to the
-   // right struct layout by *family* (persistent vs transient), not by
-   // exact class.
-   if (PyObject_TypeCheck(self->owner, ST(PDictType)))
-      return ((PDictObject*)self->owner)->els;
-   else
-      return ((TDictObject*)self->owner)->els;
-}
-static PyObject* dictiter_next(DictIterObject* self) {
-   int ok;
+// Finds the first live entry at or after the path's current position
+// (`ok` says whether there is one) and returns it in the iterator's mode.
+static PyObject* dictiter_yield(DictIterObject* self, int ok) {
    DictEntry* e;
-   if (self->state == 2) return NULL;
-   if (self->state == 0) {
-      ok = fat_firstpath(dictiter_owner_els(self), &self->path);
-      self->state = 1;
-   } else {
-      ok = fat_nextpath(&self->path);
-   }
    // Skip tombstoned (deleted-but-not-yet-compacted) slots -- see the
    // tombstone comment near dictentry_is_tombstone() above.
    while (ok && dictentry_is_tombstone((DictEntry*)triepath_val(&self->path)))
       ok = fat_nextpath(&self->path);
    if (!ok) { self->state = 2; return NULL; }
    e = (DictEntry*)triepath_val(&self->path);
+   self->nextkey = triepath_key(&self->path) + 1;
    switch (self->mode) {
       case DICTITER_KEYS:
          Py_INCREF(e->key);
@@ -1419,6 +1483,60 @@ static PyObject* dictiter_next(DictIterObject* self) {
          return PyTuple_Pack(2, e->key, e->val);
    }
 }
+// A persistent owner never changes, so its iterator just walks the trie. A
+// transient owner may change between steps, and its iterator's path may then
+// point at nodes that no longer exist; so, like the builtin dict's iterators,
+// the iterator raises RuntimeError if the size or the set of keys changed,
+// and otherwise (only values were replaced) finds its place again by key.
+static PyObject* dictiter_next_impl(DictIterObject* self) {
+   Trie_t els;
+   int ok;
+   if (self->state == 2) return NULL;
+   if (!self->transient) {
+      PDictObject* p = (PDictObject*)self->owner;
+      if (self->state == 0) {
+         self->state = 1;
+         return dictiter_yield(self, fat_firstpath(p->els, &self->path));
+      }
+      return dictiter_yield(self, fat_nextpath(&self->path));
+   } else {
+      TDictObject* t = (TDictObject*)self->owner;
+      const char* name = Py_TYPE(t)->tp_name;
+      PyObject* result;
+      els = t->els;
+      if (els == NULL) { self->state = 2; return NULL; }
+      if (self->state != 3 && t->count != self->count) {
+         self->state = 3;
+         PyErr_Format(PyExc_RuntimeError,
+                      "%.200s changed size during iteration", name);
+         return NULL;
+      }
+      if (self->state == 3 || t->guard.keyversion != self->keyversion) {
+         self->state = 3;
+         PyErr_Format(PyExc_RuntimeError,
+                      "%.200s keys changed during iteration", name);
+         return NULL;
+      }
+      if (self->state == 0) {
+         self->state = 1;
+         ok = fat_firstpath(els, &self->path);
+      } else if (t->guard.version != self->version) {
+         ok = fat_seekpath(els, self->nextkey, &self->path);
+      } else {
+         ok = fat_nextpath(&self->path);
+      }
+      self->version = t->guard.version;
+      result = dictiter_yield(self, ok);
+      return result;
+   }
+}
+static PyObject* dictiter_next(DictIterObject* self) {
+   PyObject* r;
+   PCOLL_BEGIN_LOCK2((PyObject*)self, self->owner);
+   r = dictiter_next_impl(self);
+   PCOLL_END_LOCK2();
+   return r;
+}
 static PyObject* dictiter_self(PyObject* self) { Py_INCREF(self); return self; }
 
 static PyObject* make_dictiter(PyTypeObject* itertype, PyObject* owner_dict,
@@ -1429,6 +1547,18 @@ static PyObject* make_dictiter(PyTypeObject* itertype, PyObject* owner_dict,
    it->owner = owner_dict;
    it->state = 0;
    it->mode = mode;
+   it->transient = !PyObject_TypeCheck(owner_dict, ST(PDictType));
+   it->count = 0;
+   it->version = 0;
+   it->keyversion = 0;
+   if (it->transient) {
+      TDictObject* t = (TDictObject*)owner_dict;
+      PCOLL_BEGIN_LOCK(owner_dict);
+      it->count = t->count;
+      it->version = t->guard.version;
+      it->keyversion = t->guard.keyversion;
+      PCOLL_END_LOCK();
+   }
    PyObject_GC_Track(it);
    return (PyObject*)it;
 }

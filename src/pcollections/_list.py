@@ -20,6 +20,8 @@ from ._trie import (
 )
 
 from .abc import (PersistentSequence, TransientSequence)
+from ._guard import (TListIter, updating, new_busy_flag, begin_update,
+                     end_update)
 
 
 #===============================================================================
@@ -46,10 +48,10 @@ class plist(PersistentSequence):
         arg = args[0]
         # If arg is a tlist, this is a special case.
         if isinstance(arg, tlist):
-            if len(arg) == 0:
+            (th, start, _) = arg._snapshot()
+            if len(th) == 0:
                 return cls.empty
-            else:
-                return cls._new(arg._thamt.persistent(), arg._start)
+            return cls._new(th, start)
         elif isinstance(arg, cls):
             return arg
         elif isinstance(arg, plist):
@@ -229,7 +231,7 @@ class tlist(TransientSequence):
     def empty(cls):
         "Returns an empty tlist."
         return cls._new(THAMT(PHAMT.empty), 0)
-    __slots__ = ("_thamt", "_start", "_orig")
+    __slots__ = ("_thamt", "_start", "_orig", "_version", "_busy")
     def __new__(cls, *args, **kw):
         if len(kw) > 0:
             raise TypeError("tlist() takes no keyword arguments")
@@ -253,21 +255,56 @@ class tlist(TransientSequence):
         object.__setattr__(new_tlist, '_thamt', thamt)
         object.__setattr__(new_tlist, '_start', start)
         object.__setattr__(new_tlist, '_orig', orig)
+        object.__setattr__(new_tlist, '_version', 0)
+        object.__setattr__(new_tlist, '_busy', new_busy_flag())
         return new_tlist
+    def _changed(self):
+        object.__setattr__(self, '_version', self._version + 1)
+        object.__setattr__(self, '_orig', None)
+    @updating
     def clear(self):
         """Clears all elements from the tlist."""
+        self._changed()
         object.__setattr__(self, '_thamt', THAMT(PHAMT.empty))
         object.__setattr__(self, '_start', 0)
         object.__setattr__(self, '_orig', None)
+    def _snapshot(self):
+        """Returns `(trie, start, orig)`, with the trie frozen, for sharing
+        with another collection."""
+        begin_update(self, False)
+        try:
+            return (self._thamt.persistent(), self._start, self._orig)
+        finally:
+            end_update(self)
+    def _persistent_as(self, cls):
+        (th, start, orig) = self._snapshot()
+        if len(th) == 0:
+            return cls.empty
+        elif orig is not None:
+            return orig
+        else:
+            return cls._new(th, start)
     def persistent(self):
         """Efficiently copies the tlist into a plist and returns the plist."""
-        if len(self._thamt) == 0:
-            return plist.empty
-        elif self._orig is None:
-            return plist._new(self._thamt.persistent(), self._start)
-        else:
-            return self._orig
+        return self._persistent_as(plist)
     def __iter__(self):
+        return TListIter(self)
+    def _raw_item(self, k, v=None):
+        # Returns element k (already normalized), checking that the list has
+        # not changed since version v.
+        if v is None:
+            v = self._version
+        try:
+            if not (v & 1):
+                x = self._thamt[k + self._start]
+                if self._version == v:
+                    return x
+        except LookupError:
+            # Another thread changed the list as we read it.
+            if self._version == v:
+                raise
+        raise RuntimeError(f"{type(self).__name__} changed during a lookup")
+    def _fast_iter(self):
         st = self._start
         th = self._thamt
         n = len(th)
@@ -280,6 +317,7 @@ class tlist(TransientSequence):
         """Returns the length of the tlist."""
         return len(self._thamt)
     def __getitem__(self, k):
+        v = self._version
         st = self._start
         thamt = self._thamt
         n = len(thamt)
@@ -296,21 +334,23 @@ class tlist(TransientSequence):
                 stop += st
             new_thamt = THAMT(PHAMT.empty)
             for (ii,jj) in enumerate(range(start, stop, step)):
-                new_thamt[ii] = thamt[jj]
+                new_thamt[ii] = self._raw_item(jj - st, v)
             return self._new(new_thamt, 0)
         elif k >= n or k < -n:
             raise IndexError("tlist index out of range")
         elif k < 0:
             k += n
-        return thamt[k + st]
+        return self._raw_item(k, v)
+    @updating
     def __setitem__(self, k, v):
         n = len(self._thamt)
         if k >= n or k < -n:
             raise IndexError(k)
         elif k < 0:
             k += n
+        self._changed()
         self._thamt[k + self._start] = v
-        object.__setattr__(self, '_orig', None)
+    @updating
     def __delitem__(self, index=-1):
         """Remove and return item at index (default last).
 
@@ -322,6 +362,7 @@ class tlist(TransientSequence):
             raise IndexError(f"{type(self)} assignment index out of range")
         elif index < 0:
             index += n
+        self._changed()
         if n - index <= index:
             for ii in range(index + st, n + st - 1):
                 th[ii] = th[ii + 1]
@@ -331,20 +372,21 @@ class tlist(TransientSequence):
                 th[ii] = th[ii - 1]
             del th[st]
             self._start += 1
-        object.__setattr__(self, '_orig', None)
+    @updating
     def append(self, obj):
         """Appends object to the end of the list."""
         thamt = self._thamt
         n = len(thamt)
+        self._changed()
         thamt[n + self._start] = obj
-        object.__setattr__(self, '_orig', None)
+    @updating
     def prepend(self, obj):
         """Prepends object to the beginning of the tlist."""
         thamt = self._thamt
-        n = len(thamt)
+        self._changed()
         self._start -= 1
         thamt[self._start] = obj
-        object.__setattr__(self, '_orig', None)
+    @updating
     def insert(self, index, obj):
         """Inserts the given object before the given index."""
         st = self._start
@@ -353,6 +395,7 @@ class tlist(TransientSequence):
         if   index < -n: index = -n
         elif index > n:  index = n
         if   index < 0:  index += n
+        self._changed()
         if n - index <= index:
             for ii in range(n + st, index + st, -1):
                 th[ii] = th[ii - 1]
@@ -362,4 +405,3 @@ class tlist(TransientSequence):
                 th[ii] = th[ii + 1]
             self._start -= 1
             th[index + self._start] = obj
-        object.__setattr__(self, '_orig', None)

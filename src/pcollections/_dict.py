@@ -31,6 +31,13 @@ from .abc import (
     PersistentMapping,
     TransientMapping
 )
+from ._guard import (
+    TransientIter,
+    new_busy_flag,
+    begin_update,
+    end_update,
+    changed_during_lookup
+)
 
 
 #===============================================================================
@@ -142,12 +149,10 @@ class pdict(PersistentMapping):
             if isinstance(arg, Sized) and len(arg) == 0:
                 return cls.empty
             elif isinstance(arg, tdict):
-                return cls._new(
-                    arg._els.persistent(),
-                    arg._idx.persistent(),
-                    arg._top,
-                    arg._count,
-                    arg._ndeleted)
+                (els, idx, top, count, ndeleted, _) = arg._snapshot()
+                if count == 0:
+                    return cls.empty
+                return cls._new(els, idx, top, count, ndeleted)
             elif type(arg) is cls:
                 # Also, if it's already the right type, we can just return it
                 # as-is.
@@ -374,29 +379,15 @@ pdict.empty = pdict._new(FAT.empty, AMT.empty, 0, 0, 0)
 # The transient set type.
 
 class tdict_view(Set):
-    def _iter(self, arg):
-        if self._tdict._version > self._version:
-            raise RuntimeError(f"{type(self)} changed during iteration")
-        else:
-            return self._from_kv(arg[1])
     def __new__(cls, d):
         if not isinstance(d, tdict):
             raise ValueError("can only make tdict_keys object from tdict")
         sup = super(tdict_view,cls)
         obj = sup.__new__(cls)
         sup.__setattr__(obj, '_tdict', d)
-        sup.__setattr__(obj, '_version', d._version)
         return obj
     def __iter__(self):
-        v0 = self._version
-        def _gen():
-            for (_ii, (kv, _next)) in self._tdict._els:
-                if self._tdict._version > v0:
-                    raise RuntimeError(f"{type(self)} changed during iteration")
-                if is_tombstone(kv):
-                    continue
-                yield self._from_kv(kv)
-        return _gen()
+        return TransientIter(self._tdict, self._from_kv)
     def __reversed__(self):
         return reversed(list(self.__iter__()))
     def __len__(self):
@@ -408,13 +399,13 @@ class tdict_view(Set):
     def __contains__(self, arg):
         raise NotImplementedError()
 class tdict_keys(KeysView, tdict_view):
-    __slots__ = ('_tdict', '_version')
+    __slots__ = ('_tdict',)
     def _from_kv(self, arg):
         return arg[0]
     def __contains__(self, k):
         return (k in self._tdict)
 class tdict_items(ItemsView, tdict_view):
-    __slots__ = ('_tdict', '_version')
+    __slots__ = ('_tdict',)
     def _from_kv(self, arg):
         return arg
     def __contains__(self, kv):
@@ -423,14 +414,12 @@ class tdict_items(ItemsView, tdict_view):
         d = Ellipsis if kv[1] is None else None
         return self._tdict.get(kv[0], d) == kv[1]
 class tdict_values(ValuesView, tdict_view):
-    __slots__ = ('_tdict', '_version')
+    __slots__ = ('_tdict',)
     def _from_kv(self, arg):
         return arg[1]
     def __contains__(self, v):
-        for (_ii, (kv, _next)) in self._tdict._els:
-            if is_tombstone(kv):
-                continue
-            if kv[1] == v:
+        for x in self:
+            if x is v or x == v:
                 return True
         return False
 class tdict(TransientMapping):
@@ -459,6 +448,8 @@ class tdict(TransientMapping):
         object.__setattr__(new_tdict, '_count', count)
         object.__setattr__(new_tdict, '_ndeleted', ndeleted)
         object.__setattr__(new_tdict, '_version', 0)
+        object.__setattr__(new_tdict, '_kversion', 0)
+        object.__setattr__(new_tdict, '_busy', new_busy_flag())
         object.__setattr__(new_tdict, '_orig', orig)
         return new_tdict
     @classmethod
@@ -466,7 +457,7 @@ class tdict(TransientMapping):
         """Returns an empty tdict."""
         return cls._new(TFAT(FAT.empty), TAMT(AMT.empty), 0, 0, 0)
     __slots__ = ("_els", "_idx", "_top", "_count", "_ndeleted", "_version",
-                "_orig")
+                 "_kversion", "_busy", "_orig")
     def __new__(cls, *args, **kw):
         n = len(args)
         if n == 1:
@@ -481,12 +472,8 @@ class tdict(TransientMapping):
             raise TypeError(f"pdict expects at most 1 argument, got {n}")
         # If arg is a tdict or pdict, this is a special case.
         if type(arg) is tdict:
-            obj = cls._new(TFAT(arg._els.persistent()),
-                           TAMT(arg._idx.persistent()),
-                           arg._top,
-                           arg._count,
-                           arg._ndeleted,
-                           arg._orig)
+            (els, idx, top, count, ndeleted, orig) = arg._snapshot()
+            obj = cls._new(TFAT(els), TAMT(idx), top, count, ndeleted, orig)
         elif type(arg) is pdict:
             obj = cls._new(TFAT(arg._els), TAMT(arg._idx), arg._top,
                            arg._count, arg._ndeleted, arg)
@@ -503,123 +490,120 @@ class tdict(TransientMapping):
         return obj
     def __setattr__(self, k, v):
         raise TypeError("tdict attributes are immutable")
-    def __setitem__(self, k, v):
-        # Get the hash and initial index (if there is one).
-        h = hash(k)
-        ii = self._idx.get(h, None)
-        # First make sure it's not already in the dict.
-        ii_prev = None
-        while ii is not None:
-            (kv, ii_next) = self._els[ii]
-            if kv[0] == k:
-                if kv[1] is not v:
-                    self._els[ii] = ((k,v), ii_next)
-                    # The object has changed, so make sure we aren't tracking
-                    # the original object still.
-                    object.__setattr__(self, '_orig', None)
-                # Note that this does not mandate a version update because it is
-                # not changing the keys.
-                return None
-            ii_prev = ii
-            kv_prev = kv
-            ii = ii_next
-        if ii_prev is None:
-            # The object's hash is not here yet, so we can append to els and
-            # insert it into idx.
-            self._els[self._top] = ((k,v), None)
-            self._idx[h] = self._top
-        else:
-            # If we reach this point, we can add the object to the end of the
-            # list.
-            self._els[self._top] = ((k,v), None)
-            self._els[ii_prev] = (kv_prev, self._top)
-        object.__setattr__(self, '_top', self._top + 1)
-        object.__setattr__(self, '_count', self._count + 1)
+    def _changed(self, keys):
         object.__setattr__(self, '_version', self._version + 1)
+        if keys:
+            object.__setattr__(self, '_kversion', self._kversion + 1)
         object.__setattr__(self, '_orig', None)
+    def _chain(self, h, key):
+        """Walks the collision chain for `key`, whose hash is `h`.
+
+        Returns `(ii, kv, ii_next, ii_prev, kv_prev)`: the matching entry's
+        index, `(key, value)` pair, and next link, and the previous entry's
+        index and pair (`None` if the match heads the chain). If `key` is
+        absent, `ii` is `None` and `ii_prev`/`kv_prev` name the chain's last
+        entry. Raises `RuntimeError` if the tdict changes during a key
+        comparison.
+        """
+        v = self._version
+        if v & 1:
+            changed_during_lookup(self)
+        try:
+            ii = self._idx.get(h, None)
+        except (LookupError, TypeError):
+            # Another thread changed the collection as we read it.
+            if self._version == v:
+                raise
+            changed_during_lookup(self)
+        ii_prev = kv_prev = None
+        while ii is not None:
+            try:
+                (kv, ii_next) = self._els[ii]
+                k = kv[0]
+            except (LookupError, TypeError):
+                # Another thread changed the tdict as we read it.
+                if self._version == v:
+                    raise
+                changed_during_lookup(self)
+            eq = k is key or bool(key == k)
+            if self._version != v:
+                changed_during_lookup(self)
+            if eq:
+                return (ii, kv, ii_next, ii_prev, kv_prev)
+            (ii_prev, kv_prev, ii) = (ii, kv, ii_next)
+        return (None, None, None, ii_prev, kv_prev)
+    def __setitem__(self, k, v):
+        h = hash(k)
+        begin_update(self)
+        try:
+            self._setitem(h, k, v)
+        finally:
+            end_update(self)
+    def _setitem(self, h, k, v):
+        (ii, kv, ii_next, ii_prev, kv_prev) = self._chain(h, k)
+        if ii is not None:
+            if kv[1] is not v:
+                self._changed(False)
+                self._els[ii] = ((kv[0], v), ii_next)
+            return None
+        self._changed(True)
+        top = self._top
+        self._els[top] = ((k,v), None)
+        if ii_prev is None:
+            # The hash is new: start a chain.
+            self._idx[h] = top
+        else:
+            # Add the entry to the end of the chain.
+            self._els[ii_prev] = (kv_prev, top)
+        object.__setattr__(self, '_top', top + 1)
+        object.__setattr__(self, '_count', self._count + 1)
     def __len__(self):
         return self._count
     def __contains__(self, k):
-        h = hash(k)
-        ii = self._idx.get(h, None)
-        while ii is not None:
-            ((kk,vv),ii) = self._els[ii]
-            if k == kk:
-                return True
-        return False
+        return self._chain(hash(k), k)[0] is not None
     def __reversed__(self):
         return reversed(self.keys())
     def __getitem__(self, key):
-        h = hash(key)
-        ii = self._idx.get(h, None)
-        while ii is not None:
-            (kv,ii) = self._els[ii]
-            if key == kv[0]:
-                return kv[1]
-        raise KeyError(key)
+        (ii, kv) = self._chain(hash(key), key)[:2]
+        if ii is None:
+            raise KeyError(key)
+        return kv[1]
     def get(self, key, default=None):
-        h = hash(key)
-        ii = self._idx.get(h, None)
-        while ii is not None:
-            (kv,ii) = self._els[ii]
-            if key == kv[0]:
-                return kv[1]
-        return default
+        (ii, kv) = self._chain(hash(key), key)[:2]
+        return default if ii is None else kv[1]
     def __iter__(self):
-        v0 = self._version
-        def _gen():
-            for (_ii, (kv, _next)) in self._els:
-                if v0 < self._version:
-                    raise RuntimeError(f"{type(self)} changed during iteration")
-                if is_tombstone(kv):
-                    continue
-                yield kv[0]
-        return _gen()
+        return TransientIter(self, _kv_key)
+    def _remove(self, h, ii, ii_next, ii_prev, kv_prev):
+        # Unlinks and tombstones entry ii. (See pdict.drop()'s comment on
+        # tombstoning.)
+        self._changed(True)
+        if ii_prev is None:
+            # We're removing from the front of the chain.
+            if ii_next is None:
+                del self._idx[h]
+            else:
+                self._idx[h] = ii_next
+        else:
+            # We're removing from the end or the middle.
+            self._els[ii_prev] = (kv_prev, ii_next)
+        self._els[ii] = (TOMBSTONE, None)
+        object.__setattr__(self, '_count', self._count - 1)
+        object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
+        self._maybe_compact()
     def __delitem__(self, key):
-        # Get the hash and initial index (if there is one).
-        h = hash(key)
-        ii = self._idx.get(h, None)
-        # First make sure it's not already in the set.
-        ii_prev = None
-        kv_prev = None
-        while ii is not None:
-            (kv,ii_next) = self._els[ii]
-            (k,v) = kv
-            if key == k:
-                # We remove this entry! (See pdict.drop()'s comment on
-                # tombstoning.)
-                if ii_prev is None:
-                    # We're removing from the front of the list.
-                    if ii_next is None:
-                        del self._idx[h]
-                    else:
-                        self._idx[h] = ii_next
-                else:
-                    # We're removing from the end or the middle.
-                    self._els[ii_prev] = (kv_prev, ii_next)
-                self._els[ii] = (TOMBSTONE, None)
-                object.__setattr__(self, '_count', self._count - 1)
-                object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
-                object.__setattr__(self, '_version', self._version + 1)
-                object.__setattr__(self, '_orig', None)
-                self._maybe_compact()
-                return None
-            ii_prev = ii
-            kv_prev = kv
-            ii = ii_next
-        # If we reach this point, then obj isn't in the set, so we just return
-        # self unchanged.
-        raise KeyError(key)
+        self.pop(key)
     def clear(self):
-        """Returns the empty pdict."""
-        object.__setattr__(self, '_els', TFAT(FAT.empty))
-        object.__setattr__(self, '_idx', TAMT(AMT.empty))
-        object.__setattr__(self, '_top', 0)
-        object.__setattr__(self, '_count', 0)
-        object.__setattr__(self, '_ndeleted', 0)
-        object.__setattr__(self, '_version', self._version + 1)
-        object.__setattr__(self, '_orig', None)
-        return None
+        """Clears the tdict."""
+        begin_update(self)
+        try:
+            self._changed(True)
+            object.__setattr__(self, '_els', TFAT(FAT.empty))
+            object.__setattr__(self, '_idx', TAMT(AMT.empty))
+            object.__setattr__(self, '_top', 0)
+            object.__setattr__(self, '_count', 0)
+            object.__setattr__(self, '_ndeleted', 0)
+        finally:
+            end_update(self)
     def _maybe_compact(self):
         if should_compact(self._count, self._ndeleted):
             new_els, new_idx, new_top = _compact_els(self._els)
@@ -638,49 +622,39 @@ class tdict(TransientMapping):
         if nargs > 1:
             raise TypeError(f"pop expected at most 2 arguments, got {nargs}")
         h = hash(key)
-        ii = self._idx.get(h, None)
-        ii_prev = None
-        kv_prev = None
-        while ii is not None:
-            (kv,ii_next) = self._els[ii]
-            (k,v) = kv
-            if key == k:
-                # We remove this entry! (See pdict.drop()'s comment on
-                # tombstoning.)
-                if ii_prev is None:
-                    if ii_next is None:
-                        del self._idx[h]
-                    else:
-                        self._idx[h] = ii_next
-                else:
-                    self._els[ii_prev] = (kv_prev, ii_next)
-                self._els[ii] = (TOMBSTONE, None)
-                object.__setattr__(self, '_count', self._count - 1)
-                object.__setattr__(self, '_ndeleted', self._ndeleted + 1)
-                object.__setattr__(self, '_version', self._version + 1)
-                object.__setattr__(self, '_orig', None)
-                self._maybe_compact()
-                return v
-            ii_prev = ii
-            kv_prev = kv
-            ii = ii_next
-        # It's not here!
-        if nargs == 0:
+        begin_update(self)
+        try:
+            (ii, kv, ii_next, ii_prev, kv_prev) = self._chain(h, key)
+            if ii is not None:
+                self._remove(h, ii, ii_next, ii_prev, kv_prev)
+        finally:
+            end_update(self)
+        if ii is not None:
+            return kv[1]
+        elif nargs == 0:
             raise KeyError(key)
         else:
             return args[0]
+    def _snapshot(self):
+        """Returns `(els, idx, top, count, ndeleted, orig)`, with the tries
+        frozen, for sharing with another collection."""
+        begin_update(self, False)
+        try:
+            return (self._els.persistent(), self._idx.persistent(),
+                    self._top, self._count, self._ndeleted, self._orig)
+        finally:
+            end_update(self)
+    def _persistent_as(self, cls):
+        (els, idx, top, count, ndeleted, orig) = self._snapshot()
+        if count == 0:
+            return cls.empty
+        elif orig is not None:
+            return orig
+        else:
+            return cls._new(els, idx, top, count, ndeleted)
     def persistent(self):
         """Efficiently returns a persistent (pdict) copy of the tdict."""
-        if len(self) == 0:
-            return pdict.empty
-        elif self._orig is not None:
-            return self._orig
-        else:
-            return pdict._new(self._els.persistent(),
-                              self._idx.persistent(),
-                              self._top,
-                              self._count,
-                              self._ndeleted)
+        return self._persistent_as(pdict)
     def keys(self):
         return tdict_keys(self)
     def items(self):
@@ -696,6 +670,9 @@ class tdict(TransientMapping):
 # Implemented by simply replaying every live (key, val) pair, in original
 # order, through tdict.__setitem__'s already-correct chain-building logic,
 # rather than duplicating that logic a second time here.
+
+def _kv_key(kv):
+    return kv[0]
 
 def _compact_els(els):
     t = tdict.empty()

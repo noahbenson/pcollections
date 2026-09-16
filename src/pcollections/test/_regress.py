@@ -135,7 +135,6 @@ class _RegressionTests:
     # tdict/tset behave like dict/set: a size change during iteration raises
     # RuntimeError on the next step. tlist behaves like list: iteration is by
     # index, never raises, and stops when the index reaches the length.
-    @known_failure('c')
     def test_tdict_delete_during_iteration(self):
         self.run_scenario("""
             for view in ('keys', 'items', 'values'):
@@ -150,7 +149,6 @@ class _RegressionTests:
             print('ok')
         """)
 
-    @known_failure('c')
     def test_tdict_clear_with_live_iterator(self):
         self.run_scenario("""
             t = tdict((k, k) for k in range(2000))
@@ -165,7 +163,6 @@ class _RegressionTests:
                 print('ok')
         """)
 
-    @known_failure('c', 'python')
     def test_tset_churn_during_iteration(self):
         self.run_scenario("""
             s = tset(range(2000))
@@ -177,7 +174,6 @@ class _RegressionTests:
                 print('ok')
         """)
 
-    @known_failure('c', 'python')
     def test_tlist_mutation_during_iteration_is_list_like(self):
         self.run_scenario("""
             def run(make):
@@ -202,41 +198,129 @@ class _RegressionTests:
     # User code that runs during a lookup must not be able to corrupt the
     # transient. A mutation from inside such code (or one that lands between
     # the lookup's steps) raises RuntimeError instead.
-    @known_failure('c', 'python')
     def test_reentrant_key_eq(self):
         self.run_scenario("""
             class Key:
                 box = None
+                armed = False
                 def __init__(self, v):
                     self.v = v
                 def __hash__(self):
                     return 7
                 def __eq__(self, other):
                     t = Key.box
-                    if len(t):
+                    if Key.armed and len(t):
+                        Key.armed = False
                         t.clear()
                         for i in range(200):
                             if isinstance(t, tdict):
                                 t[('f', i)] = i
                             else:
                                 t.add(('f', i))
-                    return False
-            for make in (tdict, tset):
+                    return self is other
+            def fill(make):
+                Key.armed = False
                 t = make()
                 Key.box = t
-                for i in range(20):
-                    k = Key(i)
+                keys = [Key(i) for i in range(20)]
+                for k in keys:
                     if make is tdict:
-                        t[k] = i
+                        t[k] = k.v
                     else:
                         t.add(k)
-                raised = 0
-                for i in range(20):
+                return t, keys
+            def lookups(t):
+                yield lambda: Key(100) in t
+                if isinstance(t, tdict):
+                    yield lambda: t[Key(100)]
+                    yield lambda: t.get(Key(100))
+                    yield lambda: t.__setitem__(Key(100), 0)
+                    yield lambda: t.pop(Key(100), None)
+                else:
+                    yield lambda: t.add(Key(100))
+                    yield lambda: t.discard(Key(100))
+            for make in (tdict, tset):
+                t, _ = fill(make)
+                for i, op in enumerate(list(lookups(t))):
+                    t, keys = fill(make)
+                    op = list(lookups(t))[i]
+                    Key.armed = True
                     try:
-                        Key(100 + i) in t
+                        op()
                     except RuntimeError:
-                        raised += 1
-                assert raised == 20, (make, raised)
+                        pass
+                    else:
+                        raise AssertionError((make, i, 'no RuntimeError'))
+                    # The collection is still usable and self-consistent.
+                    items = list(t)
+                    assert len(items) == len(t), (make, i)
+                    for x in items:
+                        assert x in t, (make, i, x)
+                    t.clear()
+                    assert len(t) == 0 and list(t) == []
+            print('ok')
+        """)
+
+    # Values replaced during iteration ---------------------------------------
+    # Like dict, replacing values while iterating over a tdict is allowed; the
+    # iterator must find its place again after the trie changes underneath.
+    def test_tdict_value_updates_during_iteration(self):
+        self.run_scenario("""
+            for n in (5, 30, 1000, 3000):
+                t = tdict((k, k) for k in range(n))
+                p = t.persistent()   # later writes must copy shared nodes
+                seen = []
+                for k in t:
+                    seen.append(k)
+                    t[k] = [k]
+                    t[(k * 7) % n] = -k
+                assert seen == list(range(n)), n
+                del p
+                seen = [v for v in t.values()]
+                assert len(seen) == n
+            print('ok')
+        """)
+
+    # Use of a transient during its own modification ------------------------
+    # A __del__ that runs while a transient is being modified sees a
+    # consistent collection, and modifying it from there raises.
+    def test_transient_use_from_del_during_update(self):
+        self.run_scenario("""
+            import sys
+            errors = []
+            sys.unraisablehook = lambda u: errors.append(u.exc_type)
+            class Noisy:
+                box = None
+                def __del__(self):
+                    t = Noisy.box
+                    list(t)
+                    len(t)
+                    if isinstance(t, tdict):
+                        t['x'] = 1
+                    elif isinstance(t, tset):
+                        t.add('x')
+                    else:
+                        t.append('x')
+            for make in (tdict, tset, tlist):
+                t = make()
+                Noisy.box = t
+                for i in range(50):
+                    if make is tdict:
+                        t[i] = Noisy()
+                    elif make is tset:
+                        t.add(Noisy())
+                    else:
+                        t.append(Noisy())
+                if make is tdict:
+                    for i in range(50):
+                        t[i] = i
+                elif make is tset:
+                    for x in list(t):
+                        t.discard(x)
+                else:
+                    for i in range(50):
+                        t[i] = i
+            assert errors and set(errors) == {RuntimeError}, errors
             print('ok')
         """)
 

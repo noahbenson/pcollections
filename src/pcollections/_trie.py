@@ -347,6 +347,34 @@ def _iter_node(node):
             bitmap >>= 1
 
 
+def _iter_node_from(node, key):
+    """Yields the (key, value) pairs beneath `node` whose normalized key is at
+    least `key`, in ascending order. Mirrors fat_seekpath() in _c/trie.h."""
+    if not _prefix_match(node.depth, node.prefix, key):
+        # Everything beneath the node is either after the key or before it.
+        if key < node.prefix:
+            yield from _iter_node(node)
+        return
+    if node.depth == MAX_DEPTH:
+        for kv in _iter_node(node):
+            if kv[0] >= key:
+                yield kv
+        return
+    target = _bitindex(node.depth, key)
+    bitmap = node.bitmap
+    ci = 0
+    bi = 0
+    while bitmap:
+        if bitmap & 1:
+            if bi == target:
+                yield from _iter_node_from(node.cells[ci], key)
+            elif bi > target:
+                yield from _iter_node(node.cells[ci])
+            ci += 1
+        bitmap >>= 1
+        bi += 1
+
+
 #===============================================================================
 # Non-mutating (copy-and-modify) node primitives.
 # Mirror amt_and()/amt_but() in _c/amt.h: never touch their input, always
@@ -735,6 +763,11 @@ class TAMT:
 
     def __iter__(self):
         return _iter_node(self._root)
+
+    def iter_from(self, key):
+        """Iterates over the (key, value) pairs whose key is at least `key`.
+        Like iteration, this must not be interleaved with changes."""
+        return _iter_node_from(self._root, self._normalize_key(key))
 
     def persistent(self):
         """Efficiently returns a persistent (AMT) copy of this TAMT.

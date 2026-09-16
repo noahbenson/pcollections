@@ -37,6 +37,7 @@ from . import _regress
 from . import _interp
 from . import _pickle
 from . import _gc
+from . import _threads
 
 
 def suite():
@@ -52,7 +53,8 @@ class _TestModuleNamespace:
     `_dict`, `_list`, `_set`, `_parity`, and `_trie` as an attribute, so
     `TestLoader.loadTestsFromModule` can find them all at once."""
     def __init__(self):
-        for mod in (_dict, _list, _set, _parity, _trie, _regress, _interp, _pickle, _gc):
+        for mod in (_dict, _list, _set, _parity, _trie, _regress, _interp, _pickle, _gc,
+                    _threads):
             for (name, val) in vars(mod).items():
                 if isinstance(val, type) and name.startswith('Test'):
                     setattr(self, name, val)

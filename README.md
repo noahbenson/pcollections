@@ -39,6 +39,21 @@ more efficient batch-mutation of the persistent types. The transient types
 `tlist`, `tset`, `tdict`, `tllist`, and `tldict` all have interfaces equivalent
 to their standard mutable correlaries (transient types are mutable).
 
+### Threads
+
+The persistent types can be shared freely between threads, including on
+free-threaded ("no-GIL") builds of Python, which `pcollections` supports.
+
+The transient types are meant to be used by one thread at a time, like the
+builtin `list`, `set`, and `dict`. They are not corrupted if that rule is
+broken: a modification that overlaps another modification of the same
+transient (from another thread, or from code such as a key's `__eq__` that runs
+during the modification) raises `RuntimeError`, as does a lookup whose
+transient changes during a key comparison. As with `dict` and `set`, changing
+the keys of a `tdict` or `tset` while iterating over it raises `RuntimeError`;
+iterating over a `tlist` while changing it behaves like iterating over a
+`list`.
+
 
 ## License
 
