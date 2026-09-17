@@ -67,8 +67,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      # cibuildwheel 4 builds wheels for Python 3.9 and later; version 3.4,
-      # the last to support Python 3.8, builds the 3.8 wheels.
+      # cibuildwheel 4 builds wheels for Python 3.9 and later (the `build`
+      # selector in pyproject.toml); version 3.4, the last to support Python
+      # 3.8, builds the 3.8 wheels (CIBW_BUILD overrides `build`).
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2
       - name: Build wheels (Python 3.8)

@@ -61,8 +61,12 @@ changelog = "https://nben.net/pcollections/changelog.html"
 # only, 64-bit only, including the free-threaded 3.14 and 3.15 builds.
 # .github/workflows/deploy.yml checks the full set of wheels
 # (tools/check_dists.py) before publishing.
+#
+# cibuildwheel 4 rejects Python 3.8 selectors, so `build` leaves out cp38;
+# the workflow builds the 3.8 wheels with cibuildwheel 3.4, setting
+# CIBW_BUILD=cp38-* (which overrides `build`).
 [tool.cibuildwheel]
-build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
+build = "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
 skip = "*_i686 *-win32"
 # A wheel whose C extension doesn't compile fails to build.
 environment = { PCOLLECTIONS_REQUIRE_C = "1" }
