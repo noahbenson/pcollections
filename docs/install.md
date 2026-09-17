@@ -87,7 +87,10 @@ interpreters with their own GIL (Python 3.12 and later). As with any Python
 objects, a `pcollections` object belongs to the interpreter that created it.
 (Python 3.12 itself can corrupt memory when several threads create and
 destroy subinterpreters at the same time, whether or not they use
-`pcollections`; Python 3.13 and later don't.)
+`pcollections`; Python 3.13 and later don't. On the free-threaded build of
+Python 3.14 for musl-based Linux, such as Alpine, listing a directory, and so
+importing a module, can fail with `BlockingIOError` while several threads
+run subinterpreters, again whether or not they use `pcollections`.)
 
 ```{warning}
 On Python 3.8, only the first interpreter in a process that imports

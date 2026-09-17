@@ -22,8 +22,17 @@ subinterpreter falls back to the pure-Python backend there.
 import os
 import subprocess
 import sys
+import sysconfig
 import textwrap
 import unittest
+
+# True for a free-threaded CPython built against musl (as in musllinux
+# wheels). There, os.listdir() (and so importing) intermittently fails with
+# BlockingIOError (EAGAIN) while several threads run subinterpreters, whether
+# or not they use pcollections.
+_FREE_THREADED_MUSL = (
+    bool(sysconfig.get_config_var('Py_GIL_DISABLED'))
+    and 'musl' in (sysconfig.get_config_var('EXT_SUFFIX') or ''))
 
 _PKG_PARENT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
@@ -161,8 +170,13 @@ class TestSubinterpreters(unittest.TestCase):
     # threads at once corrupts memory inside CPython (in the import system
     # and the collector, with or without pcollections), so this test only
     # runs on other versions.
+    # On free-threaded builds that use musl, CPython itself fails
+    # intermittently in this test (see _FREE_THREADED_MUSL).
     @unittest.skipIf(sys.version_info[:2] == (3, 12),
                      "concurrent subinterpreters are unreliable in Python 3.12")
+    @unittest.skipIf(_FREE_THREADED_MUSL,
+                     "concurrent subinterpreters are unreliable in"
+                     " free-threaded Python with musl")
     def test_concurrent_subinterpreters(self):
         # Several threads, each running its own interpreters, at once.
         self.run_script("""
